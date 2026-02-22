@@ -1,9 +1,9 @@
 [project]
 name = "snippy-scales"
 version = "0.1.0"
-description = "Modular Python–Rust algorithmic trading platform"
+description = "Modular Python-Rust algorithmic trading platform"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "typer>=0.12",
     "rich>=13",

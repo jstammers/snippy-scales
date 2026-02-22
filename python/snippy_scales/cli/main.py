@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 from rich.console import Console
+
 from snippy_scales.cli import backtest, data, research
 
 app = typer.Typer(name="algo", help="SnippyScales platform CLI.", rich_markup_mode="rich")
