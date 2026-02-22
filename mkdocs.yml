@@ -1,0 +1,43 @@
+site_name: SnippyScales
+site_description: Modular Python–Rust quantitative trading platform
+repo_url: https://github.com/yourorg/snippy-scales
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+  features:
+    - navigation.tabs
+    - navigation.expand
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - admonition
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Event-Driven Engine: architecture/backtest_engine.md
+      - Python–Rust Bridge: architecture/pyo3_bridge.md
+  - Guides:
+      - Quickstart: guides/quickstart.md
+      - Adding a Strategy: guides/adding_strategy.md
+      - Data Ingestion: guides/data_ingestion.md
+  - API Reference:
+      - Python: api/python.md
+      - Rust: rust-api/algo_core/index.html

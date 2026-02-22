@@ -1,0 +1,18 @@
+[package]
+name = "algo-pyo3"
+description = "PyO3 bindings exposing algo-core to Python"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "algo_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+algo-core = { path = "../algo-core" }
+pyo3.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+
+[features]
+default = []

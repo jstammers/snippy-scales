@@ -1,0 +1,95 @@
+# prek.toml — git hook configuration for the SnippyScales repo.
+# prek is a Rust-native drop-in replacement for pre-commit.
+#
+# Install:  curl --proto '=https' --tlsv1.2 -LsSf \
+#             https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+# Activate: prek install
+# Run all:  prek run --all-files
+
+minimum_prek_version = "0.3.0"
+
+# Install both pre-commit and commit-msg hooks automatically.
+default_install_hook_types = ["pre-commit", "commit-msg"]
+
+# ── Standard file-integrity checks (built-in Rust implementations in prek) ──
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev  = "v5.0.0"
+hooks = [
+  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "check-case-conflict" },
+  { id = "check-merge-conflict" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "end-of-file-fixer" },
+  { id = "trailing-whitespace" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+]
+
+# ── Python: ruff lint + format ────────────────────────────────────────────────
+[[repos]]
+repo  = "https://github.com/astral-sh/ruff-pre-commit"
+rev   = "v0.9.0"
+hooks = [
+  # Linter — fixes safe auto-fixable issues before the formatter runs.
+  { id = "ruff", args = ["check", "--fix"], types_or = ["python", "pyi"] },
+  # Formatter — must come AFTER the linter so fixed code is also formatted.
+  { id = "ruff", args = ["format"], types_or = ["python", "pyi"] },
+]
+
+# ── uv lockfile sync ─────────────────────────────────────────────────────────
+# Keeps uv.lock consistent with pyproject.toml on every commit.
+[[repos]]
+repo  = "https://github.com/astral-sh/uv-pre-commit"
+rev   = "0.6.0"
+hooks = [
+  { id = "uv-lock" },
+]
+
+# ── Rust: fmt + clippy ────────────────────────────────────────────────────────
+[[repos]]
+repo  = "https://github.com/doublify/pre-commit-rust"
+rev   = "v1.0"
+hooks = [
+  # Check formatting — does NOT auto-fix; developers must run `cargo fmt` themselves.
+  { id = "fmt", args = ["--manifest-path", "rust/Cargo.toml", "--", "--check"] },
+  # Lint — deny warnings so CI and local hooks are in sync.
+  { id = "clippy", args = ["--manifest-path", "rust/Cargo.toml", "--workspace", "--", "-D", "warnings"] },
+]
+
+# ── Secrets scanner ───────────────────────────────────────────────────────────
+[[repos]]
+repo  = "https://github.com/gitleaks/gitleaks"
+rev   = "v8.21.2"
+hooks = [
+  { id = "gitleaks" },
+]
+
+# ── Conventional commit message enforcement ───────────────────────────────────
+# Runs at the commit-msg stage; validates each commit message follows
+# Conventional Commits (https://www.conventionalcommits.org/).
+# Allowed types align with the git-cliff commit_parsers in cliff.toml.
+[[repos]]
+repo  = "https://github.com/compilerla/conventional-pre-commit"
+rev   = "v3.6.0"
+hooks = [
+  {
+    id     = "conventional-pre-commit",
+    stages = ["commit-msg"],
+    args   = [
+      "--strict",
+      # Types that map to changelog sections in cliff.toml:
+      "feat",    # → Features  (semver minor bump)
+      "fix",     # → Bug Fixes (semver patch bump)
+      "perf",    # → Performance
+      "refactor",# → Refactor
+      "revert",  # → Reverts
+      "docs",    # → Documentation
+      "style",   # → Styling
+      "test",    # → Testing
+      "build",   # → Build System
+      "ci",      # → CI/CD
+      "chore",   # → Chores (skipped in changelog)
+    ],
+  },
+]

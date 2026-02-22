@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Rust
+target/
+Cargo.lock
+
+# Data (never commit raw market data)
+data/raw/
+data/derived/
+data/cache/
+*.parquet
+*.dbn
+
+# Misc
+.DS_Store
+*.env
+.env.*
+!.env.example

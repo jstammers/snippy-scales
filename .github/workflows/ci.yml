@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── prek pre-commit hooks (fast gate, runs before everything else) ──────────
+  prek:
+    name: prek hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install prek
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+          echo "$HOME/.prek/bin" >> "$GITHUB_PATH"
+
+      - name: Install uv (needed by prek for Python hook envs)
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Rust (needed for Rust hooks)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Run all pre-commit hooks on changed files
+        # In CI we run against all files so nothing slips through.
+        run: prek run --all-files
+
+  # ── Python lint + type-check ────────────────────────────────────────────────
+  python-lint:
+    name: Python — ruff + ty
+    runs-on: ubuntu-latest
+    needs: prek
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install Python deps
+        run: uv sync --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: ty type check
+        run: uv run ty check
+
+  # ── Python tests ─────────────────────────────────────────────────────────────
+  python-test:
+    name: Python — pytest
+    runs-on: ubuntu-latest
+    needs: python-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install Python deps (includes maturin)
+        run: uv sync --all-extras
+
+      - name: Build Rust extension (dev)
+        run: uv run maturin develop
+
+      - name: Run pytest
+        run: uv run pytest --cov=snippy_scales --cov-report=xml -q
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ── Rust lint + test ─────────────────────────────────────────────────────────
+  rust:
+    name: Rust — clippy + test
+    runs-on: ubuntu-latest
+    needs: prek
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: rustfmt check
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  # ── Benchmarks (informational, no fail) ──────────────────────────────────────
+  rust-bench:
+    name: Rust — benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Run criterion benchmarks
+        run: cargo bench --manifest-path rust/Cargo.toml --workspace -- --output-format=bencher | tee bench_output.txt
+
+  # ── Build Python wheel (check only) ──────────────────────────────────────────
+  build-wheel:
+    name: Build — maturin wheel
+    runs-on: ubuntu-latest
+    needs: [python-lint, rust]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - name: Build wheel
+        run: uv run maturin build --release

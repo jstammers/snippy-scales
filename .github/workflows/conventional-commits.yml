@@ -1,0 +1,67 @@
+name: Conventional Commits
+
+# Validates that every commit in a PR follows Conventional Commits so that
+# git-cliff can always generate a clean changelog.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  commitlint:
+    name: Lint commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch enough history to see all PR commits.
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Check all PR commits are conventional
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          echo "Checking commits $BASE..$HEAD"
+
+          ALLOWED="feat|fix|perf|refactor|revert|docs|style|test|build|ci|chore"
+          PATTERN="^(${ALLOWED})(\([a-z0-9/_, -]+\))?(!)?: .{1,100}"
+
+          FAILED=0
+          while IFS= read -r MSG; do
+            # Skip merge commits
+            if echo "$MSG" | grep -q "^Merge "; then
+              continue
+            fi
+            if ! echo "$MSG" | grep -Eq "$PATTERN"; then
+              echo "❌ Non-conventional commit: $MSG"
+              FAILED=1
+            else
+              echo "✅ $MSG"
+            fi
+          done < <(git log --format="%s" "$BASE".."$HEAD")
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "All commit messages must follow Conventional Commits:"
+            echo "  <type>(<scope>): <subject>"
+            echo "  <type>!: <subject>   ← breaking change"
+            echo ""
+            echo "Allowed types: feat, fix, perf, refactor, revert,"
+            echo "               docs, style, test, build, ci, chore"
+            echo ""
+            echo "Examples:"
+            echo "  feat(backtest): add vol-adjusted slippage model"
+            echo "  fix(execution): correct risk limit notional calculation"
+            echo "  feat!: redesign Portfolio API (breaking)"
+            exit 1
+          fi
+
+      - name: Preview changelog for this PR
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "--- Changelog preview for this PR ---"
+          git cliff "$BASE".."$HEAD" --tag "next" 2>/dev/null || true

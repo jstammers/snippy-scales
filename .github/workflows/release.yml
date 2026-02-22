@@ -1,0 +1,128 @@
+name: Release
+
+# Triggered manually via the GitHub Actions UI.
+# Inputs: the new semver tag (e.g. v1.2.0) and whether this is a pre-release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Semver tag to release (e.g. v1.2.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release?"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ── 1. Validate the tag format ─────────────────────────────────────────────
+  validate:
+    name: Validate semver tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tag format
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "❌ Tag '$TAG' does not follow semver (vMAJOR.MINOR.PATCH)"
+            exit 1
+          fi
+          echo "✅ Tag '$TAG' is valid semver"
+
+  # ── 2. Generate the changelog and open a PR ────────────────────────────────
+  changelog:
+    name: Generate changelog
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      changelog_body: ${{ steps.cliff.outputs.content }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history required by git-cliff
+
+      - name: Install git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Generate changelog for this release
+        id: cliff
+        run: |
+          git cliff --unreleased --tag "${{ github.event.inputs.tag }}" \
+            --prepend CHANGELOG.md
+          # Capture the body for the GitHub Release notes
+          BODY=$(git cliff --unreleased --tag "${{ github.event.inputs.tag }}" \
+            --strip header --strip footer 2>/dev/null)
+          echo "content<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY"        >> "$GITHUB_OUTPUT"
+          echo "EOF"          >> "$GITHUB_OUTPUT"
+
+      - name: Bump version in pyproject.toml
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          VER="${TAG#v}"   # strip leading 'v'
+          sed -i "s/^version = \".*\"/version = \"$VER\"/" pyproject.toml
+          echo "Bumped pyproject.toml to $VER"
+
+      - name: Commit changelog + version bump
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: "release/${{ github.event.inputs.tag }}"
+          commit-message: "chore(release): prepare ${{ github.event.inputs.tag }}"
+          title: "Release ${{ github.event.inputs.tag }}"
+          body: |
+            Automated release PR for `${{ github.event.inputs.tag }}`.
+
+            - Updated `CHANGELOG.md` via git-cliff
+            - Bumped `pyproject.toml` version
+
+            Merge this PR to trigger the publish workflow.
+          add-paths: |
+            CHANGELOG.md
+            pyproject.toml
+
+  # ── 3. Build and publish the wheel after the PR is merged ─────────────────
+  publish:
+    name: Build & publish wheel
+    runs-on: ubuntu-latest
+    needs: changelog
+    if: github.ref == 'refs/heads/main'   # only run on main
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel (maturin)
+        run: uv run maturin build --release --out dist/
+
+      - name: Publish to PyPI
+        run: uv run twine upload dist/*.whl
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: "${{ github.event.inputs.tag }}"
+          body: ${{ needs.changelog.outputs.changelog_body }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          files: dist/*.whl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
