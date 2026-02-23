@@ -1,8 +1,8 @@
 //! Minimal PyO3 wrapper for the backtest engine.
 //! Extend as the Rust API stabilises.
 
-use pyo3::prelude::*;
 use algo_core::utils::stats;
+use pyo3::prelude::*;
 
 /// Exposed as a convenience: run a simple vectorised backtest
 /// given a list of closes and a list of position sizes (±1, 0).

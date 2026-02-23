@@ -1,5 +1,5 @@
-use pyo3::prelude::*;
 use algo_core::utils::stats;
+use pyo3::prelude::*;
 
 #[pyfunction]
 fn sharpe_ratio(returns: Vec<f64>, risk_free: f64, periods_per_year: f64) -> f64 {
