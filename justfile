@@ -65,7 +65,7 @@ check-py: lint-py fmt-py type-check test-py
 
 # Format Rust code
 fmt-rs:
-    cargo fmt --manifest-path rust/Cargo.toml
+    cargo fmt --manifest-path rust/Cargo.toml --all
 
 # Check Rust formatting without making changes
 fmt-rs-check:
