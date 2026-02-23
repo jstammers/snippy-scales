@@ -40,17 +40,14 @@ jobs:
       - name: Install Python deps
         run: uv sync --all-extras
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Build Rust extension (needed for API docs)
-        run: uv run maturin develop
+        run: just dev
 
-      - name: Build Rust docs
-        run: cargo doc --manifest-path rust/Cargo.toml --workspace --no-deps
-
-      - name: Build MkDocs site
-        run: uv run mkdocs build --strict
-
-      - name: Copy Rust docs into site
-        run: cp -r rust/target/doc site/rust-api
+      - name: Build documentation
+        run: just docs-build
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3

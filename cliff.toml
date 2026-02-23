@@ -71,6 +71,8 @@ link_parsers = [
 
 # Commit preprocessors: clean up common noise before grouping.
 commit_preprocessors = [
+  # Convert legacy format: (type) message → type: message
+  { pattern = "^\\(([a-z]+)\\)\\s+", replace = "$1: " },
   # Strip trailing periods from the subject line.
   { pattern = "\\.$", replace = "" },
   # Normalise "wip:" prefixes — they shouldn't appear in a release anyway.

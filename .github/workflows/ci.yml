@@ -54,14 +54,17 @@ jobs:
       - name: Install Python deps
         run: uv sync --all-extras
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Ruff lint
-        run: uv run ruff check . --output-format=github
+        run: just lint-py-ci
 
       - name: Ruff format check
-        run: uv run ruff format --check .
+        run: just fmt-py-check
 
       - name: ty type check
-        run: uv run ty check
+        run: just type-check
 
   # ── Python tests ─────────────────────────────────────────────────────────────
   python-test:
@@ -82,14 +85,17 @@ jobs:
         with:
           workspaces: rust
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Install Python deps (includes maturin)
         run: uv sync --all-extras
 
       - name: Build Rust extension (dev)
-        run: uv run maturin develop
+        run: just dev
 
       - name: Run pytest
-        run: uv run pytest --cov=snippy_scales --cov-report=xml -q
+        run: just test-py-cov-ci
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -116,14 +122,17 @@ jobs:
         with:
           workspaces: rust
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: rustfmt check
-        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+        run: just fmt-rs-check
 
       - name: clippy
-        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+        run: just lint-rs
 
       - name: Test
-        run: cargo test --manifest-path rust/Cargo.toml --workspace
+        run: just test-rs
 
   # ── Benchmarks (informational, no fail) ──────────────────────────────────────
   rust-bench:
@@ -136,8 +145,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Run criterion benchmarks
-        run: cargo bench --manifest-path rust/Cargo.toml --workspace -- --output-format=bencher | tee bench_output.txt
+        run: just bench -- --output-format=bencher | tee bench_output.txt
 
   # ── Build Python wheel (check only) ──────────────────────────────────────────
   build-wheel:

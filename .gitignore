@@ -25,3 +25,6 @@ data/cache/
 *.env
 .env.*
 !.env.example
+
+.claude
+python/**/*.so

@@ -32,32 +32,41 @@ curl -LsSf https://astral.sh/uv/install.sh | sh                           # uv
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh  # prek
 cargo install git-cliff                                                     # changelog
+cargo install just                                                          # task runner
 
 # 2. Set up the repo
-uv sync
-uv run maturin develop    # build Rust extension (dev mode)
-prek install              # activate git hooks from prek.toml
+just setup                # install deps, build Rust extension, activate git hooks
 
 # 3. Use the CLI
-uv run algo --help
+just algo --help          # or: uv run algo --help
 ```
 
 ## Development
 
 ```bash
-# Python: lint, format, type-check, test
-uv run ruff check . --fix && uv run ruff format .
-uv run ty check
-uv run pytest
+# Quick commands
+just                      # list all available commands
+just check                # run all checks (format, lint, type-check, test)
+just test                 # run all tests (Python + Rust)
+just fmt                  # format all code (Python + Rust)
 
-# Rust: fmt, clippy, test, bench
-cargo fmt --manifest-path rust/Cargo.toml
-cargo clippy --manifest-path rust/Cargo.toml --workspace -- -D warnings
-cargo test --manifest-path rust/Cargo.toml --workspace
-cargo bench --manifest-path rust/Cargo.toml --workspace
+# Python-specific
+just lint-py              # ruff check with auto-fix
+just fmt-py               # ruff format
+just type-check           # ty check
+just test-py              # pytest
+just test-py-cov          # pytest with coverage report
 
-# Run all git hooks manually
-prek run --all-files
+# Rust-specific
+just fmt-rs               # cargo fmt
+just lint-rs              # cargo clippy
+just test-rs              # cargo test
+just bench                # cargo bench
+
+# Other
+just check-all            # run all pre-commit hooks (prek)
+just clean                # remove build artifacts
+just docs-serve           # serve documentation locally
 ```
 
 ## Commit Convention
@@ -82,9 +91,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 from the conventional commit history. Never edit it by hand.
 
 ```bash
-git cliff --unreleased          # preview next release
-git cliff --unreleased --tag v1.2.0   # preview with a specific tag
-git cliff -o CHANGELOG.md       # regenerate full changelog
+just changelog                  # preview next release
+just changelog-tag v1.2.0       # preview with a specific tag
+just changelog-regen            # regenerate full changelog
 ```
 
 Releases are triggered via the **Release** GitHub Actions workflow (manual

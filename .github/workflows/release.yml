@@ -49,9 +49,13 @@ jobs:
       - name: Install git-cliff
         uses: kenji-miyake/setup-git-cliff@v2
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Generate changelog for this release
         id: cliff
         run: |
+          just changelog-tag "${{ github.event.inputs.tag }}"
           git cliff --unreleased --tag "${{ github.event.inputs.tag }}" \
             --prepend CHANGELOG.md
           # Capture the body for the GitHub Release notes
