@@ -14,8 +14,8 @@ console = Console()
 @app.command()
 def run(
     strategy: str = typer.Argument(..., help="Strategy name or config path"),
-    data_path: Path = typer.Option(Path("data/derived"), help="Path to bar data"),
-    initial_cash: float = typer.Option(1_000_000.0, help="Starting capital"),
+    data_path: Path = typer.Option(Path("data/derived"), help="Path to bar data"),  # noqa: B008
+    initial_cash: float = typer.Option(1_000_000.0, help="Starting capital"),  # noqa: B008
 ) -> None:
     """Run a backtest for a named strategy."""
     console.print(f"[cyan]Running backtest:[/] {strategy}  cash={initial_cash:,.0f}")

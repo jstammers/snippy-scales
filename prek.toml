@@ -31,10 +31,10 @@ hooks = [
 repo  = "https://github.com/astral-sh/ruff-pre-commit"
 rev   = "v0.9.0"
 hooks = [
-  # Linter — fixes safe auto-fixable issues before the formatter runs.
-  { id = "ruff", args = ["check", "--fix"], types_or = ["python", "pyi"] },
+  # Linter — the hook entry already calls `ruff check`; only extra flags needed.
+  { id = "ruff", args = ["--fix"], types_or = ["python", "pyi"] },
   # Formatter — must come AFTER the linter so fixed code is also formatted.
-  { id = "ruff", args = ["format"], types_or = ["python", "pyi"] },
+  { id = "ruff-format", types_or = ["python", "pyi"] },
 ]
 
 # ── uv lockfile sync ─────────────────────────────────────────────────────────
