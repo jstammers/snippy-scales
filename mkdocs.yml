@@ -40,4 +40,4 @@ nav:
       - Data Ingestion: guides/data_ingestion.md
   - API Reference:
       - Python: api/python.md
-      - Rust: rust-api/algo_core/index.html
+      - Rust: api/rust/algo_core/index.html

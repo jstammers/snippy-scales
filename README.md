@@ -83,7 +83,7 @@ feat!: redesign Portfolio API                      ← semver MAJOR (breaking)
 Allowed types: `feat`, `fix`, `perf`, `refactor`, `revert`, `docs`, `style`,
 `test`, `build`, `ci`, `chore`
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
+See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for the full workflow.
 
 ## Changelog
 

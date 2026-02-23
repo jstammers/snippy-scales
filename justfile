@@ -125,8 +125,9 @@ docs-serve:
 # Build documentation site
 docs-build:
     cargo doc --manifest-path rust/Cargo.toml --workspace --no-deps
+    rm -rf docs/api/rust
+    cp -r rust/target/doc docs/api/rust
     uv run mkdocs build --strict
-    cp -r rust/target/doc site/rust-api
 
 # ── Changelog & Release ──────────────────────────────────────────────────────
 
