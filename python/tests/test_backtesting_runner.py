@@ -22,6 +22,7 @@ from snippy_scales.backtesting.runner import (
     BacktestRunner,
     BasketRunner,
     InstrumentSpec,
+    OhlcvArrays,
     extract_ohlcv,
     make_config,
     positions_to_signals,
@@ -69,8 +70,8 @@ def _make_bars(n: int = 500, seed: int = 0, trend: float = 0.0) -> pl.DataFrame:
     )
 
 
-def _make_ohlcv_arrays(n: int = 300, seed: int = 42) -> dict[str, np.ndarray]:
-    """Build raw NumPy OHLCV dict ready for raptorbt."""
+def _make_ohlcv_arrays(n: int = 300, seed: int = 42) -> OhlcvArrays:
+    """Build aligned NumPy OHLCV arrays ready for raptorbt."""
     bars = _make_bars(n, seed=seed)
     return extract_ohlcv(bars)
 
@@ -121,31 +122,31 @@ def test_extract_ohlcv_with_full_columns() -> None:
     bars = _make_bars(50)
     ohlcv = extract_ohlcv(bars)
     n = 50
-    assert ohlcv["close"].shape == (n,)
-    assert ohlcv["open"].shape == (n,)
-    assert ohlcv["high"].shape == (n,)
-    assert ohlcv["low"].shape == (n,)
-    assert ohlcv["volume"].shape == (n,)
-    assert ohlcv["timestamps"].shape == (n,)
-    assert ohlcv["timestamps"].dtype == np.int64
+    assert ohlcv.close.shape == (n,)
+    assert ohlcv.open.shape == (n,)
+    assert ohlcv.high.shape == (n,)
+    assert ohlcv.low.shape == (n,)
+    assert ohlcv.volume.shape == (n,)
+    assert ohlcv.timestamps.shape == (n,)
+    assert ohlcv.timestamps.dtype == np.int64
 
 
 def test_extract_ohlcv_synthesises_missing_columns() -> None:
     bars = pl.DataFrame({"close": [100.0, 101.0, 99.0, 102.0]})
     ohlcv = extract_ohlcv(bars)
-    assert ohlcv["open"].shape == (4,)
-    assert ohlcv["high"].shape == (4,)
-    assert ohlcv["low"].shape == (4,)
-    assert ohlcv["volume"].shape == (4,)
+    assert ohlcv.open.shape == (4,)
+    assert ohlcv.high.shape == (4,)
+    assert ohlcv.low.shape == (4,)
+    assert ohlcv.volume.shape == (4,)
     # Synthesised high must be ≥ close; low must be ≤ close.
-    assert (ohlcv["high"] >= ohlcv["close"]).all()
-    assert (ohlcv["low"] <= ohlcv["close"]).all()
+    assert (ohlcv.high >= ohlcv.close).all()
+    assert (ohlcv.low <= ohlcv.close).all()
 
 
 def test_extract_ohlcv_timestamps_monotone_when_synthesised() -> None:
     bars = pl.DataFrame({"close": [100.0, 101.0, 102.0]})
     ohlcv = extract_ohlcv(bars)
-    ts = ohlcv["timestamps"]
+    ts = ohlcv.timestamps
     assert (np.diff(ts) > 0).all()
 
 
@@ -171,12 +172,12 @@ def test_run_single_returns_backtest_result() -> None:
 
     result = run_single(
         symbol="TEST",
-        timestamps=ohlcv["timestamps"],
-        open_prices=ohlcv["open"],
-        high_prices=ohlcv["high"],
-        low_prices=ohlcv["low"],
-        close_prices=ohlcv["close"],
-        volume=ohlcv["volume"],
+        timestamps=ohlcv.timestamps,
+        open_prices=ohlcv.open,
+        high_prices=ohlcv.high,
+        low_prices=ohlcv.low,
+        close_prices=ohlcv.close,
+        volume=ohlcv.volume,
         entries=entries,
         exits=exits,
         direction=1,
@@ -206,12 +207,12 @@ def test_run_long_short_returns_backtest_result() -> None:
 
     result = run_long_short(
         symbol="TEST",
-        timestamps=ohlcv["timestamps"],
-        open_prices=ohlcv["open"],
-        high_prices=ohlcv["high"],
-        low_prices=ohlcv["low"],
-        close_prices=ohlcv["close"],
-        volume=ohlcv["volume"],
+        timestamps=ohlcv.timestamps,
+        open_prices=ohlcv.open,
+        high_prices=ohlcv.high,
+        low_prices=ohlcv.low,
+        close_prices=ohlcv.close,
+        volume=ohlcv.volume,
         long_entries=long_entries,
         long_exits=long_exits,
         short_entries=short_entries,
@@ -243,12 +244,12 @@ def test_run_basket_returns_backtest_result() -> None:
     specs = [
         InstrumentSpec(
             symbol="A_long",
-            timestamps=ohlcv["timestamps"],
-            open=ohlcv["open"],
-            high=ohlcv["high"],
-            low=ohlcv["low"],
-            close=ohlcv["close"],
-            volume=ohlcv["volume"],
+            timestamps=ohlcv.timestamps,
+            open=ohlcv.open,
+            high=ohlcv.high,
+            low=ohlcv.low,
+            close=ohlcv.close,
+            volume=ohlcv.volume,
             entries=entries,
             exits=exits,
             direction=1,
