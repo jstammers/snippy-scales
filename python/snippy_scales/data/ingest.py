@@ -35,7 +35,7 @@ on incremental runs.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -102,14 +102,12 @@ def _effective_start(existing: pl.DataFrame, requested_start: str) -> str | None
     if "ts_event" not in existing.columns:
         return requested_start
 
-    max_ts = existing["ts_event"].max()
-    if max_ts is None:
+    # Use Polars date casting to extract the max date — avoids any pandas dependency
+    # and gives ty a well-typed result (datetime.date | None).
+    last_date = existing.select(pl.col("ts_event").cast(pl.Date).max()).item()
+    if last_date is None:
         return requested_start
 
-    # Cast to Python datetime then extract date
-    import pandas as pd  # noqa: PLC0415 — optional heavy dep, defer import
-
-    last_date: date = pd.Timestamp(max_ts).date()
     next_day = last_date + timedelta(days=1)
     return next_day.isoformat()
 
