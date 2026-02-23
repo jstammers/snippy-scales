@@ -52,7 +52,7 @@ repo  = "https://github.com/doublify/pre-commit-rust"
 rev   = "v1.0"
 hooks = [
   # Check formatting — does NOT auto-fix; developers must run `cargo fmt` themselves.
-  { id = "fmt", args = ["--manifest-path", "rust/Cargo.toml", "--", "--check"] },
+  { id = "fmt", args = ["--all", "--manifest-path", "rust/Cargo.toml", "--", "--check"] },
   # Lint — deny warnings so CI and local hooks are in sync.
   { id = "clippy", args = ["--manifest-path", "rust/Cargo.toml", "--workspace", "--", "-D", "warnings"] },
 ]
