@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import polars as pl
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import polars as pl
 
 
 def realised_vol(close: pl.Series, window: int = 20, annualise: bool = True) -> pl.Series:

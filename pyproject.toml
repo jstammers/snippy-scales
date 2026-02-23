@@ -17,6 +17,7 @@ dependencies = [
     "maturin>=1.5",
     "pydantic>=2.7",
     "loguru>=0.7",
+    "raptorbt>=0.3.2",
 ]
 
 [project.optional-dependencies]
@@ -64,17 +65,18 @@ src = ["python"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
-ignore = ["ANN101", "ANN102"]
 
 [tool.ruff.lint.per-file-ignores]
 "python/tests/**" = ["ANN"]
+# raptorbt is a Rust extension without type stubs; Any is necessary for interop.
+"python/snippy_scales/backtesting/**" = ["ANN401"]
 
 [tool.ruff.format]
 quote-style = "double"
 
-[tool.ty]
-src = ["python"]
+[tool.ty.environment]
 python-version = "3.12"
+root = ["python"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
