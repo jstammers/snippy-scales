@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2021"
 authors = []
 license = "MIT"
-rust-version = "1.78"
+rust-version = "1.93"
 
 [workspace.dependencies]
 # Async + concurrency
@@ -33,7 +33,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # PyO3
-pyo3 = { version = "0.21", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 
 [profile.release]
 opt-level = 3
