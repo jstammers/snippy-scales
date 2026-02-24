@@ -267,6 +267,110 @@ def ingest_from_config(
     return results
 
 
+def estimate_cost(
+    *,
+    dataset: str,
+    symbol: str,
+    schema: str,
+    start: str,
+    end: str,
+    output_dir: Path = RAW_DIR,
+) -> float:
+    """Estimate the Databento API cost in USD for a single symbol download.
+
+    Applies the same upsert logic as :func:`upsert_symbol`: if local data
+    already covers the full requested range the symbol is up to date and
+    ``0.0`` is returned immediately without making any API call.
+
+    Args:
+        dataset: Databento dataset code (e.g. ``"GLBX.MDP3"``).
+        symbol: Instrument symbol (e.g. ``"ES.c.0"``).
+        schema: Databento schema name (e.g. ``"ohlcv-1d"``).
+        start: Requested start date (``YYYY-MM-DD``).
+        end: Requested end date (``YYYY-MM-DD``).
+        output_dir: Root directory for raw Parquet files.
+
+    Returns:
+        Estimated cost in US dollars.  Returns ``0.0`` when no download is
+        needed (symbol already up to date).
+
+    Raises:
+        RuntimeError: If the Databento metadata API call fails.
+    """
+    import databento as db  # noqa: PLC0415 — optional dep
+
+    out_path = _symbol_path(symbol, schema, output_dir)
+    fetch_start = start
+
+    if out_path.exists():
+        existing = pl.read_parquet(out_path)
+        computed = _effective_start(existing, start)
+        if computed is not None:
+            fetch_start = computed
+        if fetch_start >= end:
+            return 0.0
+
+    client = db.Historical()
+    cost: float = client.metadata.get_cost(
+        dataset=dataset,
+        start=fetch_start,
+        end=end,
+        symbols=[symbol],
+        schema=schema,
+    )
+    return cost
+
+
+def estimate_costs_from_config(
+    config: IngestConfig,
+    *,
+    frequency_override: str | None = None,
+    output_dir: Path = RAW_DIR,
+) -> dict[str, float]:
+    """Estimate download costs for every symbol in a config.
+
+    Wraps :func:`estimate_cost` for each symbol defined in *config*.
+
+    Per-symbol costs respect upsert state: symbols whose local data already
+    covers the requested range contribute ``0.0``.  Symbols where the
+    Databento metadata call fails contribute ``float('nan')`` so the caller
+    can surface a warning without aborting the entire estimate.
+
+    Args:
+        config: Validated ingestion configuration.
+        frequency_override: Optional frequency string that overrides
+            ``config.tick_frequency`` (mirrors :func:`ingest_from_config`).
+        output_dir: Root directory for raw Parquet files.
+
+    Returns:
+        Mapping of symbol → estimated cost in USD.
+    """
+    import datetime  # noqa: PLC0415
+
+    from snippy_scales.data.config import frequency_to_schema  # noqa: PLC0415
+
+    schema = (
+        frequency_to_schema(frequency_override) if frequency_override is not None else config.schema
+    )
+    end = config.end or datetime.date.today().isoformat()
+
+    costs: dict[str, float] = {}
+    for symbol in config.all_symbols:
+        try:
+            costs[symbol] = estimate_cost(
+                dataset=config.dataset,
+                symbol=symbol,
+                schema=schema,
+                start=config.start,
+                end=end,
+                output_dir=output_dir,
+            )
+        except Exception:
+            logger.warning("Could not estimate cost for %s — recorded as NaN.", symbol)
+            costs[symbol] = float("nan")
+    return costs
+
+
 def load_bars(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> pl.DataFrame:
     """Load a stored bar file into a Polars DataFrame.
 

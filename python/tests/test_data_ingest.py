@@ -30,6 +30,8 @@ from snippy_scales.data.ingest import (
     _effective_start,
     _symbol_path,
     _to_polars,
+    estimate_cost,
+    estimate_costs_from_config,
     ingest_from_config,
     load_bars,
     upsert_symbol,
@@ -488,3 +490,181 @@ class TestLoadBars:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="No data found"):
             load_bars("MISSING.c.0", "ohlcv-1d", tmp_path)
+
+
+# ===========================================================================
+# estimate_cost (mocked Databento)
+# ===========================================================================
+
+
+class TestEstimateCost:
+    def test_returns_zero_when_already_up_to_date(self, tmp_path: Path) -> None:
+        """No API call should be made when local data already covers the range."""
+        initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
+        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        client_mock = MagicMock()
+
+        with _mock_databento(client_mock):
+            cost = estimate_cost(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",
+                end="2024-01-03",  # already covered
+                output_dir=tmp_path,
+            )
+
+        assert cost == 0.0
+        client_mock.metadata.get_cost.assert_not_called()
+
+    def test_calls_metadata_api_for_missing_data(self, tmp_path: Path) -> None:
+        """metadata.get_cost should be called with the effective (trimmed) date range."""
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 1.23
+
+        with _mock_databento(client_mock):
+            cost = estimate_cost(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",
+                end="2024-01-10",
+                output_dir=tmp_path,
+            )
+
+        assert cost == pytest.approx(1.23)
+        client_mock.metadata.get_cost.assert_called_once()
+        call_kwargs = client_mock.metadata.get_cost.call_args.kwargs
+        assert call_kwargs["dataset"] == "GLBX.MDP3"
+        assert call_kwargs["schema"] == "ohlcv-1d"
+        assert "ES.c.0" in call_kwargs["symbols"]
+
+    def test_uses_effective_start_for_partial_coverage(self, tmp_path: Path) -> None:
+        """Cost query start should be trimmed to the day after the last stored bar."""
+        initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
+        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 0.50
+
+        with _mock_databento(client_mock):
+            cost = estimate_cost(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",
+                end="2024-01-10",
+                output_dir=tmp_path,
+            )
+
+        assert cost == pytest.approx(0.50)
+        call_kwargs = client_mock.metadata.get_cost.call_args.kwargs
+        # Effective start should be 2024-01-04 (day after last stored 2024-01-03)
+        assert call_kwargs["start"] == "2024-01-04"
+
+    def test_returns_zero_for_no_file_and_no_data_needed(self, tmp_path: Path) -> None:
+        """When end <= start (degenerate range) no API call should be made."""
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 0.0
+
+        with _mock_databento(client_mock):
+            cost = estimate_cost(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-05",
+                end="2024-01-05",  # same day — no range
+                output_dir=tmp_path,
+            )
+
+        # get_cost is still called (no local file exists), but returns 0.0
+        assert cost == pytest.approx(0.0)
+
+
+# ===========================================================================
+# estimate_costs_from_config (mocked Databento)
+# ===========================================================================
+
+
+class TestEstimateCostsFromConfig:
+    def _make_config(self, symbols: list[str], frequency: str = "1d") -> IngestConfig:
+        return IngestConfig(
+            dataset="GLBX.MDP3",
+            tick_frequency=frequency,
+            start="2024-01-01",
+            end="2024-01-10",
+            asset_classes={"test": AssetClassConfig(symbols=symbols)},
+        )
+
+    def test_returns_cost_per_symbol(self, tmp_path: Path) -> None:
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 2.00
+
+        with _mock_databento(client_mock):
+            costs = estimate_costs_from_config(
+                self._make_config(["ES.c.0", "ZN.c.0"]),
+                output_dir=tmp_path,
+            )
+
+        assert set(costs.keys()) == {"ES.c.0", "ZN.c.0"}
+        assert costs["ES.c.0"] == pytest.approx(2.00)
+        assert costs["ZN.c.0"] == pytest.approx(2.00)
+        assert client_mock.metadata.get_cost.call_count == 2
+
+    def test_cached_symbol_shows_zero_cost(self, tmp_path: Path) -> None:
+        """Symbols already on disk within the requested range should cost $0."""
+        initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
+        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 1.00
+
+        with _mock_databento(client_mock):
+            costs = estimate_costs_from_config(
+                IngestConfig(
+                    dataset="GLBX.MDP3",
+                    tick_frequency="1d",
+                    start="2024-01-01",
+                    end="2024-01-03",  # fully covered by existing data
+                    asset_classes={"test": AssetClassConfig(symbols=["ES.c.0"])},
+                ),
+                output_dir=tmp_path,
+            )
+
+        assert costs["ES.c.0"] == 0.0
+        client_mock.metadata.get_cost.assert_not_called()
+
+    def test_failed_estimate_recorded_as_nan(self, tmp_path: Path) -> None:
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.side_effect = RuntimeError("API error")
+
+        with _mock_databento(client_mock):
+            costs = estimate_costs_from_config(
+                self._make_config(["ES.c.0"]),
+                output_dir=tmp_path,
+            )
+
+        import math
+
+        assert math.isnan(costs["ES.c.0"])
+
+    def test_frequency_override_applied(self, tmp_path: Path) -> None:
+        client_mock = MagicMock()
+        client_mock.metadata.get_cost.return_value = 5.00
+
+        with _mock_databento(client_mock):
+            estimate_costs_from_config(
+                self._make_config(["ES.c.0"], frequency="1d"),
+                frequency_override="1h",
+                output_dir=tmp_path,
+            )
+
+        call_kwargs = client_mock.metadata.get_cost.call_args.kwargs
+        assert call_kwargs["schema"] == "ohlcv-1h"
