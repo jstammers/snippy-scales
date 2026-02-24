@@ -34,6 +34,19 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust build (for clippy/fmt hooks)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Cache prek hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/prek
+          key: prek-${{ runner.os }}-${{ hashFiles('prek.toml') }}
+          restore-keys: |
+            prek-${{ runner.os }}-
+
       - name: Run all pre-commit hooks on changed files
         # In CI we run against all files so nothing slips through.
         run: prek run --all-files
@@ -50,6 +63,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
+          enable-cache: true
 
       - name: Install Python deps
         run: uv sync --all-extras
@@ -76,6 +90,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -163,6 +179,8 @@ jobs:
         with:
           workspaces: rust
       - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       - run: uv sync
       - name: Build wheel
         run: uv run maturin build --release

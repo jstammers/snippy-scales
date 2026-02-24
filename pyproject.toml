@@ -19,9 +19,11 @@ dependencies = [
     "pydantic>=2.7",
     "loguru>=0.7",
     "raptorbt>=0.3.2",
+    "quantstats>=0.0.62",
 ]
 
 [project.optional-dependencies]
+optuna = ["optuna>=3.6"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -68,9 +70,14 @@ src = ["python"]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
 
 [tool.ruff.lint.per-file-ignores]
-"python/tests/**" = ["ANN"]
+"python/tests/**" = ["ANN", "TC003"]
 # raptorbt is a Rust extension without type stubs; Any is necessary for interop.
 "python/snippy_scales/backtesting/**" = ["ANN401"]
+# quantstats/pandas have no complete type stubs; Any is necessary for interop.
+"python/snippy_scales/evaluation/**" = ["ANN401"]
+# CLI modules must import Path unconditionally so typer can resolve annotations
+# at runtime — moving it to TYPE_CHECKING (TC003) would break typer.
+"python/snippy_scales/cli/**" = ["TC003", "ANN401"]
 
 [tool.ruff.format]
 quote-style = "double"
