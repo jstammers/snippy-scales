@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Databento ingestion configuration
+# ---------------------------------------------------------------------------
+# Pass this file to the CLI:
+#   algo data ingest-config configs/databento.yaml
+#   algo data ingest-config configs/databento.yaml --frequency 1h
+#
+# Symbols use Databento continuous-contract notation:
+#   <ROOT>.c.0  → front-month continuous
+#   <ROOT>.c.1  → second-month continuous
+# Individual expiries can also be used (e.g. ESZ2024).
+# ---------------------------------------------------------------------------
+
+# Databento dataset — CME Globex multi-asset feed
+dataset: "GLBX.MDP3"
+
+# Default bar frequency. Overridable at runtime via --frequency.
+# Valid aliases: 1d / daily / 1h / 1m / 1min / 1s / eod
+tick_frequency: "1d"
+
+# Historical pull range
+start: "2018-01-01"
+# end: "2024-12-31"  # Omit to default to today
+
+# ---------------------------------------------------------------------------
+# Asset classes
+# Each key is a human-readable label; symbols must be valid Databento
+# identifiers for the dataset above.
+# ---------------------------------------------------------------------------
+asset_classes:
+
+  # --- Equity Index Futures ---
+  equity_index:
+    symbols:
+      - ES.c.0   # E-mini S&P 500
+      - NQ.c.0   # E-mini Nasdaq-100
+      - YM.c.0   # E-mini Dow Jones
+      - RTY.c.0  # E-mini Russell 2000
+
+  # --- Interest Rate Futures ---
+  rates:
+    symbols:
+      - ZT.c.0   # 2-Year Treasury
+      - ZF.c.0   # 5-Year Treasury
+      - ZN.c.0   # 10-Year Treasury
+      - ZB.c.0   # 30-Year Treasury
+
+  # --- FX Futures ---
+  fx:
+    symbols:
+      - 6E.c.0   # EUR/USD
+      - 6J.c.0   # JPY/USD
+      - 6B.c.0   # GBP/USD
+      - 6A.c.0   # AUD/USD
+
+  # --- Commodity Futures ---
+  commodities:
+    symbols:
+      - CL.c.0   # Crude Oil (WTI)
+      - NG.c.0   # Natural Gas
+      - GC.c.0   # Gold
+      - SI.c.0   # Silver
+      - ZC.c.0   # Corn
+      - ZW.c.0   # Wheat
+      - ZS.c.0   # Soybeans
