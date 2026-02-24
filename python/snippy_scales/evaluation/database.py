@@ -219,7 +219,9 @@ class SQLiteStore:
                         ),
                     )
 
-        return int(exp_id)
+        if exp_id is None:  # pragma: no cover — INSERT always sets lastrowid
+            raise RuntimeError("INSERT did not return a lastrowid")
+        return exp_id
 
     # ── Read ──────────────────────────────────────────────────────────────────
 

@@ -388,7 +388,7 @@ class EvaluationRunner:
         symbol: str,
     ) -> list[dict[str, Any]]:
         """Run Optuna optimisation and return the ordered list of param sets tried."""
-        import optuna
+        import optuna  # type: ignore[import-not-found]
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 

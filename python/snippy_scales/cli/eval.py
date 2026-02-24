@@ -25,10 +25,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
+    from snippy_scales.strategies.trend import Strategy
 
 app = typer.Typer(help="Walk-forward evaluation and hyperparameter sweep commands.")
 console = Console()
@@ -36,7 +41,7 @@ console = Console()
 # ── Strategy registry ─────────────────────────────────────────────────────────
 
 
-def _build_registry() -> dict[str, type]:
+def _build_registry() -> dict[str, type[Strategy] | type[MultiAssetStrategy]]:
     from snippy_scales.strategies.mean_reversion import MeanReversion
     from snippy_scales.strategies.momentum_cs import CrossSectionalMomentum
     from snippy_scales.strategies.momentum_ts import TimeSeriesMomentum
@@ -58,7 +63,7 @@ _STRATEGY_NAMES = [
 ]
 
 
-def _resolve_strategy(name: str) -> type:
+def _resolve_strategy(name: str) -> type[Strategy] | type[MultiAssetStrategy]:
     registry = _build_registry()
     if name not in registry:
         console.print(
@@ -94,6 +99,16 @@ def run(
 
     strategy_class = _resolve_strategy(strategy)
 
+    from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
+
+    if issubclass(strategy_class, MultiAssetStrategy):
+        console.print(
+            f"[red]{strategy_class.__name__} is a multi-asset strategy.[/]  "
+            "Use [cyan]algo eval sweep --symbols ...[/] (multi-asset support coming soon)."
+        )
+        raise typer.Exit(1)
+    single_class = cast("type[Strategy]", strategy_class)
+
     console.print(f"[cyan]Loading bars:[/] {symbol} ({schema})")
     try:
         bars = load_bars(symbol, schema)
@@ -105,7 +120,7 @@ def run(
         raise typer.Exit(1) from exc
 
     console.print(
-        f"[cyan]Evaluating:[/] {strategy_class.__name__}  "
+        f"[cyan]Evaluating:[/] {single_class.__name__}  "
         f"splits={splits}  window={window}  bars={len(bars):,}"
     )
 
@@ -121,7 +136,7 @@ def run(
         tearsheet_fmt=tearsheet_fmt,
     )
 
-    result = runner.evaluate(strategy_class, bars, symbol=symbol)
+    result = runner.evaluate(single_class, bars, symbol=symbol)
     _print_result_summary(result)
 
 
@@ -156,6 +171,16 @@ def sweep(
     )
 
     strategy_class = _resolve_strategy(strategy)
+
+    from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
+
+    if issubclass(strategy_class, MultiAssetStrategy):
+        console.print(
+            f"[red]{strategy_class.__name__} is a multi-asset strategy.[/]  "
+            "Multi-asset sweep support is coming soon."
+        )
+        raise typer.Exit(1)
+    single_class = cast("type[Strategy]", strategy_class)
 
     try:
         param_dict: dict = json.loads(params)
@@ -215,7 +240,7 @@ def sweep(
         tearsheet_fmt=tearsheet_fmt,
     )
 
-    result = runner.evaluate(strategy_class, bars, params=param_search, symbol=symbol)
+    result = runner.evaluate(single_class, bars, params=param_search, symbol=symbol)
     _print_result_summary(result)
 
     # Print top parameter sets
