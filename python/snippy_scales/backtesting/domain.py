@@ -85,26 +85,84 @@ class BacktestMetrics:
         sharpe_ratio: Annualised Sharpe ratio (risk-free = 0).
         sortino_ratio: Annualised Sortino ratio.
         calmar_ratio: Return / max-drawdown ratio.
+        omega_ratio: Probability-weighted ratio of gains to losses.
         max_drawdown_pct: Maximum peak-to-trough drawdown as a percentage.
+        max_drawdown_duration: Longest drawdown period in bars.
+        total_trades: Total number of trades executed.
+        total_closed_trades: Number of positions that have been closed.
+        total_open_trades: Number of currently active positions.
+        winning_trades: Number of profitable transactions.
+        losing_trades: Number of unprofitable transactions.
         win_rate_pct: Percentage of trades that were profitable.
         profit_factor: Gross profit / gross loss.
-        total_trades: Number of completed round-trip trades.
         expectancy: Average profit per trade in cash units.
+        sqn: System Quality Number measuring trade consistency.
+        avg_trade_return_pct: Average return across all trades.
+        avg_win_pct: Mean return of winning trades.
+        avg_loss_pct: Mean return of losing trades.
+        best_trade_pct: Maximum single-trade return achieved.
+        worst_trade_pct: Minimum single-trade return achieved.
+        payoff_ratio: Average winning return relative to average losing return.
+        recovery_factor: Net profit divided by maximum drawdown.
+        avg_holding_period: Average trade duration in bars.
+        avg_winning_duration: Mean duration of profitable trades in bars.
+        avg_losing_duration: Mean duration of losing trades in bars.
+        max_consecutive_wins: Longest winning streak length.
+        max_consecutive_losses: Longest losing streak length.
+        start_value: Initial portfolio capital.
+        end_value: Final portfolio value after all trades.
+        total_fees_paid: Cumulative transaction costs incurred.
+        open_trade_pnl: Unrealised profit/loss from active positions.
+        exposure_pct: Percentage of time with active market positions.
     """
 
+    # Core performance
     total_return_pct: float
     sharpe_ratio: float
     sortino_ratio: float
     calmar_ratio: float
+    omega_ratio: float
+    # Drawdown
     max_drawdown_pct: float
+    max_drawdown_duration: int
+    # Trade counts
+    total_trades: int
+    total_closed_trades: int
+    total_open_trades: int
+    winning_trades: int
+    losing_trades: int
+    # Trade performance
     win_rate_pct: float
     profit_factor: float
-    total_trades: int
     expectancy: float
+    sqn: float
+    avg_trade_return_pct: float
+    avg_win_pct: float
+    avg_loss_pct: float
+    best_trade_pct: float
+    worst_trade_pct: float
+    payoff_ratio: float
+    recovery_factor: float
+    # Duration
+    avg_holding_period: float
+    avg_winning_duration: float
+    avg_losing_duration: float
+    # Streaks
+    max_consecutive_wins: int
+    max_consecutive_losses: int
+    # Portfolio
+    start_value: float
+    end_value: float
+    total_fees_paid: float
+    open_trade_pnl: float
+    exposure_pct: float
 
     @classmethod
     def from_raptorbt(cls, m: Any) -> BacktestMetrics:
         """Construct from a ``raptorbt.PyBacktestMetrics`` object.
+
+        Uses :func:`getattr` with safe defaults so that minor raptorbt API
+        changes do not cause hard failures.
 
         Args:
             m: raptorbt metrics object with the expected attribute names.
@@ -113,15 +171,46 @@ class BacktestMetrics:
             Typed :class:`BacktestMetrics` instance.
         """
         return cls(
-            total_return_pct=float(m.total_return_pct),
-            sharpe_ratio=float(m.sharpe_ratio),
-            sortino_ratio=float(m.sortino_ratio),
-            calmar_ratio=float(m.calmar_ratio),
-            max_drawdown_pct=float(m.max_drawdown_pct),
-            win_rate_pct=float(m.win_rate_pct),
-            profit_factor=float(m.profit_factor),
-            total_trades=int(m.total_trades),
-            expectancy=float(m.expectancy),
+            # Core performance
+            total_return_pct=float(getattr(m, "total_return_pct", 0.0)),
+            sharpe_ratio=float(getattr(m, "sharpe_ratio", 0.0)),
+            sortino_ratio=float(getattr(m, "sortino_ratio", 0.0)),
+            calmar_ratio=float(getattr(m, "calmar_ratio", 0.0)),
+            omega_ratio=float(getattr(m, "omega_ratio", 0.0)),
+            # Drawdown
+            max_drawdown_pct=float(getattr(m, "max_drawdown_pct", 0.0)),
+            max_drawdown_duration=int(getattr(m, "max_drawdown_duration", 0)),
+            # Trade counts
+            total_trades=int(getattr(m, "total_trades", 0)),
+            total_closed_trades=int(getattr(m, "total_closed_trades", 0)),
+            total_open_trades=int(getattr(m, "total_open_trades", 0)),
+            winning_trades=int(getattr(m, "winning_trades", 0)),
+            losing_trades=int(getattr(m, "losing_trades", 0)),
+            # Trade performance
+            win_rate_pct=float(getattr(m, "win_rate_pct", 0.0)),
+            profit_factor=float(getattr(m, "profit_factor", 0.0)),
+            expectancy=float(getattr(m, "expectancy", 0.0)),
+            sqn=float(getattr(m, "sqn", 0.0)),
+            avg_trade_return_pct=float(getattr(m, "avg_trade_return_pct", 0.0)),
+            avg_win_pct=float(getattr(m, "avg_win_pct", 0.0)),
+            avg_loss_pct=float(getattr(m, "avg_loss_pct", 0.0)),
+            best_trade_pct=float(getattr(m, "best_trade_pct", 0.0)),
+            worst_trade_pct=float(getattr(m, "worst_trade_pct", 0.0)),
+            payoff_ratio=float(getattr(m, "payoff_ratio", 0.0)),
+            recovery_factor=float(getattr(m, "recovery_factor", 0.0)),
+            # Duration
+            avg_holding_period=float(getattr(m, "avg_holding_period", 0.0)),
+            avg_winning_duration=float(getattr(m, "avg_winning_duration", 0.0)),
+            avg_losing_duration=float(getattr(m, "avg_losing_duration", 0.0)),
+            # Streaks
+            max_consecutive_wins=int(getattr(m, "max_consecutive_wins", 0)),
+            max_consecutive_losses=int(getattr(m, "max_consecutive_losses", 0)),
+            # Portfolio
+            start_value=float(getattr(m, "start_value", 0.0)),
+            end_value=float(getattr(m, "end_value", 0.0)),
+            total_fees_paid=float(getattr(m, "total_fees_paid", 0.0)),
+            open_trade_pnl=float(getattr(m, "open_trade_pnl", 0.0)),
+            exposure_pct=float(getattr(m, "exposure_pct", 0.0)),
         )
 
 
