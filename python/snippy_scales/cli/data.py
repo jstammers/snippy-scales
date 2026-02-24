@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Annotated
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
