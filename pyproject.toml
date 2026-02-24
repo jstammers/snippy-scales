@@ -19,7 +19,7 @@ dependencies = [
     "pydantic>=2.7",
     "loguru>=0.7",
     "raptorbt>=0.3.2",
-    "matplotlib>=3.9",
+    "quantstats>=0.0.62",
 ]
 
 [project.optional-dependencies]
@@ -73,7 +73,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
 "python/tests/**" = ["ANN", "TC003"]
 # raptorbt is a Rust extension without type stubs; Any is necessary for interop.
 "python/snippy_scales/backtesting/**" = ["ANN401"]
-# matplotlib has no type stubs; Any is necessary for Axes/Figure interop.
+# quantstats/pandas have no complete type stubs; Any is necessary for interop.
 "python/snippy_scales/evaluation/**" = ["ANN401"]
 # CLI modules must import Path unconditionally so typer can resolve annotations
 # at runtime — moving it to TYPE_CHECKING (TC003) would break typer.

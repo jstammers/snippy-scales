@@ -71,9 +71,11 @@ class EvaluationRunner:
         min_train_size: Minimum bars required in the training window.
         db_path: Path to the SQLite results database.  Pass ``None`` to skip
             persistence (default ``None``).
-        tearsheet_dir: Directory to save tearsheet images.  Pass ``None`` to
-            skip tearsheet generation (default ``None``).
-        tearsheet_fmt: ``"png"``, ``"pdf"``, or ``"both"`` (default ``"both"``).
+        tearsheet_dir: Directory to save HTML tearsheet reports.  Pass ``None``
+            to skip tearsheet generation (default ``None``).
+        benchmark: Ticker string used as benchmark in tearsheet reports
+            (e.g. ``"SPY"``).  Pass ``None`` to omit the benchmark.
+            Defaults to ``"SPY"``.
 
     Example::
 
@@ -94,7 +96,7 @@ class EvaluationRunner:
         min_train_size: int | None = None,
         db_path: Path | str | None = None,
         tearsheet_dir: Path | str | None = None,
-        tearsheet_fmt: str = "both",
+        benchmark: str | None = "SPY",
     ) -> None:
         self.initial_capital = initial_capital
         self.fees = fees
@@ -106,7 +108,7 @@ class EvaluationRunner:
         self.min_train_size = min_train_size
         self._db_path = Path(db_path) if db_path is not None else None
         self._tearsheet_dir = Path(tearsheet_dir) if tearsheet_dir is not None else None
-        self._tearsheet_fmt = tearsheet_fmt
+        self._benchmark = benchmark
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -452,14 +454,9 @@ class EvaluationRunner:
             return
         safe_name = name.replace(" ", "_").replace("/", "-")
         output_path = self._tearsheet_dir / f"{safe_name}_tearsheet"
-        gen = TearsheetGenerator()
+        gen = TearsheetGenerator(benchmark=self._benchmark)
         try:
-            paths = gen.generate_walk_forward(
-                result,
-                output_path=output_path,
-                fmt=self._tearsheet_fmt,
-            )
-            for p in paths:
-                logger.info("Tearsheet saved: %s", p)
+            path = gen.generate_walk_forward(result, output_path=output_path)
+            logger.info("Tearsheet saved: %s", path)
         except Exception:
             logger.warning("Tearsheet generation failed", exc_info=True)

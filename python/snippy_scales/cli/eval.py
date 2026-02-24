@@ -91,7 +91,12 @@ def run(
     tearsheet_dir: Path = typer.Option(  # noqa: B008
         None, "--tearsheet-dir", help="Directory for tearsheet output"
     ),
-    tearsheet_fmt: str = typer.Option("both", "--tearsheet-fmt", help="png, pdf, or both"),
+    benchmark: str = typer.Option(
+        "SPY",
+        "--benchmark",
+        "-b",
+        help="Benchmark ticker for tearsheet (e.g. SPY, QQQ). Pass 'none' to disable.",
+    ),  # noqa: E501
 ) -> None:
     """Run walk-forward evaluation for a strategy with its default parameters."""
     from snippy_scales.data.ingest import load_bars
@@ -133,7 +138,7 @@ def run(
         gap=gap,
         db_path=db,
         tearsheet_dir=tearsheet_dir,
-        tearsheet_fmt=tearsheet_fmt,
+        benchmark=None if benchmark.lower() == "none" else benchmark,
     )
 
     result = runner.evaluate(single_class, bars, symbol=symbol)
@@ -160,7 +165,9 @@ def sweep(
     fees: float = typer.Option(0.001, "--fees"),
     db: Path = typer.Option(None, "--db", help="SQLite results database path"),  # noqa: B008
     tearsheet_dir: Path = typer.Option(None, "--tearsheet-dir"),  # noqa: B008
-    tearsheet_fmt: str = typer.Option("both", "--tearsheet-fmt"),
+    benchmark: str = typer.Option(
+        "SPY", "--benchmark", "-b", help="Benchmark ticker for tearsheet. Pass 'none' to disable."
+    ),  # noqa: E501
 ) -> None:
     """Run a parameter sweep with walk-forward evaluation."""
     from snippy_scales.data.ingest import load_bars
@@ -237,7 +244,7 @@ def sweep(
         gap=gap,
         db_path=db,
         tearsheet_dir=tearsheet_dir,
-        tearsheet_fmt=tearsheet_fmt,
+        benchmark=None if benchmark.lower() == "none" else benchmark,
     )
 
     result = runner.evaluate(single_class, bars, params=param_search, symbol=symbol)
@@ -283,7 +290,9 @@ def tearsheet(
     experiment_id: int = typer.Argument(..., help="Experiment ID from the results database"),
     db: Path = typer.Option(Path("results.db"), "--db"),  # noqa: B008
     output: Path = typer.Option(Path("reports"), "--output", "-o"),  # noqa: B008
-    fmt: str = typer.Option("both", "--fmt", help="png, pdf, or both"),
+    benchmark: str = typer.Option(
+        "SPY", "--benchmark", "-b", help="Benchmark ticker (e.g. SPY, QQQ). Pass 'none' to disable."
+    ),  # noqa: E501
 ) -> None:
     """Regenerate a tearsheet for a saved experiment."""
     from snippy_scales.evaluation import SQLiteStore, TearsheetGenerator
@@ -361,10 +370,9 @@ def tearsheet(
     safe_name = exp_row["name"].replace(" ", "_").replace("/", "-")
     output_path = output / f"{safe_name}_tearsheet"
 
-    gen = TearsheetGenerator()
-    paths = gen.generate_walk_forward(result, output_path=output_path, fmt=fmt)
-    for p in paths:
-        console.print(f"[green]Saved:[/] {p}")
+    gen = TearsheetGenerator(benchmark=None if benchmark.lower() == "none" else benchmark)
+    path = gen.generate_walk_forward(result, output_path=output_path)
+    console.print(f"[green]Saved:[/] {path}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

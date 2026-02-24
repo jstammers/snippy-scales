@@ -346,14 +346,13 @@ class TestEvaluationRunner:
         runner = EvaluationRunner(
             n_splits=2,
             tearsheet_dir=tmp_path / "sheets",
-            tearsheet_fmt="png",
+            benchmark=None,  # avoid network calls in tests
         )
         runner.evaluate(TrendFollowing, bars, symbol="SIM", experiment_name="sheet_test")
 
-        pngs = list((tmp_path / "sheets").glob("*.png"))
-        assert len(pngs) >= 1
-        # File should be non-empty
-        assert pngs[0].stat().st_size > 0
+        htmls = list((tmp_path / "sheets").glob("*.html"))
+        assert len(htmls) >= 1
+        assert htmls[0].stat().st_size > 0
 
     def test_experiment_name_defaults(self) -> None:
         bars = _make_bars(400)
@@ -483,29 +482,21 @@ class TestTearsheetGenerator:
             returns=returns,
         )
 
-    def test_generate_png(self, tmp_path: Path) -> None:
-        gen = TearsheetGenerator()
+    def test_generate_html(self, tmp_path: Path) -> None:
+        gen = TearsheetGenerator(benchmark=None)  # no network in tests
         result = self._make_backtest_result()
-        paths = gen.generate(result, title="Test", output_path=tmp_path / "ts.png", fmt="png")
-        assert len(paths) == 1
-        assert paths[0].suffix == ".png"
-        assert paths[0].stat().st_size > 0
-
-    def test_generate_both(self, tmp_path: Path) -> None:
-        gen = TearsheetGenerator()
-        result = self._make_backtest_result()
-        paths = gen.generate(result, title="Test", output_path=tmp_path / "ts", fmt="both")
-        assert len(paths) == 2
-        suffixes = {p.suffix for p in paths}
-        assert ".png" in suffixes
-        assert ".pdf" in suffixes
+        path = gen.generate(
+            result, title="Test", output_path=tmp_path / "ts", start_date="2020-01-01"
+        )
+        assert path.suffix == ".html"
+        assert path.stat().st_size > 0
 
     def test_generate_walk_forward(self, tmp_path: Path) -> None:
         bars = _make_bars(400)
         runner = EvaluationRunner(n_splits=2, initial_capital=100_000.0)
         eval_result = runner.evaluate(TrendFollowing, bars, symbol="SIM")
 
-        gen = TearsheetGenerator()
-        paths = gen.generate_walk_forward(eval_result, output_path=tmp_path / "wf_ts", fmt="png")
-        assert len(paths) >= 1
-        assert paths[0].stat().st_size > 0
+        gen = TearsheetGenerator(benchmark=None)  # no network in tests
+        path = gen.generate_walk_forward(eval_result, output_path=tmp_path / "wf_ts")
+        assert path.suffix == ".html"
+        assert path.stat().st_size > 0
