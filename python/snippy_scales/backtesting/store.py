@@ -1,35 +1,24 @@
-"""DuckDB persistence layer for backtest results.
+"""DuckDB persistence layer for single-pass backtest results.
 
 Schema
 ------
-Four tables are maintained in a single DuckDB database file:
+One table is maintained in a single DuckDB database file:
 
 ``backtest_runs``
     One row per single-pass backtest.  Contains all 33
     :class:`~snippy_scales.backtesting.domain.BacktestMetrics` fields plus
     run metadata (id, symbol, strategy name, timestamps, config parameters).
 
-``walk_forward_runs``
-    One row per walk-forward analysis — a container that groups multiple
-    out-of-sample folds together.
-
-``walk_forward_folds``
-    One row per fold within a walk-forward run.  Stores the fold's OOS window
-    boundaries and all 33 metrics for that fold's out-of-sample period.
-
-``walk_forward_summary``
-    One row per walk-forward run.  Stores the mean **and** standard deviation
-    for the 14 key metrics aggregated across all folds, making it easy to
-    assess both average performance and fold-to-fold consistency.
+For evaluation (walk-forward) analytics, see
+:class:`~snippy_scales.evaluation.database.AnalyticsStore`.
 
 Typical usage::
 
     import duckdb
     from snippy_scales.backtesting.store import BacktestStore
 
-    store = BacktestStore("data/results.duckdb")
+    store = BacktestStore("data/analytics.duckdb")
     run_id = store.save_run(result, strategy_name="TrendFollowing")
-    wf_id  = store.save_walk_forward(wf_result, strategy_name="TrendFollowing")
 """
 
 from __future__ import annotations
@@ -41,16 +30,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import duckdb as _duckdb
 
-    from snippy_scales.backtesting.domain import BacktestResult, WalkForwardResult
+    from snippy_scales.backtesting.domain import BacktestResult
 
 # ---------------------------------------------------------------------------
 # DDL helpers
 # ---------------------------------------------------------------------------
 
-# All 33 BacktestMetrics columns, shared across backtest_runs and
-# walk_forward_folds.  Defined once and interpolated into both CREATE TABLE
-# statements to keep the schema in sync automatically.
-_METRICS_COLS = """
+# All 33 BacktestMetrics columns — defined once and reused by BacktestStore
+# and evaluation.AnalyticsStore (fold_results test metrics).
+METRICS_COLS = """
     -- Core performance ratios
     total_return_pct          DOUBLE,
     sharpe_ratio              DOUBLE,
@@ -92,37 +80,6 @@ _METRICS_COLS = """
     open_trade_pnl            DOUBLE,
     exposure_pct              DOUBLE"""
 
-# Mean + std_dev columns for the 14 key metrics stored in walk_forward_summary.
-_SUMMARY_COLS = """
-    total_return_pct_mean     DOUBLE,
-    total_return_pct_std      DOUBLE,
-    sharpe_ratio_mean         DOUBLE,
-    sharpe_ratio_std          DOUBLE,
-    sortino_ratio_mean        DOUBLE,
-    sortino_ratio_std         DOUBLE,
-    calmar_ratio_mean         DOUBLE,
-    calmar_ratio_std          DOUBLE,
-    omega_ratio_mean          DOUBLE,
-    omega_ratio_std           DOUBLE,
-    max_drawdown_pct_mean     DOUBLE,
-    max_drawdown_pct_std      DOUBLE,
-    win_rate_pct_mean         DOUBLE,
-    win_rate_pct_std          DOUBLE,
-    profit_factor_mean        DOUBLE,
-    profit_factor_std         DOUBLE,
-    expectancy_mean           DOUBLE,
-    expectancy_std            DOUBLE,
-    sqn_mean                  DOUBLE,
-    sqn_std                   DOUBLE,
-    recovery_factor_mean      DOUBLE,
-    recovery_factor_std       DOUBLE,
-    payoff_ratio_mean         DOUBLE,
-    payoff_ratio_std          DOUBLE,
-    avg_trade_return_pct_mean DOUBLE,
-    avg_trade_return_pct_std  DOUBLE,
-    exposure_pct_mean         DOUBLE,
-    exposure_pct_std          DOUBLE"""
-
 _DDL_BACKTEST_RUNS = f"""
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id               VARCHAR PRIMARY KEY,
@@ -132,40 +89,12 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     initial_capital  DOUBLE,
     fees             DOUBLE,
     slippage         DOUBLE,
-    {_METRICS_COLS.strip()}
-)"""
-
-_DDL_WALK_FORWARD_RUNS = """
-CREATE TABLE IF NOT EXISTS walk_forward_runs (
-    id               VARCHAR PRIMARY KEY,
-    symbol           VARCHAR  NOT NULL,
-    strategy_name    VARCHAR,
-    run_at           TIMESTAMP NOT NULL,
-    n_folds          INTEGER   NOT NULL,
-    initial_capital  DOUBLE,
-    fees             DOUBLE,
-    slippage         DOUBLE
-)"""
-
-_DDL_WALK_FORWARD_FOLDS = f"""
-CREATE TABLE IF NOT EXISTS walk_forward_folds (
-    id                    VARCHAR PRIMARY KEY,
-    walk_forward_run_id   VARCHAR  NOT NULL REFERENCES walk_forward_runs(id),
-    fold_index            INTEGER  NOT NULL,
-    oos_start             BIGINT,
-    oos_end               BIGINT,
-    {_METRICS_COLS.strip()}
-)"""
-
-_DDL_WALK_FORWARD_SUMMARY = f"""
-CREATE TABLE IF NOT EXISTS walk_forward_summary (
-    walk_forward_run_id   VARCHAR PRIMARY KEY REFERENCES walk_forward_runs(id),
-    {_SUMMARY_COLS.strip()}
+    {METRICS_COLS.strip()}
 )"""
 
 # Flat ordered list of the 33 metric attribute names — used to build INSERT
 # parameter lists without repeating the names in multiple places.
-_METRIC_NAMES: tuple[str, ...] = (
+METRIC_NAMES: tuple[str, ...] = (
     "total_return_pct",
     "sharpe_ratio",
     "sortino_ratio",
@@ -201,32 +130,14 @@ _METRIC_NAMES: tuple[str, ...] = (
     "exposure_pct",
 )
 
-_SUMMARY_METRIC_NAMES: tuple[str, ...] = (
-    "total_return_pct",
-    "sharpe_ratio",
-    "sortino_ratio",
-    "calmar_ratio",
-    "omega_ratio",
-    "max_drawdown_pct",
-    "win_rate_pct",
-    "profit_factor",
-    "expectancy",
-    "sqn",
-    "recovery_factor",
-    "payoff_ratio",
-    "avg_trade_return_pct",
-    "exposure_pct",
-)
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 
-def _metrics_values(metrics: object) -> list[object]:
+def metrics_values(metrics: object) -> list[object]:
     """Extract all 33 metric values from a BacktestMetrics instance."""
-    return [getattr(metrics, name) for name in _METRIC_NAMES]
+    return [getattr(metrics, name) for name in METRIC_NAMES]
 
 
 def _symbol_str(symbol: str | list[str]) -> str:
@@ -246,20 +157,23 @@ def _now() -> datetime:
 
 
 class BacktestStore:
-    """Thin DuckDB wrapper that persists backtest and walk-forward results.
+    """Thin DuckDB wrapper that persists single-pass backtest results.
+
+    For walk-forward / evaluation analytics, use
+    :class:`~snippy_scales.evaluation.database.AnalyticsStore`.
 
     Args:
-        db_path: Path to the DuckDB file.  Pass ``":memory:"`` for an
+        db_path: Path to the DuckDB file.  Pass ``\":memory:\"`` for an
             in-process, in-memory database (useful for testing).
 
     Example::
 
-        store = BacktestStore("data/results.duckdb")
+        store = BacktestStore("data/analytics.duckdb")
         run_id = store.save_run(result, strategy_name="TrendFollowing",
                                 initial_capital=100_000, fees=0.001)
     """
 
-    def __init__(self, db_path: str = "data/results.duckdb") -> None:
+    def __init__(self, db_path: str = "data/analytics.duckdb") -> None:
         import duckdb  # noqa: PLC0415 — optional dep, imported lazily
 
         self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(db_path)
@@ -270,14 +184,8 @@ class BacktestStore:
     # ------------------------------------------------------------------
 
     def create_schema(self) -> None:
-        """Create all four tables if they do not already exist."""
-        for ddl in (
-            _DDL_BACKTEST_RUNS,
-            _DDL_WALK_FORWARD_RUNS,
-            _DDL_WALK_FORWARD_FOLDS,
-            _DDL_WALK_FORWARD_SUMMARY,
-        ):
-            self._conn.execute(ddl)
+        """Create the ``backtest_runs`` table if it does not already exist."""
+        self._conn.execute(_DDL_BACKTEST_RUNS)
 
     # ------------------------------------------------------------------
     # Single-pass backtest persistence
@@ -317,103 +225,13 @@ class BacktestStore:
             fees,
             slippage,
         ]
-        metric_vals = _metrics_values(result.metrics)
+        metric_vals = metrics_values(result.metrics)
         placeholders = ", ".join(["?"] * (len(meta) + len(metric_vals)))
         self._conn.execute(
             f"INSERT OR REPLACE INTO backtest_runs VALUES ({placeholders})",
             meta + metric_vals,
         )
         return rid
-
-    # ------------------------------------------------------------------
-    # Walk-forward persistence
-    # ------------------------------------------------------------------
-
-    def save_walk_forward(
-        self,
-        result: WalkForwardResult,
-        *,
-        strategy_name: str | None = None,
-        initial_capital: float | None = None,
-        fees: float | None = None,
-        slippage: float | None = None,
-        run_id: str | None = None,
-    ) -> str:
-        """Persist a :class:`WalkForwardResult` across all three WF tables.
-
-        Writes:
-        * one row to ``walk_forward_runs``
-        * one row per fold to ``walk_forward_folds``
-        * one row to ``walk_forward_summary``
-
-        All three writes are wrapped in a single transaction.
-
-        Args:
-            result: The walk-forward result to persist.
-            strategy_name: Optional strategy identifier.
-            initial_capital: Starting capital per fold.
-            fees: Per-trade commission used.
-            slippage: Round-trip slippage used.
-            run_id: Override the auto-generated UUID.
-
-        Returns:
-            The ``id`` of the ``walk_forward_runs`` row.
-        """
-        wf_id = run_id or str(uuid.uuid4())
-        sym = _symbol_str(result.symbol)
-        now = _now()
-
-        self._conn.begin()
-        try:
-            # walk_forward_runs
-            self._conn.execute(
-                "INSERT OR REPLACE INTO walk_forward_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    wf_id,
-                    sym,
-                    strategy_name,
-                    now,
-                    len(result.folds),
-                    initial_capital,
-                    fees,
-                    slippage,
-                ],
-            )
-
-            # walk_forward_folds — one row per fold
-            fold_placeholders = ", ".join(["?"] * (5 + len(_METRIC_NAMES)))
-            for fold in result.folds:
-                fold_id = str(uuid.uuid4())
-                fold_meta = [
-                    fold_id,
-                    wf_id,
-                    fold.fold_index,
-                    fold.oos_start,
-                    fold.oos_end,
-                ]
-                self._conn.execute(
-                    f"INSERT OR REPLACE INTO walk_forward_folds VALUES ({fold_placeholders})",
-                    fold_meta + _metrics_values(fold.result.metrics),
-                )
-
-            # walk_forward_summary
-            s = result.summary
-            summary_vals: list[object] = [wf_id]
-            for metric in _SUMMARY_METRIC_NAMES:
-                summary_vals.append(getattr(s, f"{metric}_mean"))
-                summary_vals.append(getattr(s, f"{metric}_std"))
-            summary_placeholders = ", ".join(["?"] * len(summary_vals))
-            self._conn.execute(
-                f"INSERT OR REPLACE INTO walk_forward_summary VALUES ({summary_placeholders})",
-                summary_vals,
-            )
-
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        return wf_id
 
     # ------------------------------------------------------------------
     # Querying convenience methods

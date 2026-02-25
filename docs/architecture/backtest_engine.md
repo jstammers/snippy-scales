@@ -2,351 +2,526 @@
 
 ## Overview
 
-The backtesting system is the core component that simulates trading strategies over historical market data. SnippyScales provides two complementary backtesting approaches:
+The backtesting system is the core component that simulates trading strategies over
+historical market data.  SnippyScales provides two complementary backtesting
+approaches:
 
-1. **Vectorised backtesting** (Python) — for fast, exploratory research on full historical datasets
-2. **Event-driven backtesting** (Rust) — for realistic, tick-by-tick simulation (yet to be implemented)
+1. **Vectorised backtesting** (Python + Rust) — fast, exploratory research on full
+   historical datasets, powered by the `raptorbt` Rust extension.
+2. **Event-driven backtesting** (Rust) — realistic, tick-by-tick simulation *(planned)*.
 
-This flexibility lets you iterate quickly during research, then stress-test final strategies with realistic fills and market microstructure.
+This flexibility lets you iterate quickly during research, then stress-test final
+strategies with realistic fills and market microstructure.
+
+---
+
+## Module Responsibility Contract
+
+| Module | Responsibility | Must NOT contain |
+|---|---|---|
+| `backtesting/` | Execute a backtest, return a `BacktestResult` | Fold/walk-forward logic, analysis aggregation |
+| `evaluation/` | Parameter sweeps, fold analysis, persistence, tearsheets | Execution details |
+| `research/` | Feature engineering helpers | Magic constants |
+| `_constants.py` | Package-wide conventions (`TRADING_DAYS_PER_YEAR`) | — |
+
+---
 
 ## Architecture
 
-SnippyScales backtesting consists of two implementations, each with different trade-offs:
+### Module layout
 
-### Approach 1: Vectorised Backtesting (Python) — ✅ Implemented
+```
+snippy_scales/
+├── _constants.py          ← TRADING_DAYS_PER_YEAR = 252
+├── backtesting/
+│   ├── domain.py          ← Trade, BacktestMetrics, BacktestResult (engine-agnostic)
+│   ├── engine.py          ← ExecutionEngine Protocol, RaptorExecutionEngine, make_config
+│   ├── signals.py         ← SignalBundle, PositionInterpreter, SignFlipInterpreter
+│   ├── allocation.py      ← VolTargetAllocator
+│   ├── data.py            ← OhlcvArrays, normalize_ohlcv, to_numpy_ohlcv
+│   ├── runners.py         ← BacktestRunner, BasketRunner (high-level helpers)
+│   └── store.py           ← BacktestStore (DuckDB — single-run analytics)
+└── evaluation/
+    ├── results.py         ← FoldResult, SweepResult, EvaluationResult
+    ├── split.py           ← WalkForwardSplit, SplitFold
+    ├── sweep.py           ← ParameterGrid, RandomSearch, OptunaSearch
+    ├── runner.py          ← EvaluationRunner (walk-forward + param search)
+    ├── database.py        ← SQLiteStore (metadata), AnalyticsStore (DuckDB)
+    └── tearsheet.py       ← TearsheetGenerator
+```
 
-The research layer provides fast, **vectorised backtesting** using [raptorbt](https://github.com/willybrauner/raptorbt).
+---
+
+### Vectorised Backtesting — ✅ Implemented
+
+The research layer provides fast, **vectorised backtesting** using
+[raptorbt](https://github.com/willybrauner/raptorbt) — a Rust extension that processes
+entire OHLCV datasets as arrays without any Python loops.
 
 **How it works:**
-- Entire OHLCV dataset is loaded into NumPy/Polars arrays
-- Entry/exit signals are vectorised (broadcasted across all bars)
-- Orders are filled using vectorised fill model
-- Portfolio state is computed bar-by-bar
-- Results are accumulated into metrics (Sharpe, max drawdown, etc.)
+
+- Entire OHLCV dataset is loaded into NumPy arrays
+- Entry/exit signals are computed in Python (vectorised)
+- `raptorbt` processes signals as arrays — simulating fills bar-by-bar in Rust
+- Results are converted to typed Python domain objects
 
 **Key components:**
 
-- **ExecutionEngine** (Python Protocol) — swappable execution backends
-  ```python
-  @runtime_checkable
-  class ExecutionEngine(Protocol):
-      def run(self, instruments: List[InstrumentSpec]) -> BacktestResult: ...
-  ```
+#### `ExecutionEngine` (Protocol)
 
-- **RaptorExecutionEngine** — default implementation using raptorbt
-  ```python
-  class RaptorExecutionEngine(ExecutionEngine):
-      def run(self, instruments: List[InstrumentSpec]) -> BacktestResult:
-          return raptorbt.run_basket_backtest(...)
-  ```
+Swappable execution backends — any class implementing `execute()` is valid.
 
-- **SignalBundle** — converts strategy output to entry/exit arrays
-  ```python
-  class SignalBundle:
-      entries: np.ndarray      # boolean, True on entry bar
-      exits: np.ndarray        # boolean, True on exit bar
-      direction: int           # 1 for long, -1 for short
-      weight: float            # position size fraction
-  ```
-
-- **BacktestResult** — typed results with metrics
-  ```python
-  @dataclass
-  class BacktestResult:
-      trades: List[Trade]      # all executed trades
-      equity_curve: np.ndarray  # portfolio equity over time
-      metrics: BacktestMetrics  # Sharpe, max DD, returns, etc.
-  ```
-
-**Characteristics:**
-- ✅ Fast (sec-scale for years of data)
-- ✅ Ideal for research, parameter sweeps, cross-validation
-- ✅ Works with pre-computed signals
-- ❌ Limited market microstructure simulation
-- ❌ No tick-level fills or partial fills
-- ❌ Bar-close execution only
-
-**Use case:** Research layer — testing signal quality and strategy viability quickly.
-
----
-
-### Approach 2: Event-Driven Backtesting (Rust) — 🔄 Planned
-
-A **realistic, tick-by-tick backtesting engine** (yet to be implemented) in Rust for final validation.
-
-**Planned architecture:**
-
-```rust
-pub struct BacktestEngine<F: FillModel> {
-    pub portfolio: Portfolio,
-    pub fill_model: F,
-    pending_orders: VecDeque<Order>,
-}
-
-impl<F: FillModel> BacktestEngine<F> {
-    pub fn new(initial_cash: f64, fill_model: F) -> Self { ... }
-    pub fn submit_order(&mut self, order: Order) { ... }
-    pub fn step(&mut self, event: &MarketEvent) -> Vec<Fill> { ... }
-}
+```python
+@runtime_checkable
+class ExecutionEngine(Protocol):
+    def execute(
+        self,
+        instruments: list[InstrumentSpec],
+        *,
+        config: Any | None = None,
+        sync_mode: str = "any",
+    ) -> BacktestResult: ...
 ```
 
-**Planned components:**
+#### `RaptorExecutionEngine`
 
-- **FillModel** — simulates realistic fills
-  ```rust
-  pub trait FillModel {
-      fn simulate(&self, order: &Order, market_price: f64, slippage: f64) -> Fill;
-  }
-  ```
-  Built-in implementations (planned):
-  - **ImmediateFill** — instant fills at market (baseline)
-  - **SlippageFill** — configurable BP slippage
-  - **ProcessingFill** — multi-bar order processing delays
+Default implementation backed by `raptorbt`.
 
-- **Portfolio** — tracks positions and P&L
-  ```rust
-  pub struct Portfolio {
-      cash: f64,
-      positions: HashMap<String, Position>,
-      equity_curve: Vec<f64>,
-  }
-  ```
+```python
+engine = RaptorExecutionEngine()
+result = engine.execute(instruments, config=config, sync_mode="any")
+```
 
-- **Event loop** — processes bars/ticks sequentially
-  - Emit signals from Python
-  - Submit orders
-  - Match against fills
-  - Update portfolio
-  - Record results
+#### `SignalBundle`
 
-**Planned characteristics:**
-- ✅ Realistic — covers slippage, fills, delays
-- ✅ Fast — compiled Rust, efficient data structures
-- ✅ Deterministic — reproducible across runs
-- ❌ More complex than vectorised approach
-- ❌ Requires signal implementation in Rust (or callbacks)
+Four boolean arrays produced by interpreting a signed-position time series:
 
-**Use case:** Production validation — stress-test final strategies with realistic assumptions.
+```python
+@dataclass(frozen=True)
+class SignalBundle:
+    long_entries:  np.ndarray   # True on bar where long position opens
+    long_exits:    np.ndarray   # True on bar where long position closes
+    short_entries: np.ndarray   # True on bar where short position opens
+    short_exits:   np.ndarray   # True on bar where short position closes
+```
+
+#### `InstrumentSpec`
+
+Immutable container for one instrument leg in a basket backtest:
+
+```python
+@dataclass(frozen=True)
+class InstrumentSpec:
+    symbol:     str
+    timestamps: np.ndarray   # nanoseconds since epoch
+    open:       np.ndarray
+    high:       np.ndarray
+    low:        np.ndarray
+    close:      np.ndarray
+    volume:     np.ndarray
+    entries:    np.ndarray   # boolean — long or short entries
+    exits:      np.ndarray   # boolean — position closes
+    direction:  int          # 1 = long, -1 = short
+    weight:     float        # fraction of capital allocated
+```
+
+#### `make_config()`
+
+```python
+config = make_config(
+    initial_capital=100_000.0,   # NOT initial_cash
+    fees=0.001,
+    slippage=0.0005,
+    upon_bar_close=True,
+)
+```
+
+#### `BacktestResult`
+
+```python
+@dataclass
+class BacktestResult:
+    symbol:         str | list[str]
+    metrics:        BacktestMetrics
+    equity_curve:   np.ndarray   # float64
+    drawdown_curve: np.ndarray   # float64
+    returns:        np.ndarray   # float64 period returns
+    trades:         list[Trade]
+```
 
 ---
 
-### Comparison
+## BacktestMetrics — 33 fields
 
-| Aspect | Vectorised (Python) | Event-Driven (Rust) |
-|--------|---------------------|---------------------|
-| **Status** | ✅ Ready | 🔄 Planned |
-| **Speed** | Fast (vectorised) | Very fast (compiled) |
-| **Use case** | Research, prototyping | Production validation |
-| **Fills** | Simple (bar-close) | Realistic (configurable) |
-| **Signals** | Pre-computed arrays | Real-time from Python callbacks |
-| **Complexity** | Low | Medium |
-| **Test coverage** | Broad | Planned |
+`BacktestMetrics` is a frozen dataclass holding all performance statistics returned
+by `raptorbt`.  Fields are grouped below.
+
+### Core performance
+
+| Field | Type | Description |
+|---|---|---|
+| `total_return_pct` | `float` | Total strategy return as a percentage |
+| `sharpe_ratio` | `float` | Annualised Sharpe (risk-free = 0) |
+| `sortino_ratio` | `float` | Annualised Sortino ratio |
+| `calmar_ratio` | `float` | Return / max-drawdown ratio |
+| `omega_ratio` | `float` | Probability-weighted gains-to-losses ratio |
+
+### Drawdown
+
+| Field | Type | Description |
+|---|---|---|
+| `max_drawdown_pct` | `float` | Maximum peak-to-trough drawdown (%) |
+| `max_drawdown_duration` | `int` | Longest drawdown in bars |
+
+### Trade counts
+
+| Field | Type | Description |
+|---|---|---|
+| `total_trades` | `int` | All trades executed |
+| `total_closed_trades` | `int` | Closed positions |
+| `total_open_trades` | `int` | Currently open positions |
+| `winning_trades` | `int` | Profitable transactions |
+| `losing_trades` | `int` | Unprofitable transactions |
+
+### Trade performance
+
+| Field | Type | Description |
+|---|---|---|
+| `win_rate_pct` | `float` | % of trades that were profitable |
+| `profit_factor` | `float` | Gross profit / gross loss |
+| `expectancy` | `float` | Average profit per trade (cash units) |
+| `sqn` | `float` | System Quality Number |
+| `avg_trade_return_pct` | `float` | Average return across all trades |
+| `avg_win_pct` | `float` | Mean return of winning trades |
+| `avg_loss_pct` | `float` | Mean return of losing trades |
+| `best_trade_pct` | `float` | Maximum single-trade return |
+| `worst_trade_pct` | `float` | Minimum single-trade return |
+| `payoff_ratio` | `float` | Avg win return / avg loss return |
+| `recovery_factor` | `float` | Net profit / max drawdown |
+
+### Duration
+
+| Field | Type | Description |
+|---|---|---|
+| `avg_holding_period` | `float` | Average trade duration (bars) |
+| `avg_winning_duration` | `float` | Mean duration of winning trades |
+| `avg_losing_duration` | `float` | Mean duration of losing trades |
+
+### Streaks
+
+| Field | Type | Description |
+|---|---|---|
+| `max_consecutive_wins` | `int` | Longest winning streak |
+| `max_consecutive_losses` | `int` | Longest losing streak |
+
+### Portfolio
+
+| Field | Type | Description |
+|---|---|---|
+| `start_value` | `float` | Initial capital |
+| `end_value` | `float` | Final portfolio value |
+| `total_fees_paid` | `float` | Cumulative transaction costs |
+| `open_trade_pnl` | `float` | Unrealised PnL from active positions |
+| `exposure_pct` | `float` | % of time in market |
+
+**Correct field name examples:**
+
+```python
+result.metrics.max_drawdown_pct         # NOT max_drawdown
+result.metrics.total_return_pct         # NOT total_return
+result.metrics.total_fees_paid          # NOT fees
+```
+
+---
+
+## Evaluation Layer
+
+The `evaluation/` module provides out-of-sample validation via walk-forward
+cross-validation and parameter search.
+
+### Result hierarchy
+
+```
+EvaluationResult
+└── sweep_results: list[SweepResult]          ← one per parameter set
+    └── folds: list[FoldResult]               ← one per (params, fold) combo
+        ├── train_metrics: BacktestMetrics
+        ├── test_metrics:  BacktestMetrics
+        ├── train_equity_curve: np.ndarray
+        └── test_equity_curve:  np.ndarray
+```
+
+### `SweepResult` — aggregate statistics
+
+For each parameter set, `SweepResult` computes mean **and** population
+std-dev across all test folds:
+
+| Property | Description |
+|---|---|
+| `mean_test_sharpe` / `std_test_sharpe` | Sharpe ratio across folds |
+| `mean_test_return` / `std_test_return` | Total return (%) across folds |
+| `mean_test_max_dd` / `std_test_max_dd` | Max drawdown (%) across folds |
+| `mean_test_sortino` / `std_test_sortino` | Sortino ratio across folds |
+
+### `EvaluationResult` — top-level container
+
+```python
+result.best_params          # dict — highest mean OOS Sharpe
+result.best_result          # SweepResult with best mean Sharpe
+result.summary_df()         # Polars DataFrame, sorted by mean_test_sharpe DESC
+result.oos_equity_curve()   # stitched OOS equity curve for best params (starts at 1.0)
+```
+
+`summary_df()` columns include all parameter names plus:
+`mean_test_sharpe`, `std_test_sharpe`, `mean_test_return_pct`, `std_test_return_pct`,
+`mean_test_max_dd_pct`, `std_test_max_dd_pct`, `mean_test_sortino`, `std_test_sortino`,
+`n_folds`.
+
+---
+
+## Database Architecture
+
+SnippyScales uses a **hybrid persistence model** separating analytics from metadata.
+
+```
+┌──────────────────────────────┐     ┌────────────────────────────────────────┐
+│   SQLite — metadata.db       │     │   DuckDB — analytics.duckdb            │
+│                              │     │                                        │
+│  experiments                 │◄────│  sweep_results.experiment_id           │
+│    id, name, strategy_class  │     │  sweep_results (mean+std, 4 metrics)   │
+│    symbols, config, n_splits │     │  fold_results  (4 train + 33 test)     │
+│    window_type, created_at   │     │  backtest_runs (all 33 metrics)        │
+│                              │     │  [future: trades, pnl series, signals] │
+└──────────────────────────────┘     └────────────────────────────────────────┘
+```
+
+**SQLite** stores lightweight relational metadata — experiment configuration and
+run registry.  One row per evaluation run.
+
+**DuckDB** stores wide columnar analytics data — per-fold metrics, per-param-set
+aggregated statistics, single-pass backtest runs.
+
+### `SQLiteStore` — metadata
+
+```python
+from snippy_scales.evaluation.database import SQLiteStore
+
+store = SQLiteStore("data/metadata.db")
+experiment_id = store.save_evaluation(eval_result, config={
+    "initial_capital": 1_000_000,
+    "n_splits": 5,
+    "window": "expanding",
+})
+df = store.load_experiments()   # Polars DataFrame of all runs
+```
+
+`save_evaluation()` writes only to the `experiments` table and returns the
+integer primary key.  Sweep/fold data belong in `AnalyticsStore`.
+
+### `AnalyticsStore` — DuckDB analytics
+
+```python
+from snippy_scales.evaluation.database import AnalyticsStore
+
+store = AnalyticsStore("data/analytics.duckdb")
+store.save_evaluation_analytics(eval_result, experiment_id=1)
+
+sweep_df = store.load_sweep_results(experiment_id=1)
+fold_df   = store.load_fold_results(sweep_id="<uuid>")
+```
+
+Tables:
+- **`sweep_results`** — one row per (experiment, parameter set) with mean and
+  std for the 4 key test metrics.
+- **`fold_results`** — one row per (sweep, fold) with 4 training-window metrics
+  and all 33 test-window metrics.
+
+### `BacktestStore` — DuckDB single-run analytics
+
+```python
+from snippy_scales.backtesting.store import BacktestStore
+
+store = BacktestStore("data/analytics.duckdb")
+run_id = store.save_run(
+    result,
+    strategy_name="TrendFollowing",
+    initial_capital=100_000.0,
+    fees=0.001,
+    slippage=0.0005,
+)
+```
+
+---
 
 ## Workflow
 
-This is the current **vectorised backtesting** workflow:
-
-```
-┌──────────────────────────────────────────┐
-│ 1. Load historical OHLCV data            │
-│    (from local data store or API)        │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 2. Generate signals (Python)             │
-│    Strategy.generate_signals(bars)       │
-│    → entry/exit points, position sizing  │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 3. Prepare instrument specs (vectorised) │
-│    (OHLCV × signals → InstrumentSpec)    │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 4. Run vectorised backtest (raptorbt)    │
-│    Entire dataset processed as arrays    │
-│    → fills, equity curve, metrics        │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 5. Analyze results (Python)              │
-│    Sharpe, max drawdown, returns         │
-└──────────────────────────────────────────┘
-```
-
-**Future: Event-driven backtesting workflow**
-
-```
-┌──────────────────────────────────────────┐
-│ 1. Load historical OHLCV data            │
-│    (as nested array or feed)             │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 2. For each bar:                         │
-│    a) Emit signal (Python callback)      │
-│    b) Submit order to engine             │
-│    c) Engine simulates fill (realistic)  │
-│    d) Update portfolio                   │
-└──────────────────┬───────────────────────┘
-                   │
-┌──────────────────▼───────────────────────┐
-│ 3. Collect results                       │
-│    Fills, equity curve, metrics          │
-└──────────────────────────────────────────┘
-```
-
-## Running a Backtest
-
-Currently, all backtests use the **vectorised approach** (fast, exploratory).
-
-### From the CLI
-
-```bash
-just algo backtest run trend_following --symbol ES.c.0 --start 2020-01-01 --end 2024-12-31
-```
-
-This invokes the vectorised runner under the hood.
-
-### Programmatically (Python)
-
-```python
-from snippy_scales.backtesting import BacktestRunner, run_basket
-from snippy_scales.strategies.trend import TrendFollowing
-
-# High-level API
-runner = BacktestRunner(
-    strategy=TrendFollowing(),
-    instruments=["ES.c.0"],
-    start_date="2020-01-01",
-    end_date="2024-12-31",
-    initial_capital=1_000_000.0,
-)
-
-result = runner.run()
-print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
-print(f"Max DD: {result.metrics.max_drawdown:.2%}")
-print(f"Total return: {result.metrics.total_return:.2%}")
-```
-
-Or use the low-level raptorbt API directly:
+### 1. Vectorised single-pass backtest
 
 ```python
 from snippy_scales.backtesting import (
-    InstrumentSpec,
-    run_basket,
     make_config,
+    run_single,
+    run_long_short,
+    run_basket,
+    InstrumentSpec,
 )
 
-# Prepare instrument specs from pre-computed signals
-specs = [
-    InstrumentSpec(
-        symbol="ES.c.0",
-        timestamps=bars["timestamp"].to_numpy(),
-        open=bars["open"].to_numpy(),
-        high=bars["high"].to_numpy(),
-        low=bars["low"].to_numpy(),
-        close=bars["close"].to_numpy(),
-        volume=bars["volume"].to_numpy(),
-        entries=entry_signals,  # boolean array
-        exits=exit_signals,      # boolean array
-        direction=1,             # 1 = long, -1 = short
-        weight=1.0,              # position size
-    ),
-]
+# Single direction
+result = run_single(
+    symbol="ES.c.0",
+    timestamps=bars["timestamp"].to_numpy(),
+    open_prices=bars["open"].to_numpy(),
+    high_prices=bars["high"].to_numpy(),
+    low_prices=bars["low"].to_numpy(),
+    close_prices=bars["close"].to_numpy(),
+    volume=bars["volume"].to_numpy(),
+    entries=entry_signals,
+    exits=exit_signals,
+    direction=1,            # 1 = long, -1 = short
+    weight=1.0,
+    config=make_config(initial_capital=1_000_000.0),   # NOT initial_cash
+)
 
-config = make_config(initial_cash=1_000_000.0, fees=0.001)
-result = run_basket(specs, config)
+print(f"Sharpe:     {result.metrics.sharpe_ratio:.2f}")
+print(f"Max DD:     {result.metrics.max_drawdown_pct:.2%}")
+print(f"Return:     {result.metrics.total_return_pct:.2%}")
+print(f"Win rate:   {result.metrics.win_rate_pct:.1f}%")
 ```
 
-## Configuration
+### 2. Long/short simultaneous strategy
 
-Backtest configuration is set via:
-- Command-line flags (`--symbol`, `--start`, `--end`)
-- Strategy hyperparameters (e.g., `fast_period`, `vol_target`)
-- Fill model parameters (slippage, commissions)
+```python
+result = run_long_short(
+    symbol="ES.c.0",
+    timestamps=ts, open_prices=o, high_prices=h,
+    low_prices=l, close_prices=c, volume=v,
+    long_entries=le, long_exits=lx,    # NOT entries/exits/direction
+    short_entries=se, short_exits=sx,
+    long_weight=0.5, short_weight=0.5,
+    config=make_config(initial_capital=1_000_000.0),
+)
+```
+
+### 3. Walk-forward evaluation with parameter search
+
+```python
+from snippy_scales.evaluation import (
+    EvaluationRunner,
+    ParameterGrid,
+    RandomSearch,
+)
+from snippy_scales.strategies.trend import TrendFollowing
+
+runner = EvaluationRunner(
+    n_splits=5,
+    window="expanding",
+    initial_capital=1_000_000.0,
+    fees=0.001,
+    slippage=0.0005,
+    db_path="data/metadata.db",                      # SQLite — experiment registry
+    analytics_db_path="data/analytics.duckdb",       # DuckDB — sweep/fold metrics
+    tearsheet_dir="reports/",
+)
+
+grid = ParameterGrid({"fast_period": [10, 20, 40], "slow_period": [40, 60, 120]})
+result = runner.evaluate(TrendFollowing, bars, params=grid, symbol="ES.c.0")
+
+print(result.best_params)
+print(result.summary_df())
+```
+
+### 4. VolTargetAllocator
+
+```python
+from snippy_scales.backtesting import VolTargetAllocator
+
+allocator = VolTargetAllocator(vol_target=0.15, max_leverage=2.0)
+weight = allocator.weight(close)      # NOT allocator.allocate(positions, returns)
+```
+
+---
+
+## Event-Driven Backtesting — 🔄 Planned
+
+A realistic, tick-by-tick Rust backtesting engine is planned for production
+validation of final strategies.
+
+**Planned characteristics:**
+- Configurable fill models (slippage, market impact, partial fills)
+- Order queuing and latency simulation
+- Real-time signal callbacks from Python
+- Risk checks (drawdown limits, max position size)
+- Multi-asset correlation handling
+
+---
 
 ## Performance
 
-Because the core engine is implemented in Rust with:
-- **Zero-copy data structures** (native arrays)
-- **Event-driven processing** (no full-history copies)
-- **Compiled, optimized code** (orders of magnitude faster than pure Python)
+The vectorised engine is fast because:
 
-You can backtest years of minute-level data in seconds.
+- **Zero-copy data structures** — signals are passed as NumPy arrays directly to Rust
+- **Compiled Rust core** — `raptorbt` processes fills in a tight loop without GIL
+- **No Python loops** — bar-by-bar simulation runs entirely in Rust
+
+Expect seconds-scale backtest times for years of daily data.
+
+---
 
 ## Extending the Engine
 
-### Vectorised Backtesting (Python)
+### Custom strategy signals
 
-Currently, you can customize:
+```python
+from snippy_scales.strategies.base import Strategy
 
-1. **Strategy signals** — implement your own `Strategy` subclass
-   ```python
-   class MyStrategy(Strategy):
-       def generate_signals(self, bars: pl.DataFrame) -> pl.Series:
-           # your logic here
-           return positions.rename(\"position\")
-   ```
-
-2. **Position interpretation** — convert signals to entry/exit arrays
-   ```python
-   class MyPositionInterpreter(PositionInterpreter):
-       def interpret(self, positions: pl.Series) -> Tuple[np.ndarray, np.ndarray]:
-           # convert to entry/exit signals
-           return entries, exits
-   ```
-
-3. **Allocation** — scale position sizes based on volatility or risk
-   ```python
-   allocator = VolTargetAllocator(vol_target=0.15)
-   scaled_positions = allocator.allocate(positions, returns)
-   ```
-
-### Event-Driven Backtesting (Rust) — Future
-
-When implemented, you'll be able to add custom fill models:
-
-```rust
-pub struct MyFillModel {
-    slippage_bps: f64,
-    market_impact: f64,
-}
-
-impl FillModel for MyFillModel {
-    fn simulate(&self, order: &Order, market_price: f64, slippage: f64) -> Fill {
-        // custom fill logic with market impact, execution delays, etc.
-    }
-}
+class MyStrategy(Strategy):
+    def generate_signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        # return bars with "position" column: +1 long, -1 short, 0 flat
+        ...
 ```
 
-Then rebuild with `just dev`.
+### Custom position interpreter
 
-## Limitations & Future Work
+```python
+from snippy_scales.backtesting import PositionInterpreter, SignalBundle
 
-### Vectorised Backtesting (Current)
+class MyInterpreter:
+    def interpret(self, positions: np.ndarray) -> SignalBundle:
+        # convert signed positions to four boolean arrays
+        return SignalBundle(
+            long_entries=..., long_exits=...,
+            short_entries=..., short_exits=...,
+        )
+```
 
-**Limitations:**
+### Custom execution backend
+
+Any class implementing the `ExecutionEngine` Protocol can be substituted:
+
+```python
+from snippy_scales.backtesting import ExecutionEngine, InstrumentSpec, BacktestResult
+
+class MyEngine:
+    def execute(
+        self,
+        instruments: list[InstrumentSpec],
+        *,
+        config=None,
+        sync_mode: str = "any",
+    ) -> BacktestResult:
+        ...
+```
+
+---
+
+## Limitations
+
+### Vectorised backtesting (current)
+
 - Bar-close execution only (no intra-bar fills)
-- Simplified fill model (no slippage, commissions, or partial fills)
-- All entry/exit signals must be pre-computed
-- No support for dynamic order routing or risk checks
-- Single-threaded
+- No dynamic order routing or risk checks
+- Single-threaded execution per run
 
-**Future improvements:**
-- Parameter sensitivity analysis (parallel sweeps)
-- Walk-forward optimization
-- Anchored rolling window backtests
+### Event-driven backtesting (planned)
 
-### Event-Driven Backtesting (Planned)
-
-**To implement:**
-- ✅ Tick-level or sub-bar frequency processing
-- ✅ Configurable fill models (slippage, commissions, market impact)
-- ✅ Partial fills and order queuing
-- ✅ Real-time signal generation (from Python callbacks)
-- ✅ Risk checks (max position size, drawdown limits)
-- ✅ Parallel backtest runs (multiple strategies/parameters)
-- ❌ Margin and leverage support (future phase)
-- ❌ Multi-asset correlations and hedging (future phase)
+See the *Planned* section above.

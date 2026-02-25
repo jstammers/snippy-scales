@@ -1,19 +1,15 @@
-"""Tests for BacktestStore — DuckDB persistence layer.
+"""Tests for BacktestStore — DuckDB single-run persistence layer.
 
 Covers:
-* Schema creation: all four tables exist after init
+* Schema creation: backtest_runs table exists after init
 * save_run: row is written with correct metric values
 * save_run: returns the correct run_id (auto and custom)
-* save_walk_forward: rows written to all three WF tables
-* save_walk_forward: fold metrics match source data
-* save_walk_forward: summary mean/std match domain computation
+* save_run: idempotent with same id (INSERT OR REPLACE)
+* save_run: metadata fields are stored correctly
 * Context-manager protocol
-* Repeated save_run with same id uses INSERT OR REPLACE (idempotent)
 """
 
 from __future__ import annotations
-
-import math
 
 import numpy as np
 import pytest
@@ -21,15 +17,10 @@ import pytest
 from snippy_scales.backtesting.domain import (
     BacktestMetrics,
     BacktestResult,
-    FoldResult,
-    WalkForwardResult,
 )
 from snippy_scales.backtesting.store import BacktestStore
 
-# ── Helpers (shared with test_backtesting_domain) ─────────────────────────────
-
-_BASE_NS = 1_577_836_800_000_000_000
-_DAY_NS = 86_400_000_000_000
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _make_metrics(**overrides: float | int) -> BacktestMetrics:
@@ -85,17 +76,6 @@ def _make_result(**metric_overrides: float | int) -> BacktestResult:
     )
 
 
-def _make_fold(index: int, **metric_overrides: float | int) -> FoldResult:
-    oos_start = _BASE_NS + index * 90 * _DAY_NS
-    oos_end = oos_start + 90 * _DAY_NS
-    return FoldResult(
-        fold_index=index,
-        oos_start=oos_start,
-        oos_end=oos_end,
-        result=_make_result(**metric_overrides),
-    )
-
-
 @pytest.fixture
 def store() -> BacktestStore:
     """In-memory BacktestStore; closed automatically after each test."""
@@ -107,12 +87,16 @@ def store() -> BacktestStore:
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 
-def test_schema_creates_all_four_tables(store: BacktestStore) -> None:
+def test_schema_creates_backtest_runs_table(store: BacktestStore) -> None:
     tables = {row[0] for row in store.query("SELECT table_name FROM information_schema.tables")}
     assert "backtest_runs" in tables
-    assert "walk_forward_runs" in tables
-    assert "walk_forward_folds" in tables
-    assert "walk_forward_summary" in tables
+
+
+def test_schema_does_not_create_walk_forward_tables(store: BacktestStore) -> None:
+    tables = {row[0] for row in store.query("SELECT table_name FROM information_schema.tables")}
+    assert "walk_forward_runs" not in tables
+    assert "walk_forward_folds" not in tables
+    assert "walk_forward_summary" not in tables
 
 
 def test_create_schema_is_idempotent(store: BacktestStore) -> None:
@@ -198,116 +182,6 @@ def test_save_run_strategy_metadata_stored(store: BacktestStore) -> None:
     assert row[1] == pytest.approx(50_000.0)
     assert row[2] == pytest.approx(0.0005)
     assert row[3] == pytest.approx(0.0002)
-
-
-# ── save_walk_forward ─────────────────────────────────────────────────────────
-
-
-def test_save_walk_forward_returns_string_id(store: BacktestStore) -> None:
-    folds = [_make_fold(i) for i in range(3)]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    wf_id = store.save_walk_forward(wf)
-    assert isinstance(wf_id, str) and len(wf_id) > 0
-
-
-def test_save_walk_forward_run_row_written(store: BacktestStore) -> None:
-    folds = [_make_fold(i) for i in range(4)]
-    wf = WalkForwardResult.from_fold_results("ES.c.0", folds)
-    store.save_walk_forward(wf, run_id="wf-main", strategy_name="Trend")
-
-    rows = store.query(
-        "SELECT symbol, strategy_name, n_folds FROM walk_forward_runs WHERE id = ?",
-        ["wf-main"],
-    )
-    assert len(rows) == 1
-    assert rows[0][0] == "ES.c.0"
-    assert rows[0][1] == "Trend"
-    assert rows[0][2] == 4
-
-
-def test_save_walk_forward_fold_count_matches(store: BacktestStore) -> None:
-    n = 5
-    folds = [_make_fold(i) for i in range(n)]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    store.save_walk_forward(wf, run_id="wf-folds")
-    count = store.query(
-        "SELECT COUNT(*) FROM walk_forward_folds WHERE walk_forward_run_id = ?",
-        ["wf-folds"],
-    )[0][0]
-    assert count == n
-
-
-def test_save_walk_forward_fold_metrics_roundtrip(store: BacktestStore) -> None:
-    folds = [_make_fold(0, sharpe_ratio=3.14, win_rate_pct=66.0)]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    store.save_walk_forward(wf, run_id="wf-metric")
-    rows = store.query(
-        "SELECT sharpe_ratio, win_rate_pct FROM walk_forward_folds WHERE walk_forward_run_id = ?",
-        ["wf-metric"],
-    )
-    assert len(rows) == 1
-    assert rows[0][0] == pytest.approx(3.14)
-    assert rows[0][1] == pytest.approx(66.0)
-
-
-def test_save_walk_forward_fold_window_stored(store: BacktestStore) -> None:
-    fold = _make_fold(0)
-    wf = WalkForwardResult.from_fold_results("SIM", [fold])
-    store.save_walk_forward(wf, run_id="wf-window")
-    rows = store.query(
-        "SELECT fold_index, oos_start, oos_end FROM walk_forward_folds "
-        "WHERE walk_forward_run_id = ?",
-        ["wf-window"],
-    )
-    assert rows[0][0] == 0
-    assert rows[0][1] == fold.oos_start
-    assert rows[0][2] == fold.oos_end
-
-
-def test_save_walk_forward_summary_mean_roundtrip(store: BacktestStore) -> None:
-    folds = [
-        _make_fold(0, total_return_pct=5.0),
-        _make_fold(1, total_return_pct=15.0),
-    ]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    store.save_walk_forward(wf, run_id="wf-summary")
-    rows = store.query(
-        "SELECT total_return_pct_mean, total_return_pct_std "
-        "FROM walk_forward_summary WHERE walk_forward_run_id = ?",
-        ["wf-summary"],
-    )
-    assert len(rows) == 1
-    assert rows[0][0] == pytest.approx(10.0)
-    assert rows[0][1] == pytest.approx(5.0)
-
-
-def test_save_walk_forward_summary_all_std_columns_present(store: BacktestStore) -> None:
-    folds = [_make_fold(i) for i in range(2)]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    store.save_walk_forward(wf, run_id="wf-cols")
-    cols = {
-        row[0]
-        for row in store.query(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'walk_forward_summary'"
-        )
-    }
-    for metric in ("sharpe_ratio", "sortino_ratio", "sqn", "recovery_factor", "exposure_pct"):
-        assert f"{metric}_mean" in cols
-        assert f"{metric}_std" in cols
-
-
-def test_save_walk_forward_summary_std_finite(store: BacktestStore) -> None:
-    folds = [_make_fold(i) for i in range(3)]
-    wf = WalkForwardResult.from_fold_results("SIM", folds)
-    store.save_walk_forward(wf, run_id="wf-finite")
-    rows = store.query(
-        "SELECT * FROM walk_forward_summary WHERE walk_forward_run_id = ?",
-        ["wf-finite"],
-    )
-    assert len(rows) == 1
-    for val in rows[0][1:]:  # skip walk_forward_run_id
-        assert val is not None and math.isfinite(float(val))
 
 
 # ── Context manager ───────────────────────────────────────────────────────────

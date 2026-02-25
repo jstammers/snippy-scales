@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
+
+from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 
 if TYPE_CHECKING:
     import polars as pl
@@ -12,7 +15,7 @@ def realised_vol(close: pl.Series, window: int = 20, annualise: bool = True) -> 
     """Rolling realised volatility from close prices."""
     ret = close.pct_change()
     rv = ret.rolling_std(window)
-    return (rv * (252**0.5) if annualise else rv).rename(f"rv_{window}")
+    return (rv * math.sqrt(TRADING_DAYS_PER_YEAR) if annualise else rv).rename(f"rv_{window}")
 
 
 def zscore(series: pl.Series, window: int = 60) -> pl.Series:
