@@ -236,10 +236,10 @@ class AnalyticsStore:
         df = store.load_sweep_results(experiment_id=1)
     """
 
-    def __init__(self, db_path: str = "data/analytics.duckdb") -> None:
+    def __init__(self, db_path: Path | str = "data/analytics.duckdb") -> None:
         import duckdb  # noqa: PLC0415 — optional dep, imported lazily
 
-        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(db_path)
+        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(str(db_path))
         self.create_schema()
 
     # ------------------------------------------------------------------

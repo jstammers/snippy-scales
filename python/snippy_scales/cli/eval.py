@@ -289,20 +289,28 @@ def list_experiments(
 def tearsheet(
     experiment_id: int = typer.Argument(..., help="Experiment ID from the results database"),
     db: Path = typer.Option(Path("results.db"), "--db"),  # noqa: B008
+    analytics_db: Path = typer.Option(  # noqa: B008
+        Path("analytics.duckdb"), "--analytics-db", help="DuckDB analytics database path"
+    ),
     output: Path = typer.Option(Path("reports"), "--output", "-o"),  # noqa: B008
     benchmark: str = typer.Option(
         "SPY", "--benchmark", "-b", help="Benchmark ticker (e.g. SPY, QQQ). Pass 'none' to disable."
     ),  # noqa: E501
 ) -> None:
     """Regenerate a tearsheet for a saved experiment."""
-    from snippy_scales.evaluation import SQLiteStore, TearsheetGenerator
+    from snippy_scales.evaluation import AnalyticsStore, SQLiteStore, TearsheetGenerator
     from snippy_scales.evaluation.results import EvaluationResult, FoldResult, SweepResult
 
     if not db.exists():
         console.print(f"[red]Database not found:[/] {db}")
         raise typer.Exit(1)
 
+    import numpy as np
+
+    from snippy_scales.backtesting.domain import BacktestMetrics
+
     store = SQLiteStore(db)
+    analytics_store = AnalyticsStore(analytics_db)
     exps = store.load_experiments()
 
     matching = exps.filter(exps["id"] == experiment_id) if len(exps) > 0 else exps
@@ -311,44 +319,103 @@ def tearsheet(
         raise typer.Exit(1)
 
     exp_row = matching.row(0, named=True)
-    sweep_df = store.load_sweep_results(experiment_id)
+    sweep_df = analytics_store.load_sweep_results(experiment_id)
 
     if len(sweep_df) == 0:
         console.print("[yellow]No sweep results for this experiment.[/]")
         raise typer.Exit(0)
 
-    # Reconstruct a minimal EvaluationResult for tearsheet generation
-    # (equity curves come from fold_results)
+    # Helpers to reconstruct BacktestMetrics from stored fold_results columns.
+    # Train window: only 4 summary metrics are stored; remaining fields default to 0.
+    # Test window: all 33 BacktestMetrics fields are stored with their canonical names.
+    def _train_metrics(row: dict) -> BacktestMetrics:
+        return BacktestMetrics(
+            total_return_pct=row.get("train_return_pct") or 0.0,
+            sharpe_ratio=row.get("train_sharpe") or 0.0,
+            sortino_ratio=0.0,
+            calmar_ratio=0.0,
+            omega_ratio=0.0,
+            max_drawdown_pct=row.get("train_max_dd") or 0.0,
+            max_drawdown_duration=0,
+            total_trades=row.get("train_trades") or 0,
+            total_closed_trades=0,
+            total_open_trades=0,
+            winning_trades=0,
+            losing_trades=0,
+            win_rate_pct=0.0,
+            profit_factor=0.0,
+            expectancy=0.0,
+            sqn=0.0,
+            avg_trade_return_pct=0.0,
+            avg_win_pct=0.0,
+            avg_loss_pct=0.0,
+            best_trade_pct=0.0,
+            worst_trade_pct=0.0,
+            payoff_ratio=0.0,
+            recovery_factor=0.0,
+            avg_holding_period=0.0,
+            avg_winning_duration=0.0,
+            avg_losing_duration=0.0,
+            max_consecutive_wins=0,
+            max_consecutive_losses=0,
+            start_value=0.0,
+            end_value=0.0,
+            total_fees_paid=0.0,
+            open_trade_pnl=0.0,
+            exposure_pct=0.0,
+        )
+
+    def _test_metrics(row: dict) -> BacktestMetrics:
+        return BacktestMetrics(
+            total_return_pct=row.get("total_return_pct") or 0.0,
+            sharpe_ratio=row.get("sharpe_ratio") or 0.0,
+            sortino_ratio=row.get("sortino_ratio") or 0.0,
+            calmar_ratio=row.get("calmar_ratio") or 0.0,
+            omega_ratio=row.get("omega_ratio") or 0.0,
+            max_drawdown_pct=row.get("max_drawdown_pct") or 0.0,
+            max_drawdown_duration=row.get("max_drawdown_duration") or 0,
+            total_trades=row.get("total_trades") or 0,
+            total_closed_trades=row.get("total_closed_trades") or 0,
+            total_open_trades=row.get("total_open_trades") or 0,
+            winning_trades=row.get("winning_trades") or 0,
+            losing_trades=row.get("losing_trades") or 0,
+            win_rate_pct=row.get("win_rate_pct") or 0.0,
+            profit_factor=row.get("profit_factor") or 0.0,
+            expectancy=row.get("expectancy") or 0.0,
+            sqn=row.get("sqn") or 0.0,
+            avg_trade_return_pct=row.get("avg_trade_return_pct") or 0.0,
+            avg_win_pct=row.get("avg_win_pct") or 0.0,
+            avg_loss_pct=row.get("avg_loss_pct") or 0.0,
+            best_trade_pct=row.get("best_trade_pct") or 0.0,
+            worst_trade_pct=row.get("worst_trade_pct") or 0.0,
+            payoff_ratio=row.get("payoff_ratio") or 0.0,
+            recovery_factor=row.get("recovery_factor") or 0.0,
+            avg_holding_period=row.get("avg_holding_period") or 0.0,
+            avg_winning_duration=row.get("avg_winning_duration") or 0.0,
+            avg_losing_duration=row.get("avg_losing_duration") or 0.0,
+            max_consecutive_wins=row.get("max_consecutive_wins") or 0,
+            max_consecutive_losses=row.get("max_consecutive_losses") or 0,
+            start_value=row.get("start_value") or 0.0,
+            end_value=row.get("end_value") or 0.0,
+            total_fees_paid=row.get("total_fees_paid") or 0.0,
+            open_trade_pnl=row.get("open_trade_pnl") or 0.0,
+            exposure_pct=row.get("exposure_pct") or 0.0,
+        )
+
+    # Reconstruct a minimal EvaluationResult for tearsheet generation.
     sweep_results = []
     for sweep_row in sweep_df.iter_rows(named=True):
-        folds_df = store.load_fold_results(sweep_row["id"])
+        folds_df = analytics_store.load_fold_results(sweep_row["id"])
         folds: list[FoldResult] = []
         for fr in folds_df.iter_rows(named=True):
-            import numpy as np
-
-            from snippy_scales.backtesting.domain import BacktestMetrics
-
-            def _metrics(row: dict, prefix: str) -> BacktestMetrics:
-                return BacktestMetrics(
-                    total_return_pct=row.get(f"{prefix}_return_pct") or 0.0,
-                    sharpe_ratio=row.get(f"{prefix}_sharpe") or 0.0,
-                    sortino_ratio=row.get(f"{prefix}_sortino") or 0.0,
-                    calmar_ratio=row.get(f"{prefix}_calmar") or 0.0,
-                    max_drawdown_pct=row.get(f"{prefix}_max_dd") or 0.0,
-                    win_rate_pct=row.get(f"{prefix}_win_rate") or 0.0,
-                    profit_factor=row.get(f"{prefix}_profit_factor") or 0.0,
-                    total_trades=row.get(f"{prefix}_trades") or 0,
-                    expectancy=row.get(f"{prefix}_expectancy") or 0.0,
-                )
-
             train_eq = np.array(json.loads(fr.get("train_equity_json") or "[]"))
             test_eq = np.array(json.loads(fr.get("test_equity_json") or "[]"))
             folds.append(
                 FoldResult(
                     fold_idx=fr["fold_idx"],
                     params=json.loads(sweep_row["params_json"]),
-                    train_metrics=_metrics(fr, "train"),
-                    test_metrics=_metrics(fr, "test"),
+                    train_metrics=_train_metrics(fr),
+                    test_metrics=_test_metrics(fr),
                     train_equity_curve=train_eq,
                     test_equity_curve=test_eq,
                     train_start=fr.get("train_start") or "",

@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import numpy as np
 import pytest
 
@@ -77,7 +79,7 @@ def _make_result(**metric_overrides: float | int) -> BacktestResult:
 
 
 @pytest.fixture
-def store() -> BacktestStore:
+def store() -> Generator[BacktestStore, None, None]:
     """In-memory BacktestStore; closed automatically after each test."""
     s = BacktestStore(":memory:")
     yield s
