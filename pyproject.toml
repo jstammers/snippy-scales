@@ -20,6 +20,7 @@ dependencies = [
     "loguru>=0.7",
     "raptorbt>=0.3.2",
     "quantstats>=0.0.62",
+    "duckdb>=1.0",
 ]
 
 [project.optional-dependencies]

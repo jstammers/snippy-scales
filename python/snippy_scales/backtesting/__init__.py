@@ -13,4 +13,12 @@ Typical usage::
     runner = BacktestRunner(initial_capital=1_000_000.0, fees=0.001)
     result = runner.run(strategy, bars, symbol="ES.c.0")
     print(result.metrics)
+
+Walk-forward persistence::
+
+    from snippy_scales.backtesting.store import BacktestStore
+
+    with BacktestStore("data/results.duckdb") as store:
+        run_id = store.save_run(result, strategy_name="TrendFollowing")
+        wf_id  = store.save_walk_forward(wf_result, strategy_name="TrendFollowing")
 """

@@ -7,6 +7,7 @@ they carry no references to raptorbt and can be used against any execution backe
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -258,4 +259,173 @@ class BacktestResult:
             drawdown_curve=np.asarray(result.drawdown_curve(), dtype=np.float64),
             returns=np.asarray(result.returns(), dtype=np.float64),
             trades=trades,
+        )
+
+
+# ── Walk-forward / fold types ─────────────────────────────────────────────────
+
+#: Ordered list of the key float metrics aggregated in :class:`WalkForwardSummary`.
+_SUMMARY_METRICS: tuple[str, ...] = (
+    "total_return_pct",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "omega_ratio",
+    "max_drawdown_pct",
+    "win_rate_pct",
+    "profit_factor",
+    "expectancy",
+    "sqn",
+    "recovery_factor",
+    "payoff_ratio",
+    "avg_trade_return_pct",
+    "exposure_pct",
+)
+
+
+@dataclass(frozen=True)
+class FoldResult:
+    """Out-of-sample backtest result for a single walk-forward fold.
+
+    Attributes:
+        fold_index: Zero-based fold number within the walk-forward analysis.
+        oos_start: Out-of-sample window start (nanoseconds since epoch).
+        oos_end: Out-of-sample window end (nanoseconds since epoch).
+        result: Full :class:`BacktestResult` for this fold's OOS period.
+    """
+
+    fold_index: int
+    oos_start: int
+    oos_end: int
+    result: BacktestResult
+
+
+@dataclass(frozen=True)
+class WalkForwardSummary:
+    """Mean and standard deviation of key metrics across walk-forward folds.
+
+    Each of the 14 key metrics has a ``_mean`` and ``_std`` pair.  The std is
+    the **population** standard deviation (``ddof=0``) so it is always finite
+    even for a single fold.
+
+    Attributes:
+        n_folds: Number of folds that were aggregated.
+        total_return_pct_mean: Mean total return across folds.
+        total_return_pct_std: Std-dev of total return across folds.
+        sharpe_ratio_mean: Mean annualised Sharpe ratio.
+        sharpe_ratio_std: Std-dev of Sharpe ratio.
+        sortino_ratio_mean: Mean annualised Sortino ratio.
+        sortino_ratio_std: Std-dev of Sortino ratio.
+        calmar_ratio_mean: Mean Calmar ratio.
+        calmar_ratio_std: Std-dev of Calmar ratio.
+        omega_ratio_mean: Mean Omega ratio.
+        omega_ratio_std: Std-dev of Omega ratio.
+        max_drawdown_pct_mean: Mean maximum drawdown.
+        max_drawdown_pct_std: Std-dev of maximum drawdown.
+        win_rate_pct_mean: Mean win rate.
+        win_rate_pct_std: Std-dev of win rate.
+        profit_factor_mean: Mean profit factor.
+        profit_factor_std: Std-dev of profit factor.
+        expectancy_mean: Mean expectancy.
+        expectancy_std: Std-dev of expectancy.
+        sqn_mean: Mean System Quality Number.
+        sqn_std: Std-dev of SQN.
+        recovery_factor_mean: Mean recovery factor.
+        recovery_factor_std: Std-dev of recovery factor.
+        payoff_ratio_mean: Mean payoff ratio.
+        payoff_ratio_std: Std-dev of payoff ratio.
+        avg_trade_return_pct_mean: Mean average trade return.
+        avg_trade_return_pct_std: Std-dev of average trade return.
+        exposure_pct_mean: Mean market exposure.
+        exposure_pct_std: Std-dev of market exposure.
+    """
+
+    n_folds: int
+    total_return_pct_mean: float
+    total_return_pct_std: float
+    sharpe_ratio_mean: float
+    sharpe_ratio_std: float
+    sortino_ratio_mean: float
+    sortino_ratio_std: float
+    calmar_ratio_mean: float
+    calmar_ratio_std: float
+    omega_ratio_mean: float
+    omega_ratio_std: float
+    max_drawdown_pct_mean: float
+    max_drawdown_pct_std: float
+    win_rate_pct_mean: float
+    win_rate_pct_std: float
+    profit_factor_mean: float
+    profit_factor_std: float
+    expectancy_mean: float
+    expectancy_std: float
+    sqn_mean: float
+    sqn_std: float
+    recovery_factor_mean: float
+    recovery_factor_std: float
+    payoff_ratio_mean: float
+    payoff_ratio_std: float
+    avg_trade_return_pct_mean: float
+    avg_trade_return_pct_std: float
+    exposure_pct_mean: float
+    exposure_pct_std: float
+
+    @classmethod
+    def from_folds(cls, folds: list[FoldResult]) -> WalkForwardSummary:
+        """Compute mean and population std for key metrics across *folds*.
+
+        Args:
+            folds: Non-empty list of :class:`FoldResult` objects.
+
+        Returns:
+            :class:`WalkForwardSummary` with mean and std for all key metrics.
+
+        Raises:
+            ValueError: If *folds* is empty.
+        """
+        if not folds:
+            raise ValueError("Cannot compute walk-forward summary from an empty fold list.")
+
+        kwargs: dict[str, Any] = {"n_folds": len(folds)}
+        for metric in _SUMMARY_METRICS:
+            values = [getattr(f.result.metrics, metric) for f in folds]
+            n = len(values)
+            mean = sum(values) / n
+            variance = sum((v - mean) ** 2 for v in values) / n
+            kwargs[f"{metric}_mean"] = mean
+            kwargs[f"{metric}_std"] = math.sqrt(variance)
+        return cls(**kwargs)
+
+
+@dataclass
+class WalkForwardResult:
+    """Aggregated result of a walk-forward (out-of-sample) analysis.
+
+    Attributes:
+        symbol: Instrument symbol or list of symbols.
+        folds: Ordered list of per-fold :class:`FoldResult` objects.
+        summary: Cross-fold mean and std-dev for the 14 key metrics.
+    """
+
+    symbol: str | list[str]
+    folds: list[FoldResult]
+    summary: WalkForwardSummary
+
+    @classmethod
+    def from_fold_results(
+        cls, symbol: str | list[str], folds: list[FoldResult]
+    ) -> WalkForwardResult:
+        """Construct from a list of fold results, computing the summary automatically.
+
+        Args:
+            symbol: Instrument symbol(s).
+            folds: Non-empty list of :class:`FoldResult` objects.
+
+        Returns:
+            :class:`WalkForwardResult` with populated summary.
+        """
+        return cls(
+            symbol=symbol,
+            folds=folds,
+            summary=WalkForwardSummary.from_folds(folds),
         )
