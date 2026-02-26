@@ -270,7 +270,20 @@ def test_backtest_runner_with_trend_following() -> None:
     runner = BacktestRunner(initial_capital=100_000.0, fees=0.001)
     result = runner.run(strategy, bars, symbol="SIM")
     assert isinstance(result, BacktestResult)
-    assert result.metrics.total_trades >= 0
+    m = result.metrics
+    assert m.total_trades >= 0
+    # Extended metrics are present and have sensible types/bounds.
+    assert isinstance(m.omega_ratio, float)
+    assert isinstance(m.max_drawdown_duration, int) and m.max_drawdown_duration >= 0
+    assert isinstance(m.sqn, float)
+    assert isinstance(m.recovery_factor, float)
+    assert isinstance(m.payoff_ratio, float)
+    assert isinstance(m.exposure_pct, float) and 0.0 <= m.exposure_pct <= 100.0
+    assert isinstance(m.total_fees_paid, float) and m.total_fees_paid >= 0.0
+    assert m.start_value > 0.0
+    assert m.winning_trades + m.losing_trades <= m.total_trades
+    assert isinstance(m.max_consecutive_wins, int) and m.max_consecutive_wins >= 0
+    assert isinstance(m.max_consecutive_losses, int) and m.max_consecutive_losses >= 0
 
 
 def test_backtest_runner_with_momentum_ts() -> None:

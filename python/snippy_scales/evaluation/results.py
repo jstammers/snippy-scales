@@ -96,6 +96,30 @@ class SweepResult:
         return float(np.mean(vals)) if vals else float("nan")
 
     @property
+    def std_test_sharpe(self) -> float:
+        """Population std-dev of Sharpe ratio across test folds."""
+        vals = [f.test_metrics.sharpe_ratio for f in self.folds]
+        return float(np.std(vals)) if vals else float("nan")
+
+    @property
+    def std_test_return(self) -> float:
+        """Population std-dev of total return (%) across test folds."""
+        vals = [f.test_metrics.total_return_pct for f in self.folds]
+        return float(np.std(vals)) if vals else float("nan")
+
+    @property
+    def std_test_max_dd(self) -> float:
+        """Population std-dev of maximum drawdown (%) across test folds."""
+        vals = [f.test_metrics.max_drawdown_pct for f in self.folds]
+        return float(np.std(vals)) if vals else float("nan")
+
+    @property
+    def std_test_sortino(self) -> float:
+        """Population std-dev of Sortino ratio across test folds."""
+        vals = [f.test_metrics.sortino_ratio for f in self.folds]
+        return float(np.std(vals)) if vals else float("nan")
+
+    @property
     def n_folds(self) -> int:
         return len(self.folds)
 
@@ -104,9 +128,13 @@ class SweepResult:
         return {
             "params": self.params,
             "mean_test_sharpe": self.mean_test_sharpe,
+            "std_test_sharpe": self.std_test_sharpe,
             "mean_test_return": self.mean_test_return,
+            "std_test_return": self.std_test_return,
             "mean_test_max_dd": self.mean_test_max_dd,
+            "std_test_max_dd": self.std_test_max_dd,
             "mean_test_sortino": self.mean_test_sortino,
+            "std_test_sortino": self.std_test_sortino,
             "n_folds": self.n_folds,
         }
 
@@ -164,9 +192,13 @@ class EvaluationResult:
         for sr in self.sweep_results:
             row: dict[str, Any] = dict(sr.params)
             row["mean_test_sharpe"] = sr.mean_test_sharpe
+            row["std_test_sharpe"] = sr.std_test_sharpe
             row["mean_test_return_pct"] = sr.mean_test_return
+            row["std_test_return_pct"] = sr.std_test_return
             row["mean_test_max_dd_pct"] = sr.mean_test_max_dd
+            row["std_test_max_dd_pct"] = sr.std_test_max_dd
             row["mean_test_sortino"] = sr.mean_test_sortino
+            row["std_test_sortino"] = sr.std_test_sortino
             row["n_folds"] = sr.n_folds
             rows.append(row)
 
