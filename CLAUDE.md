@@ -86,6 +86,50 @@ uv run ty check                  # type-check
 uv run maturin develop           # rebuild Rust extension
 ```
 
+### Git hooks — MANDATORY
+
+This repo uses **prek** to enforce git hooks. **Always install hooks before making any commit:**
+
+```bash
+just setup          # installs hooks automatically (prek install is part of setup)
+# or directly:
+prek install        # installs pre-commit and commit-msg hooks
+```
+
+**NEVER bypass hooks** with `--no-verify`, `--no-gpg-sign`, or any other flag.
+If a hook fails, fix the underlying issue — do not skip it.
+
+#### Conventional Commits
+
+Every commit message **must** follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>[optional scope]: <short description>
+```
+
+Allowed types (enforced by `commit-msg` hook):
+
+| Type | When to use |
+|---|---|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `perf` | Performance improvement |
+| `refactor` | Code restructure (no behaviour change) |
+| `revert` | Reverts a previous commit |
+| `docs` | Documentation only |
+| `style` | Formatting / whitespace |
+| `test` | Adding or fixing tests |
+| `build` | Build system / dependency changes |
+| `ci` | CI/CD pipeline changes |
+| `chore` | Maintenance tasks (not in changelog) |
+
+Examples of **valid** commit messages:
+```
+feat(cli): add algo eval run-all command
+fix(evaluation): handle empty fold list in SweepResult
+test(backtesting): add edge-case tests for BacktestMetrics
+```
+
 ### CI gates
 
 All PRs must pass: `ruff check`, `ruff format --check`, `ty check`, `pytest`.
