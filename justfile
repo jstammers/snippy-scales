@@ -147,4 +147,4 @@ changelog-regen:
 
 # Run the algo CLI (pass arguments with: just algo -- --help)
 algo *ARGS:
-    uv run algo {{ARGS}}
+    uv run --env-file .env algo {{ARGS}}

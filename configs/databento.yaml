@@ -19,9 +19,10 @@ dataset: "GLBX.MDP3"
 tick_frequency: "1d"
 
 # Historical pull range
-start: "2018-01-01"
+start: "2010-06-06"
 # end: "2024-12-31"  # Omit to default to today
 
+stype_in: "continuous"
 # ---------------------------------------------------------------------------
 # Asset classes
 # Each key is a human-readable label; symbols must be valid Databento

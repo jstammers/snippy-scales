@@ -44,7 +44,7 @@ import polars as pl
 if TYPE_CHECKING:
     import pandas as pd
 
-    from snippy_scales.data.config import IngestConfig
+    from snippy_scales.data.config import VALID_STYPES, IngestConfig
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,7 @@ def upsert_symbol(
     start: str,
     end: str,
     output_dir: Path = RAW_DIR,
+    stype_in: VALID_STYPES = "raw_symbol",
 ) -> Path:
     """Download and upsert bar data for a single symbol.
 
@@ -178,6 +179,7 @@ def upsert_symbol(
         schema=schema,
         start=fetch_start,
         end=end,
+        stype_in=stype_in,
     )
 
     new_df = _to_polars(store.to_df())
@@ -258,6 +260,7 @@ def ingest_from_config(
                 start=config.start,
                 end=end,
                 output_dir=output_dir,
+                stype_in=config.stype_in or "raw_symbol",
             )
             results[symbol] = path
         except Exception:
@@ -275,6 +278,7 @@ def estimate_cost(
     start: str,
     end: str,
     output_dir: Path = RAW_DIR,
+    stype_in: VALID_STYPES = "raw_symbol",
 ) -> float:
     """Estimate the Databento API cost in USD for a single symbol download.
 
@@ -289,6 +293,7 @@ def estimate_cost(
         start: Requested start date (``YYYY-MM-DD``).
         end: Requested end date (``YYYY-MM-DD``).
         output_dir: Root directory for raw Parquet files.
+        stype_in: Optional Databento stype string (e.g. ``"continuous"``) to pass to the API.
 
     Returns:
         Estimated cost in US dollars.  Returns ``0.0`` when no download is
@@ -309,7 +314,6 @@ def estimate_cost(
             fetch_start = computed
         if fetch_start >= end:
             return 0.0
-
     client = db.Historical()
     cost: float = client.metadata.get_cost(
         dataset=dataset,
@@ -317,6 +321,7 @@ def estimate_cost(
         end=end,
         symbols=[symbol],
         schema=schema,
+        stype_in=stype_in,
     )
     return cost
 
@@ -364,6 +369,7 @@ def estimate_costs_from_config(
                 start=config.start,
                 end=end,
                 output_dir=output_dir,
+                stype_in=config.stype_in or "raw_symbol",
             )
         except Exception:
             logger.warning("Could not estimate cost for %s — recorded as NaN.", symbol)

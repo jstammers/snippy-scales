@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich.console import Console
@@ -33,6 +33,9 @@ def ingest(
     symbol: str = typer.Option(..., "--symbol", "-s", help="Instrument symbol"),
     start: str = typer.Option(..., help="Start date YYYY-MM-DD"),
     end: str = typer.Option(..., help="End date YYYY-MM-DD"),
+    stype_in: Literal["raw_symbol", "continuous", "parent", "instrument_id"] = typer.Option(
+        "raw_symbol", help="Databento symbology type"
+    ),
     frequency: Annotated[
         str,
         typer.Option(
@@ -83,6 +86,7 @@ def ingest(
             start=start,
             end=end,
             output_dir=out_dir,
+            stype_in=stype_in,
         )
     except Exception as exc:
         console.print(f"[yellow]Warning: cost estimation failed — {exc}[/]")

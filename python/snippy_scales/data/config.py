@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import yaml
+from pandas.io.parsers.readers import Literal
 from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,8 @@ _FREQUENCY_TO_SCHEMA: dict[str, str] = {
 }
 
 _VALID_SCHEMAS: frozenset[str] = frozenset(_FREQUENCY_TO_SCHEMA.values())
+
+VALID_STYPES = Literal["raw_symbol", "parent", "continuous", "instrument_id"]
 
 
 def frequency_to_schema(frequency: str) -> str:
@@ -114,6 +117,7 @@ class IngestConfig(BaseModel):
         start: Earliest date to fetch (``YYYY-MM-DD``).
         end: Latest date to fetch (``YYYY-MM-DD``).  Defaults to today when
             ``None``.
+        stype_in:
         asset_classes: Mapping of arbitrary asset-class labels to their
             :class:`AssetClassConfig`.
     """
@@ -140,6 +144,14 @@ class IngestConfig(BaseModel):
             "End date for data pull in ISO format (YYYY-MM-DD).  Defaults to today when omitted."
         ),
     )
+
+    stype_in: VALID_STYPES | None = Field(
+        default=None,
+        description=(
+            "Optional Databento symbology type for API calls (e.g. 'raw_symbol', 'parent')"
+        ),
+    )
+
     asset_classes: dict[str, AssetClassConfig] = Field(
         default_factory=dict,
         description="Mapping of asset-class label → AssetClassConfig.",
