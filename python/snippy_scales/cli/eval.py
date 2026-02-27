@@ -90,7 +90,7 @@ def run(
     gap: int = typer.Option(0, "--gap", help="Bars between train end and test start"),
     initial_capital: float = typer.Option(1_000_000.0, "--capital", help="Initial capital"),
     fees: float = typer.Option(0.001, "--fees", help="Per-trade fee fraction"),
-    db: Path = typer.Option(None, "--db", help="SQLite results database path"),  # noqa: B008
+    db: Path = typer.Option(None, "--db", help="DuckDB results database path"),  # noqa: B008
     tearsheet_dir: Path = typer.Option(  # noqa: B008
         None, "--tearsheet-dir", help="Directory for tearsheet output"
     ),
@@ -166,7 +166,7 @@ def sweep(
     gap: int = typer.Option(0, "--gap", help="Bars between train end and test start"),
     initial_capital: float = typer.Option(1_000_000.0, "--capital"),
     fees: float = typer.Option(0.001, "--fees"),
-    db: Path = typer.Option(None, "--db", help="SQLite results database path"),  # noqa: B008
+    db: Path = typer.Option(None, "--db", help="DuckDB results database path"),  # noqa: B008
     tearsheet_dir: Path = typer.Option(None, "--tearsheet-dir"),  # noqa: B008
     benchmark: str = typer.Option(
         "SPY", "--benchmark", "-b", help="Benchmark ticker for tearsheet. Pass 'none' to disable."
@@ -272,7 +272,7 @@ def run_all(
     gap: int = typer.Option(0, "--gap", help="Bars between train end and test start"),
     initial_capital: float = typer.Option(1_000_000.0, "--capital", help="Initial capital"),
     fees: float = typer.Option(0.001, "--fees", help="Per-trade fee fraction"),
-    db: Path = typer.Option(None, "--db", help="SQLite results database path"),  # noqa: B008
+    db: Path = typer.Option(None, "--db", help="DuckDB results database path"),  # noqa: B008
     tearsheet_dir: Path = typer.Option(  # noqa: B008
         None, "--tearsheet-dir", help="Directory for tearsheet output"
     ),
@@ -456,16 +456,16 @@ def _align_bars(bars_map: dict[str, Any]) -> dict[str, Any]:
 
 @app.command(name="list")
 def list_experiments(
-    db: Path = typer.Option(Path("results.db"), "--db", help="SQLite results database path"),  # noqa: B008
+    db: Path = typer.Option(Path("analytics.duckdb"), "--db", help="DuckDB results database path"),  # noqa: B008
 ) -> None:
     """List all saved experiments from the results database."""
-    from snippy_scales.evaluation import SQLiteStore
+    from snippy_scales.evaluation import AnalyticsStore
 
     if not db.exists():
         console.print(f"[yellow]Database not found:[/] {db}")
         raise typer.Exit(0)
 
-    store = SQLiteStore(db)
+    store = AnalyticsStore(db)
     df = store.load_experiments()
 
     if len(df) == 0:
@@ -485,17 +485,14 @@ def list_experiments(
 @app.command()
 def tearsheet(
     experiment_id: int = typer.Argument(..., help="Experiment ID from the results database"),
-    db: Path = typer.Option(Path("results.db"), "--db"),  # noqa: B008
-    analytics_db: Path = typer.Option(  # noqa: B008
-        Path("analytics.duckdb"), "--analytics-db", help="DuckDB analytics database path"
-    ),
+    db: Path = typer.Option(Path("analytics.duckdb"), "--db"),  # noqa: B008
     output: Path = typer.Option(Path("reports"), "--output", "-o"),  # noqa: B008
     benchmark: str = typer.Option(
         "SPY", "--benchmark", "-b", help="Benchmark ticker (e.g. SPY, QQQ). Pass 'none' to disable."
     ),  # noqa: E501
 ) -> None:
     """Regenerate a tearsheet for a saved experiment."""
-    from snippy_scales.evaluation import AnalyticsStore, SQLiteStore, TearsheetGenerator
+    from snippy_scales.evaluation import AnalyticsStore, TearsheetGenerator
     from snippy_scales.evaluation.results import EvaluationResult, FoldResult, SweepResult
 
     if not db.exists():
@@ -506,9 +503,8 @@ def tearsheet(
 
     from snippy_scales.backtesting.domain import BacktestMetrics
 
-    store = SQLiteStore(db)
-    analytics_store = AnalyticsStore(analytics_db)
-    exps = store.load_experiments()
+    analytics_store = AnalyticsStore(db)
+    exps = analytics_store.load_experiments()
 
     matching = exps.filter(exps["id"] == experiment_id) if len(exps) > 0 else exps
     if len(matching) == 0:
