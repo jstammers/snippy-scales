@@ -1,35 +1,29 @@
 """Persistence layer for evaluation results.
 
-Two complementary stores implement the hybrid database architecture:
+All data is stored in a single DuckDB database via :class:`AnalyticsStore`:
 
-``SQLiteStore`` — metadata store
-    Lightweight SQLite database holding experiment configuration and the run
-    registry.  One row per evaluation run in the ``experiments`` table.
-
-``AnalyticsStore`` — analytics store
-    DuckDB database holding wide columnar data: per-parameter-set aggregated
-    metrics (``sweep_results``) and per-fold detailed metrics (``fold_results``
-    with all 33 :class:`~snippy_scales.backtesting.domain.BacktestMetrics`
-    fields for the test window).
+* ``experiments`` — one row per evaluation run (name, strategy, config).
+* ``sweep_results`` — one row per (experiment, parameter set) with mean and
+  population std-dev for 4 key test metrics.
+* ``fold_results`` — one row per (sweep, fold) with 4 training-window metrics
+  and all 33 test-window
+  :class:`~snippy_scales.backtesting.domain.BacktestMetrics` fields.
 
 Typical usage::
 
-    from snippy_scales.evaluation.database import SQLiteStore, AnalyticsStore
+    from snippy_scales.evaluation.database import AnalyticsStore
 
-    sqlite = SQLiteStore("data/metadata.db")
-    duckdb = AnalyticsStore("data/analytics.duckdb")
+    store = AnalyticsStore("data/analytics.duckdb")
+    experiment_id = store.save_evaluation(eval_result, config={...})
+    store.save_evaluation_analytics(eval_result, experiment_id)
 
-    experiment_id = sqlite.save_evaluation(eval_result, config={...})
-    duckdb.save_evaluation_analytics(eval_result, experiment_id)
-
-    # Query analytics
-    df = duckdb.load_sweep_results(experiment_id)
+    # Query
+    df = store.load_sweep_results(experiment_id)
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,141 +38,20 @@ if TYPE_CHECKING:
     from snippy_scales.evaluation.results import EvaluationResult
 
 # ---------------------------------------------------------------------------
-# SQLiteStore — metadata
+# DDL
 # ---------------------------------------------------------------------------
 
-_SQLITE_SCHEMA = """
+_DDL_EXPERIMENTS = """
 CREATE TABLE IF NOT EXISTS experiments (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT    NOT NULL,
-    strategy_class  TEXT    NOT NULL,
-    symbols_json    TEXT    NOT NULL,
+    id              BIGINT PRIMARY KEY,
+    name            TEXT   NOT NULL,
+    strategy_class  TEXT   NOT NULL,
+    symbols_json    TEXT   NOT NULL,
     n_splits        INTEGER NOT NULL,
-    window_type     TEXT    NOT NULL,
-    created_at      TEXT    NOT NULL,
-    config_json     TEXT    NOT NULL
-);
-"""
-
-
-class SQLiteStore:
-    """Persist and retrieve experiment metadata in a local SQLite database.
-
-    Stores only the lightweight registry and configuration for each evaluation
-    run.  Analytics data (per-fold and per-sweep metrics) are stored in the
-    :class:`AnalyticsStore` (DuckDB).
-
-    The database file is created automatically if it does not exist.
-
-    Args:
-        db_path: Path to the SQLite file (e.g. ``"data/metadata.db"`` or
-            ``Path("data/metadata.db")``).
-
-    Example::
-
-        store = SQLiteStore("data/metadata.db")
-        experiment_id = store.save_evaluation(eval_result, config={...})
-        df = store.load_experiments()
-    """
-
-    def __init__(self, db_path: Path | str) -> None:
-        self._path = Path(db_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(_SQLITE_SCHEMA)
-
-    # ── Write ─────────────────────────────────────────────────────────────────
-
-    def save_evaluation(
-        self,
-        result: EvaluationResult,
-        config: dict[str, Any] | None = None,
-    ) -> int:
-        """Register an evaluation run in the ``experiments`` table.
-
-        Args:
-            result: The evaluation result to register.
-            config: Optional dict of runner configuration to store alongside
-                the experiment (fees, slippage, initial_capital, etc.).
-
-        Returns:
-            The ``experiment_id`` (primary key) assigned to this run.
-        """
-        config = config or {}
-        created_at = datetime.now(tz=UTC).isoformat()
-
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO experiments
-                    (name, strategy_class, symbols_json, n_splits, window_type,
-                     created_at, config_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    result.experiment_name,
-                    result.strategy_class,
-                    json.dumps(result.symbols),
-                    config.get("n_splits", 0),
-                    config.get("window", ""),
-                    created_at,
-                    json.dumps(config),
-                ),
-            )
-            exp_id = cur.lastrowid
-
-        if exp_id is None:  # pragma: no cover — INSERT always sets lastrowid
-            raise RuntimeError("INSERT did not return a lastrowid")
-        return exp_id
-
-    # ── Read ──────────────────────────────────────────────────────────────────
-
-    def load_experiments(self) -> pl.DataFrame:
-        """Return all experiments as a Polars DataFrame."""
-        import polars as pl
-
-        rows = self._fetchall("SELECT * FROM experiments ORDER BY id DESC")
-        if not rows:
-            return pl.DataFrame()
-        return pl.DataFrame(rows)
-
-    def query(self, sql: str, params: tuple[Any, ...] = ()) -> pl.DataFrame:
-        """Execute arbitrary read-only SQL and return results as a Polars DataFrame.
-
-        Args:
-            sql: SQL query string.
-            params: Optional bind parameters.
-
-        Returns:
-            Query results as a Polars DataFrame.
-        """
-        import polars as pl
-
-        rows = self._fetchall(sql, params)
-        if not rows:
-            return pl.DataFrame()
-        return pl.DataFrame(rows)
-
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-
-    def _fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-
-    def __repr__(self) -> str:
-        return f"SQLiteStore({str(self._path)!r})"
-
-
-# ---------------------------------------------------------------------------
-# AnalyticsStore — DuckDB
-# ---------------------------------------------------------------------------
+    window_type     TEXT   NOT NULL,
+    created_at      TEXT   NOT NULL,
+    config_json     TEXT   NOT NULL
+)"""
 
 _DDL_SWEEP_RESULTS = """
 CREATE TABLE IF NOT EXISTS sweep_results (
@@ -216,10 +89,11 @@ CREATE TABLE IF NOT EXISTS fold_results (
 
 
 class AnalyticsStore:
-    """DuckDB analytics store for evaluation sweep and fold results.
+    """DuckDB store for all evaluation data: experiments, sweeps, and folds.
 
-    Stores wide columnar data for offline analysis:
+    Stores all persistent evaluation data in a single DuckDB file:
 
+    * ``experiments`` — lightweight registry of evaluation runs.
     * ``sweep_results`` — one row per (experiment, parameter set) with
       mean and population std-dev for 4 key test metrics.
     * ``fold_results`` — one row per (sweep, fold) with 4 training-window
@@ -232,14 +106,18 @@ class AnalyticsStore:
     Example::
 
         store = AnalyticsStore("data/analytics.duckdb")
-        store.save_evaluation_analytics(eval_result, experiment_id=1)
-        df = store.load_sweep_results(experiment_id=1)
+        exp_id = store.save_evaluation(eval_result, config={...})
+        store.save_evaluation_analytics(eval_result, experiment_id=exp_id)
+        df = store.load_sweep_results(experiment_id=exp_id)
     """
 
     def __init__(self, db_path: Path | str = "data/analytics.duckdb") -> None:
         import duckdb  # noqa: PLC0415 — optional dep, imported lazily
 
-        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(str(db_path))
+        path = str(db_path)
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(path)
         self.create_schema()
 
     # ------------------------------------------------------------------
@@ -247,12 +125,55 @@ class AnalyticsStore:
     # ------------------------------------------------------------------
 
     def create_schema(self) -> None:
-        """Create ``sweep_results`` and ``fold_results`` tables if absent."""
-        for ddl in (_DDL_SWEEP_RESULTS, _DDL_FOLD_RESULTS):
+        """Create all tables if absent."""
+        for ddl in (_DDL_EXPERIMENTS, _DDL_SWEEP_RESULTS, _DDL_FOLD_RESULTS):
             self._conn.execute(ddl)
 
     # ------------------------------------------------------------------
-    # Write
+    # Write — experiments
+    # ------------------------------------------------------------------
+
+    def save_evaluation(
+        self,
+        result: EvaluationResult,
+        config: dict[str, Any] | None = None,
+    ) -> int:
+        """Register an evaluation run in the ``experiments`` table.
+
+        Args:
+            result: The evaluation result to register.
+            config: Optional dict of runner configuration (fees, slippage, etc.).
+
+        Returns:
+            The ``experiment_id`` (primary key) assigned to this run.
+        """
+        config = config or {}
+        created_at = datetime.now(tz=UTC).isoformat()
+        next_id = int(
+            self._conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM experiments").fetchone()[0]  # type: ignore[index]
+        )
+        self._conn.execute(
+            """
+            INSERT INTO experiments
+                (id, name, strategy_class, symbols_json, n_splits, window_type,
+                 created_at, config_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                next_id,
+                result.experiment_name,
+                result.strategy_class,
+                json.dumps(result.symbols),
+                config.get("n_splits", 0),
+                config.get("window", ""),
+                created_at,
+                json.dumps(config),
+            ],
+        )
+        return next_id
+
+    # ------------------------------------------------------------------
+    # Write — sweep + fold analytics
     # ------------------------------------------------------------------
 
     def save_evaluation_analytics(
@@ -268,8 +189,8 @@ class AnalyticsStore:
 
         Args:
             result: The evaluation result to persist.
-            experiment_id: Primary key from the ``SQLiteStore.experiments``
-                table (use ``0`` if not linked to a SQLite metadata store).
+            experiment_id: Primary key from the ``experiments`` table
+                (use ``0`` if not linked to an experiment row).
         """
         self._conn.begin()
         try:
@@ -325,6 +246,16 @@ class AnalyticsStore:
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
+
+    def load_experiments(self) -> pl.DataFrame:
+        """Return all experiments as a Polars DataFrame, newest first."""
+        import polars as pl
+
+        rows = self._conn.execute("SELECT * FROM experiments ORDER BY id DESC").fetchall()
+        if not rows:
+            return pl.DataFrame()
+        cols = [d[0] for d in self._conn.description]
+        return pl.DataFrame([dict(zip(cols, r, strict=True)) for r in rows])
 
     def load_sweep_results(self, experiment_id: int) -> pl.DataFrame:
         """Return all sweep results for an experiment as a Polars DataFrame.

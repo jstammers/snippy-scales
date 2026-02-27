@@ -6,8 +6,7 @@ Coverage:
 * RandomSearch — reproducible sampling
 * SweepResult — mean and population std-dev properties
 * EvaluationRunner — single-asset and multi-asset end-to-end
-* SQLiteStore — experiment metadata round-trip (metadata only)
-* AnalyticsStore — DuckDB sweep + fold analytics round-trip
+* AnalyticsStore — experiments + sweep + fold round-trip (single DuckDB)
 * TearsheetGenerator — file generation
 * EvaluationResult — best_params selection, summary_df, oos_equity_curve
 """
@@ -29,7 +28,6 @@ from snippy_scales.evaluation import (
     ParameterGrid,
     RandomSearch,
     SplitFold,
-    SQLiteStore,
     SweepResult,
     TearsheetGenerator,
     WalkForwardSplit,
@@ -475,27 +473,20 @@ class TestEvaluationRunner:
         assert isinstance(result, EvaluationResult)
         assert len(result.symbols) == 4
 
-    def test_sqlite_metadata_persistence(self, tmp_path: Path) -> None:
+    def test_persistence(self, tmp_path: Path) -> None:
         bars = _make_bars(500, seed=4)
-        db = tmp_path / "test_eval.db"
+        db = tmp_path / "analytics.duckdb"
         runner = EvaluationRunner(n_splits=2, db_path=db)
         runner.evaluate(TrendFollowing, bars, symbol="SIM", experiment_name="db_test")
 
-        store = SQLiteStore(db)
+        store = AnalyticsStore(str(db))
         exps = store.load_experiments()
         assert len(exps) == 1
         assert exps["name"][0] == "db_test"
 
-    def test_analytics_persistence(self, tmp_path: Path) -> None:
-        bars = _make_bars(500, seed=4)
-        analytics_db = tmp_path / "analytics.duckdb"
-        runner = EvaluationRunner(n_splits=2, analytics_db_path=analytics_db)
-        runner.evaluate(TrendFollowing, bars, symbol="SIM", experiment_name="analytics_test")
-
-        store = AnalyticsStore(str(analytics_db))
-        # experiment_id=0 when no SQLite db is provided
-        df = store.load_sweep_results(0)
-        assert len(df) >= 1
+        exp_id = int(exps["id"][0])
+        sweeps = store.load_sweep_results(exp_id)
+        assert len(sweeps) >= 1
         store.close()
 
     def test_tearsheet_generation(self, tmp_path: Path) -> None:
@@ -519,10 +510,10 @@ class TestEvaluationRunner:
         assert "X" in result.experiment_name
 
 
-# ── SQLiteStore — metadata only ────────────────────────────────────────────────
+# ── AnalyticsStore — experiments (single-DB round-trip) ───────────────────────
 
 
-class TestSQLiteStore:
+class TestAnalyticsStoreExperiments:
     def _make_eval_result(self) -> EvaluationResult:
         metrics = _make_dummy_metrics()
         fold = FoldResult(
@@ -545,8 +536,8 @@ class TestSQLiteStore:
             sweep_results=[sweep],
         )
 
-    def test_roundtrip_experiment_metadata(self, tmp_path: Path) -> None:
-        store = SQLiteStore(tmp_path / "rt.db")
+    def test_roundtrip_experiment_metadata(self) -> None:
+        store = AnalyticsStore(":memory:")
         result = self._make_eval_result()
         exp_id = store.save_evaluation(result)
         assert exp_id > 0
@@ -555,25 +546,10 @@ class TestSQLiteStore:
         assert len(exps) == 1
         assert exps["name"][0] == "store_test"
         assert exps["strategy_class"][0] == "snippy_scales.strategies.trend.TrendFollowing"
+        store.close()
 
-    def test_only_experiments_table_written(self, tmp_path: Path) -> None:
-        """SQLiteStore is metadata-only — no sweep or fold rows are written."""
-        store = SQLiteStore(tmp_path / "meta.db")
-        result = self._make_eval_result()
-        store.save_evaluation(result)
-
-        # Only experiments table should exist and have data
-        exps = store.load_experiments()
-        assert len(exps) == 1
-
-        # sweep_results and fold_results tables should not exist in SQLite
-        tables = store.query("SELECT name FROM sqlite_master WHERE type='table'")
-        table_names = {row["name"] for row in tables.to_dicts()}
-        assert "sweep_results" not in table_names
-        assert "fold_results" not in table_names
-
-    def test_multiple_experiments(self, tmp_path: Path) -> None:
-        store = SQLiteStore(tmp_path / "multi.db")
+    def test_multiple_experiments(self) -> None:
+        store = AnalyticsStore(":memory:")
         result = self._make_eval_result()
         id1 = store.save_evaluation(result)
         result2 = EvaluationResult(
@@ -587,23 +563,43 @@ class TestSQLiteStore:
 
         exps = store.load_experiments()
         assert len(exps) == 2
+        store.close()
 
-    def test_arbitrary_query(self, tmp_path: Path) -> None:
-        store = SQLiteStore(tmp_path / "q.db")
+    def test_experiments_newest_first(self) -> None:
+        store = AnalyticsStore(":memory:")
         result = self._make_eval_result()
         store.save_evaluation(result)
+        result2 = EvaluationResult(
+            experiment_name="second_run",
+            strategy_class=result.strategy_class,
+            symbols=result.symbols,
+            sweep_results=result.sweep_results,
+        )
+        store.save_evaluation(result2)
+        exps = store.load_experiments()
+        # newest (highest id) first
+        assert exps["name"][0] == "second_run"
+        store.close()
 
-        df = store.query("SELECT name, strategy_class FROM experiments")
-        assert len(df) == 1
-        assert df["name"][0] == "store_test"
+    def test_save_evaluation_returns_id_used_by_sweep_results(self) -> None:
+        store = AnalyticsStore(":memory:")
+        result = self._make_eval_result()
+        exp_id = store.save_evaluation(result)
+        store.save_evaluation_analytics(result, experiment_id=exp_id)
+
+        rows = store.query(
+            "SELECT experiment_id FROM sweep_results WHERE experiment_id = ?", [exp_id]
+        )
+        assert len(rows) == 1
+        store.close()
 
     def test_db_created_automatically(self, tmp_path: Path) -> None:
-        db_path = tmp_path / "subdir" / "nested" / "eval.db"
-        store = SQLiteStore(db_path)
+        db_path = tmp_path / "subdir" / "nested" / "eval.duckdb"
+        store = AnalyticsStore(db_path)
         assert db_path.exists()
-        # Should be usable
         exps = store.load_experiments()
         assert len(exps) == 0
+        store.close()
 
 
 # ── AnalyticsStore — DuckDB ────────────────────────────────────────────────────
