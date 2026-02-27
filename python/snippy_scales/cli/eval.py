@@ -14,6 +14,9 @@ Usage examples::
         --params '{"fast_period": [10, 20, 40], "slow_period": [40, 60, 120]}' \\
         --search random --trials 10
 
+    # Evaluate all strategies across all available symbols
+    algo eval run-all
+
     # List all saved experiments
     algo eval list --db results.db
 
@@ -255,6 +258,200 @@ def sweep(
     df = result.summary_df()
     if len(df) > 0:
         _print_polars_table(df.head(10))
+
+
+@app.command(name="run-all")
+def run_all(
+    schema: str = typer.Option("ohlcv-1d", "--schema", help="Bar schema (e.g. ohlcv-1d)"),
+    data_dir: Path = typer.Option(  # noqa: B008
+        None, "--data-dir", help="Raw data directory (default: data/raw)"
+    ),
+    splits: int = typer.Option(5, "--splits", "-n", help="Number of walk-forward folds"),
+    test_size: float = typer.Option(0.2, "--test-size", help="Test fraction per fold"),
+    window: str = typer.Option("expanding", "--window", help="expanding or rolling"),
+    gap: int = typer.Option(0, "--gap", help="Bars between train end and test start"),
+    initial_capital: float = typer.Option(1_000_000.0, "--capital", help="Initial capital"),
+    fees: float = typer.Option(0.001, "--fees", help="Per-trade fee fraction"),
+    db: Path = typer.Option(None, "--db", help="SQLite results database path"),  # noqa: B008
+    tearsheet_dir: Path = typer.Option(  # noqa: B008
+        None, "--tearsheet-dir", help="Directory for tearsheet output"
+    ),
+    benchmark: str = typer.Option(
+        "SPY",
+        "--benchmark",
+        "-b",
+        help="Benchmark ticker for tearsheet. Pass 'none' to disable.",
+    ),
+) -> None:
+    """Evaluate every strategy against every available symbol in data/raw."""
+    from snippy_scales.data.ingest import RAW_DIR, load_bars
+    from snippy_scales.evaluation import EvaluationRunner
+    from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
+
+    raw_dir = data_dir if data_dir is not None else RAW_DIR
+
+    # 1. Discover symbols that have data for the requested schema
+    parquet_files = sorted(raw_dir.glob(f"*/{schema}.parquet"))
+    if not parquet_files:
+        console.print(
+            f"[red]No {schema!r} data found under {raw_dir}.[/]  "
+            "Run [cyan]algo data ingest-config[/] first."
+        )
+        raise typer.Exit(1)
+
+    symbols = [p.parent.name for p in parquet_files]
+    console.print(f"[cyan]Discovered {len(symbols)} symbol(s):[/] {', '.join(symbols)}")
+
+    # 2. Load bars for every symbol
+    bars_map: dict[str, Any] = {}
+    for symbol in symbols:
+        try:
+            bars_map[symbol] = load_bars(symbol, schema, raw_dir)
+            console.print(f"  [green]loaded[/] {symbol}  ({len(bars_map[symbol]):,} bars)")
+        except FileNotFoundError:
+            console.print(f"  [yellow]skip[/] {symbol}: file unreadable")
+
+    if not bars_map:
+        console.print("[red]No symbols loaded. Aborting.[/]")
+        raise typer.Exit(1)
+
+    # 3. Build shared runner and strategy registry
+    registry = _build_registry()
+    runner = EvaluationRunner(
+        initial_capital=initial_capital,
+        fees=fees,
+        n_splits=splits,
+        test_size=test_size,
+        window=window,
+        gap=gap,
+        db_path=db,
+        tearsheet_dir=tearsheet_dir,
+        benchmark=None if benchmark.lower() == "none" else benchmark,
+    )
+
+    # 4. Iterate: single-asset strategies run per symbol; multi-asset run once
+    summary: list[dict[str, Any]] = []
+
+    for strategy_name, strategy_class in registry.items():
+        is_multi = issubclass(strategy_class, MultiAssetStrategy)
+
+        if is_multi:
+            if len(bars_map) < 2:  # noqa: PLR2004
+                console.print(
+                    f"\n[yellow]Skipping {strategy_name}:[/] "
+                    "multi-asset strategy requires ≥ 2 symbols."
+                )
+                continue
+
+            console.print(
+                f"\n[bold cyan]>> {strategy_name}[/]  "
+                f"[dim](multi-asset · {len(bars_map)} symbols)[/]"
+            )
+            aligned = _align_bars(bars_map)
+            if len(aligned) < 2:  # noqa: PLR2004
+                console.print("  [yellow]skip:[/] fewer than 2 symbols share a common time range.")
+                continue
+
+            try:
+                multi_class = cast("type[MultiAssetStrategy]", strategy_class)
+                result = runner.evaluate_multi_asset(multi_class, aligned)
+                best = result.best_result
+                summary.append(
+                    {
+                        "strategy": strategy_name,
+                        "symbols": "+".join(sorted(aligned.keys())),
+                        "mean_sharpe": best.mean_test_sharpe,
+                        "mean_return_pct": best.mean_test_return,
+                        "mean_max_dd_pct": best.mean_test_max_dd,
+                    }
+                )
+                console.print(
+                    f"  [green]done[/]  sharpe={best.mean_test_sharpe:.3f}  "
+                    f"return={best.mean_test_return:.2f}%  "
+                    f"max_dd={best.mean_test_max_dd:.2f}%"
+                )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]error:[/] {exc}")
+
+        else:
+            single_class = cast("type[Strategy]", strategy_class)
+            for symbol, bars in bars_map.items():
+                console.print(f"\n[bold cyan]>> {strategy_name}[/]  [dim]({symbol})[/]")
+                try:
+                    result = runner.evaluate(single_class, bars, symbol=symbol)
+                    best = result.best_result
+                    summary.append(
+                        {
+                            "strategy": strategy_name,
+                            "symbols": symbol,
+                            "mean_sharpe": best.mean_test_sharpe,
+                            "mean_return_pct": best.mean_test_return,
+                            "mean_max_dd_pct": best.mean_test_max_dd,
+                        }
+                    )
+                    console.print(
+                        f"  [green]done[/]  sharpe={best.mean_test_sharpe:.3f}  "
+                        f"return={best.mean_test_return:.2f}%  "
+                        f"max_dd={best.mean_test_max_dd:.2f}%"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"  [red]error:[/] {exc}")
+
+    # 5. Print combined summary table sorted by mean OOS Sharpe
+    if not summary:
+        console.print("\n[yellow]No results to display.[/]")
+        return
+
+    console.print("\n[bold]── Summary (sorted by mean OOS Sharpe) ──────────────────[/]")
+    table = Table(show_lines=False, header_style="bold cyan")
+    table.add_column("strategy", style="white")
+    table.add_column("symbol(s)", style="dim")
+    table.add_column("mean_sharpe", justify="right")
+    table.add_column("mean_return%", justify="right")
+    table.add_column("mean_max_dd%", justify="right")
+
+    for row in sorted(summary, key=lambda r: r["mean_sharpe"], reverse=True):
+        table.add_row(
+            row["strategy"],
+            row["symbols"],
+            f"{row['mean_sharpe']:.3f}",
+            f"{row['mean_return_pct']:.2f}",
+            f"{row['mean_max_dd_pct']:.2f}",
+        )
+    console.print(table)
+
+
+def _align_bars(bars_map: dict[str, Any]) -> dict[str, Any]:
+    """Trim each symbol's bars to the common ts_event intersection.
+
+    Multi-asset strategies require all DataFrames to have identical length
+    and time-aligned rows.  This helper finds the intersection of timestamps
+    across all symbols and filters every DataFrame to that common set.
+
+    Args:
+        bars_map: Mapping of symbol → Polars bar DataFrame.
+
+    Returns:
+        Filtered mapping with only symbols that share at least one common
+        timestamp.  Returns an empty dict if no common timestamps exist.
+    """
+    import polars as pl
+
+    ts_col = "ts_event"
+    ts_sets = [set(df[ts_col].to_list()) for df in bars_map.values() if ts_col in df.columns]
+    if not ts_sets:
+        return {}
+
+    common_ts = ts_sets[0].intersection(*ts_sets[1:])
+    if not common_ts:
+        return {}
+
+    common_ts_list = sorted(common_ts)
+    return {
+        sym: df.filter(pl.col(ts_col).is_in(common_ts_list)).sort(ts_col)
+        for sym, df in bars_map.items()
+        if ts_col in df.columns
+    }
 
 
 @app.command(name="list")
