@@ -30,3 +30,4 @@ data/cache/
 python/**/*.so
 site/
 docs/api/rust/**/*.html
+data/*.db
