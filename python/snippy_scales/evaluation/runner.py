@@ -10,11 +10,9 @@
 3. :class:`~snippy_scales.backtesting.runners.BacktestRunner` /
    :class:`~snippy_scales.backtesting.runners.BasketRunner` — runs the strategy
    on each train and test slice.
-4. :class:`~snippy_scales.evaluation.database.SQLiteStore` — persists experiment
-   metadata (optional).
-5. :class:`~snippy_scales.evaluation.database.AnalyticsStore` — persists sweep
-   and fold analytics to DuckDB (optional).
-6. :class:`~snippy_scales.evaluation.tearsheet.TearsheetGenerator` — saves
+4. :class:`~snippy_scales.evaluation.database.AnalyticsStore` — persists all
+   results to a single DuckDB database (optional).
+5. :class:`~snippy_scales.evaluation.tearsheet.TearsheetGenerator` — saves
    tearsheet reports (optional).
 
 Usage::
@@ -24,8 +22,7 @@ Usage::
 
     runner = EvaluationRunner(
         n_splits=5,
-        db_path="data/metadata.db",
-        analytics_db_path="data/analytics.duckdb",
+        db_path="data/analytics.duckdb",
         tearsheet_dir="reports/",
     )
     grid = ParameterGrid({"fast_period": [10, 20, 40], "slow_period": [40, 60, 120]})
@@ -72,10 +69,8 @@ class EvaluationRunner:
         gap: Bars skipped between train end and test start (default 0).
         window: ``"expanding"`` or ``"rolling"`` (default ``"expanding"``).
         min_train_size: Minimum bars required in the training window.
-        db_path: Path to the SQLite metadata database.  Pass ``None`` to skip
-            experiment registration (default ``None``).
-        analytics_db_path: Path to the DuckDB analytics database.  Pass
-            ``None`` to skip analytics persistence (default ``None``).
+        db_path: Path to the DuckDB database for all persistence (experiments,
+            sweeps, folds).  Pass ``None`` to skip persistence (default ``None``).
         tearsheet_dir: Directory to save HTML tearsheet reports.  Pass ``None``
             to skip tearsheet generation (default ``None``).
         benchmark: Ticker string used as benchmark in tearsheet reports
@@ -86,8 +81,7 @@ class EvaluationRunner:
 
         runner = EvaluationRunner(
             n_splits=5,
-            db_path="data/metadata.db",
-            analytics_db_path="data/analytics.duckdb",
+            db_path="data/analytics.duckdb",
         )
         result = runner.evaluate(TrendFollowing, bars, symbol="ES.c.0")
     """
@@ -104,7 +98,6 @@ class EvaluationRunner:
         window: str = "expanding",
         min_train_size: int | None = None,
         db_path: Path | str | None = None,
-        analytics_db_path: Path | str | None = None,
         tearsheet_dir: Path | str | None = None,
         benchmark: str | None = "SPY",
     ) -> None:
@@ -117,9 +110,6 @@ class EvaluationRunner:
         self.window = window
         self.min_train_size = min_train_size
         self._db_path = Path(db_path) if db_path is not None else None
-        self._analytics_db_path = (
-            Path(str(analytics_db_path)) if analytics_db_path is not None else None
-        )
         self._tearsheet_dir = Path(tearsheet_dir) if tearsheet_dir is not None else None
         self._benchmark = benchmark
 
@@ -443,7 +433,10 @@ class EvaluationRunner:
     # ── Internal: persistence & tearsheet ─────────────────────────────────────
 
     def _maybe_persist(self, result: EvaluationResult) -> None:
-        from snippy_scales.evaluation.database import AnalyticsStore, SQLiteStore
+        if self._db_path is None:
+            return
+
+        from snippy_scales.evaluation.database import AnalyticsStore
 
         config = {
             "n_splits": self.n_splits,
@@ -455,25 +448,14 @@ class EvaluationRunner:
             "slippage": self.slippage,
         }
 
-        experiment_id: int = 0
-
-        if self._db_path is not None:
-            sqlite_store = SQLiteStore(self._db_path)
-            experiment_id = sqlite_store.save_evaluation(result, config=config)
-            logger.info(
-                "Saved experiment metadata to %s (experiment_id=%d)",
-                self._db_path,
-                experiment_id,
-            )
-
-        if self._analytics_db_path is not None:
-            analytics_store = AnalyticsStore(str(self._analytics_db_path))
-            analytics_store.save_evaluation_analytics(result, experiment_id=experiment_id)
-            logger.info(
-                "Saved evaluation analytics to %s (experiment_id=%d)",
-                self._analytics_db_path,
-                experiment_id,
-            )
+        store = AnalyticsStore(str(self._db_path))
+        experiment_id = store.save_evaluation(result, config=config)
+        store.save_evaluation_analytics(result, experiment_id=experiment_id)
+        logger.info(
+            "Saved evaluation to %s (experiment_id=%d)",
+            self._db_path,
+            experiment_id,
+        )
 
     def _maybe_tearsheet(self, result: EvaluationResult, name: str) -> None:
         if self._tearsheet_dir is None:
