@@ -170,7 +170,7 @@ just dev
 1. Read [Architecture Overview](../architecture/overview.md) to understand the codebase
 2. Read [Backtesting Engine](../architecture/backtest_engine.md) to learn how to run backtests
 3. Read [Adding a Strategy](adding_strategy.md) to implement your first strategy
-4. Read [API Reference](../api/python.md) for Python API docs
+4. Read [API Reference](../api/python/index.md) for Python API docs
 5. Read [Rust API Docs](../api/rust) for Rust API docs
 
 ## Getting Help

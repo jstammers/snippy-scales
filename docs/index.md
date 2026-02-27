@@ -14,4 +14,4 @@ A modular **Python–Rust** quantitative trading research and execution platform
 
 - [Quickstart](guides/quickstart.md)
 - [Architecture](architecture/overview.md)
-- [Python API](api/python.md)
+- [Python API](api/python/index.md)

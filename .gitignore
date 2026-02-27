@@ -28,3 +28,5 @@ data/cache/
 
 .claude
 python/**/*.so
+site/
+docs/api/rust/**/*.html
