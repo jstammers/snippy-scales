@@ -29,7 +29,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from snippy_scales.backtesting.store import METRIC_NAMES, METRICS_COLS, metrics_values
+from snippy_scales.backtesting.store import (
+    _DDL_TRADES,
+    METRIC_NAMES,
+    METRICS_COLS,
+    metrics_values,
+)
 
 if TYPE_CHECKING:
     import duckdb as _duckdb
@@ -84,7 +89,10 @@ CREATE TABLE IF NOT EXISTS fold_results (
     train_max_dd        DOUBLE,
     train_trades        INTEGER,
     -- all 33 test-window metrics
-    {METRICS_COLS.strip()}
+    {METRICS_COLS.strip()},
+    -- equity curves (DuckDB native arrays)
+    train_equity_curve  DOUBLE[],
+    test_equity_curve   DOUBLE[]
 )"""
 
 
@@ -126,7 +134,7 @@ class AnalyticsStore:
 
     def create_schema(self) -> None:
         """Create all tables if absent."""
-        for ddl in (_DDL_EXPERIMENTS, _DDL_SWEEP_RESULTS, _DDL_FOLD_RESULTS):
+        for ddl in (_DDL_EXPERIMENTS, _DDL_SWEEP_RESULTS, _DDL_FOLD_RESULTS, _DDL_TRADES):
             self._conn.execute(ddl)
 
     # ------------------------------------------------------------------
@@ -192,10 +200,13 @@ class AnalyticsStore:
             experiment_id: Primary key from the ``experiments`` table
                 (use ``0`` if not linked to an experiment row).
         """
+        import numpy as np
+
         self._conn.begin()
         try:
             sweep_placeholders = ", ".join(["?"] * 12)
-            fold_placeholders = ", ".join(["?"] * (11 + len(METRIC_NAMES)))
+            # 11 meta + 33 test metrics + 2 equity curve arrays
+            fold_placeholders = ", ".join(["?"] * (11 + len(METRIC_NAMES) + 2))
 
             for sweep in result.sweep_results:
                 sweep_id = str(uuid.uuid4())
@@ -233,9 +244,12 @@ class AnalyticsStore:
                         fold.train_metrics.max_drawdown_pct,
                         fold.train_metrics.total_trades,
                     ]
+                    # Equity curves as native DOUBLE[] arrays
+                    train_eq = np.asarray(fold.train_equity_curve, dtype=np.float64).tolist()
+                    test_eq = np.asarray(fold.test_equity_curve, dtype=np.float64).tolist()
                     self._conn.execute(
                         f"INSERT OR REPLACE INTO fold_results VALUES ({fold_placeholders})",
-                        fold_meta + metrics_values(fold.test_metrics),
+                        fold_meta + metrics_values(fold.test_metrics) + [train_eq, test_eq],
                     )
 
             self._conn.commit()
@@ -290,6 +304,39 @@ class AnalyticsStore:
             return pl.DataFrame()
         cols = [d[0] for d in self._conn.description]
         return pl.DataFrame([dict(zip(cols, r, strict=True)) for r in rows])
+
+    def load_fold_trades(self, fold_id: str) -> pl.DataFrame:
+        """Return all trades for a given fold as a Polars DataFrame."""
+        import polars as pl
+
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE run_id = ? AND source_type = 'fold' ORDER BY entry_time",
+            [fold_id],
+        ).fetchall()
+        if not rows:
+            return pl.DataFrame()
+        cols = [d[0] for d in self._conn.description]
+        return pl.DataFrame([dict(zip(cols, r, strict=True)) for r in rows])
+
+    def load_fold_equity(self, fold_id: str) -> dict[str, Any] | None:
+        """Return train/test equity curves for a fold.
+
+        Returns:
+            Dict with keys ``train_equity_curve`` and ``test_equity_curve``
+            mapping to Python lists, or ``None`` if not found.
+        """
+        import numpy as np
+
+        rows = self._conn.execute(
+            "SELECT train_equity_curve, test_equity_curve FROM fold_results WHERE id = ?",
+            [fold_id],
+        ).fetchall()
+        if not rows:
+            return None
+        train_eq, test_eq = rows[0]
+        train = np.asarray(train_eq, dtype=np.float64) if train_eq else np.array([])
+        test = np.asarray(test_eq, dtype=np.float64) if test_eq else np.array([])
+        return {"train_equity_curve": train, "test_equity_curve": test}
 
     def query(self, sql: str, params: list[object] | None = None) -> list[tuple[object, ...]]:
         """Execute a raw SQL query and return all rows.

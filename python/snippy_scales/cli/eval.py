@@ -601,8 +601,10 @@ def tearsheet(
         folds_df = analytics_store.load_fold_results(sweep_row["id"])
         folds: list[FoldResult] = []
         for fr in folds_df.iter_rows(named=True):
-            train_eq = np.array(json.loads(fr.get("train_equity_json") or "[]"))
-            test_eq = np.array(json.loads(fr.get("test_equity_json") or "[]"))
+            raw_train = fr.get("train_equity_curve")
+            raw_test = fr.get("test_equity_curve")
+            train_eq = np.asarray(raw_train, dtype=np.float64) if raw_train else np.array([])
+            test_eq = np.asarray(raw_test, dtype=np.float64) if raw_test else np.array([])
             folds.append(
                 FoldResult(
                     fold_idx=fr["fold_idx"],

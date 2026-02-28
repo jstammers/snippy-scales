@@ -2,12 +2,20 @@
 
 Schema
 ------
-One table is maintained in a single DuckDB database file:
+Three tables are maintained in a single DuckDB database file:
 
 ``backtest_runs``
     One row per single-pass backtest.  Contains all 33
     :class:`~snippy_scales.backtesting.domain.BacktestMetrics` fields plus
     run metadata (id, symbol, strategy name, timestamps, config parameters).
+
+``trades``
+    One row per round-trip trade.  Linked to ``backtest_runs`` or
+    ``fold_results`` via ``run_id`` + ``source_type`` discriminator.
+
+``equity_series``
+    One row per backtest run.  Stores equity curve, drawdown curve, and
+    returns as DuckDB native ``DOUBLE[]`` arrays.
 
 For evaluation (walk-forward) analytics, see
 :class:`~snippy_scales.evaluation.database.AnalyticsStore`.
@@ -25,12 +33,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 if TYPE_CHECKING:
     import duckdb as _duckdb
+    import polars as pl
 
-    from snippy_scales.backtesting.domain import BacktestResult
+    from snippy_scales.backtesting.domain import BacktestResult, Trade
 
 # ---------------------------------------------------------------------------
 # DDL helpers
@@ -92,6 +104,43 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     {METRICS_COLS.strip()}
 )"""
 
+_DDL_TRADES = """
+CREATE TABLE IF NOT EXISTS trades (
+    id          VARCHAR PRIMARY KEY,
+    run_id      VARCHAR NOT NULL,
+    source_type VARCHAR NOT NULL,
+    symbol      VARCHAR NOT NULL,
+    entry_time  BIGINT  NOT NULL,
+    exit_time   BIGINT  NOT NULL,
+    direction   INTEGER NOT NULL,
+    entry_price DOUBLE  NOT NULL,
+    exit_price  DOUBLE  NOT NULL,
+    pnl         DOUBLE  NOT NULL,
+    return_pct  DOUBLE  NOT NULL
+)"""
+
+_DDL_EQUITY_SERIES = """
+CREATE TABLE IF NOT EXISTS equity_series (
+    run_id          VARCHAR PRIMARY KEY,
+    equity_curve    DOUBLE[] NOT NULL,
+    drawdown_curve  DOUBLE[],
+    returns         DOUBLE[]
+)"""
+
+TRADE_COLS: tuple[str, ...] = (
+    "id",
+    "run_id",
+    "source_type",
+    "symbol",
+    "entry_time",
+    "exit_time",
+    "direction",
+    "entry_price",
+    "exit_price",
+    "pnl",
+    "return_pct",
+)
+
 # Flat ordered list of the 33 metric attribute names — used to build INSERT
 # parameter lists without repeating the names in multiple places.
 METRIC_NAMES: tuple[str, ...] = (
@@ -140,6 +189,28 @@ def metrics_values(metrics: object) -> list[object]:
     return [getattr(metrics, name) for name in METRIC_NAMES]
 
 
+def trades_rows(trades: list[Trade], run_id: str, source_type: str) -> list[list[object]]:
+    """Convert a list of Trade objects to insertable rows for the trades table."""
+    rows: list[list[object]] = []
+    for t in trades:
+        rows.append(
+            [
+                str(uuid.uuid4()),
+                run_id,
+                source_type,
+                t.symbol,
+                t.entry_time,
+                t.exit_time,
+                t.direction,
+                t.entry_price,
+                t.exit_price,
+                t.pnl,
+                t.return_pct,
+            ]
+        )
+    return rows
+
+
 def _symbol_str(symbol: str | list[str]) -> str:
     """Normalise symbol to a comma-separated string for storage."""
     if isinstance(symbol, str):
@@ -173,10 +244,13 @@ class BacktestStore:
                                 initial_capital=100_000, fees=0.001)
     """
 
-    def __init__(self, db_path: str = "data/analytics.duckdb") -> None:
+    def __init__(self, db_path: Path | str = "data/analytics.duckdb") -> None:
         import duckdb  # noqa: PLC0415 — optional dep, imported lazily
 
-        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(db_path)
+        path = str(db_path)
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn: _duckdb.DuckDBPyConnection = duckdb.connect(path)
         self.create_schema()
 
     # ------------------------------------------------------------------
@@ -184,8 +258,9 @@ class BacktestStore:
     # ------------------------------------------------------------------
 
     def create_schema(self) -> None:
-        """Create the ``backtest_runs`` table if it does not already exist."""
-        self._conn.execute(_DDL_BACKTEST_RUNS)
+        """Create all backtest tables if they do not already exist."""
+        for ddl in (_DDL_BACKTEST_RUNS, _DDL_TRADES, _DDL_EQUITY_SERIES):
+            self._conn.execute(ddl)
 
     # ------------------------------------------------------------------
     # Single-pass backtest persistence
@@ -227,14 +302,89 @@ class BacktestStore:
         ]
         metric_vals = metrics_values(result.metrics)
         placeholders = ", ".join(["?"] * (len(meta) + len(metric_vals)))
-        self._conn.execute(
-            f"INSERT OR REPLACE INTO backtest_runs VALUES ({placeholders})",
-            meta + metric_vals,
-        )
+
+        self._conn.begin()
+        try:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO backtest_runs VALUES ({placeholders})",
+                meta + metric_vals,
+            )
+
+            # Persist trades
+            if result.trades:
+                trade_ph = ", ".join(["?"] * len(TRADE_COLS))
+                for row in trades_rows(result.trades, rid, "run"):
+                    self._conn.execute(
+                        f"INSERT OR REPLACE INTO trades VALUES ({trade_ph})",
+                        row,
+                    )
+
+            # Persist equity series
+            self._conn.execute(
+                "INSERT OR REPLACE INTO equity_series VALUES (?, ?, ?, ?)",
+                [
+                    rid,
+                    result.equity_curve.tolist(),
+                    result.drawdown_curve.tolist(),
+                    result.returns.tolist(),
+                ],
+            )
+
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
         return rid
 
     # ------------------------------------------------------------------
-    # Querying convenience methods
+    # Read methods
+    # ------------------------------------------------------------------
+
+    def load_runs(self) -> pl.DataFrame:
+        """Return all backtest runs as a Polars DataFrame, newest first."""
+        import polars as pl  # noqa: PLC0415
+
+        rows = self._conn.execute("SELECT * FROM backtest_runs ORDER BY run_at DESC").fetchall()
+        if not rows:
+            return pl.DataFrame()
+        cols = [d[0] for d in self._conn.description]
+        return pl.DataFrame([dict(zip(cols, r, strict=True)) for r in rows])
+
+    def load_trades(self, run_id: str) -> pl.DataFrame:
+        """Return all trades for a given run as a Polars DataFrame."""
+        import polars as pl  # noqa: PLC0415
+
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE run_id = ? ORDER BY entry_time",
+            [run_id],
+        ).fetchall()
+        if not rows:
+            return pl.DataFrame()
+        cols = [d[0] for d in self._conn.description]
+        return pl.DataFrame([dict(zip(cols, r, strict=True)) for r in rows])
+
+    def load_equity_series(self, run_id: str) -> dict[str, np.ndarray] | None:
+        """Return equity curve, drawdown, and returns arrays for a run.
+
+        Returns:
+            Dict with keys ``equity_curve``, ``drawdown_curve``, ``returns``
+            mapping to NumPy arrays, or ``None`` if no data found.
+        """
+        rows = self._conn.execute(
+            "SELECT equity_curve, drawdown_curve, returns FROM equity_series WHERE run_id = ?",
+            [run_id],
+        ).fetchall()
+        if not rows:
+            return None
+        equity, drawdown, returns = rows[0]
+        return {
+            "equity_curve": np.asarray(equity, dtype=np.float64),
+            "drawdown_curve": np.asarray(drawdown, dtype=np.float64) if drawdown else np.array([]),
+            "returns": np.asarray(returns, dtype=np.float64) if returns else np.array([]),
+        }
+
+    # ------------------------------------------------------------------
+    # Raw query & lifecycle
     # ------------------------------------------------------------------
 
     def query(self, sql: str, params: list[object] | None = None) -> list[tuple[object, ...]]:
