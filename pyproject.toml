@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 optuna = ["optuna>=3.6"]
+dashboard = ["streamlit>=1.36", "plotly>=5.18"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -79,6 +80,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
 # CLI modules must import Path unconditionally so typer can resolve annotations
 # at runtime — moving it to TYPE_CHECKING (TC003) would break typer.
 "python/snippy_scales/cli/**" = ["TC003", "ANN401"]
+"python/snippy_scales/dashboard/**" = ["ANN401"]
 
 [tool.ruff.format]
 quote-style = "double"
