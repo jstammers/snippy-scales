@@ -11,51 +11,10 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── prek pre-commit hooks (fast gate, runs before everything else) ──────────
-  prek:
-    name: prek hooks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install prek
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
-          echo "$HOME/.prek/bin" >> "$GITHUB_PATH"
-
-      - name: Install uv (needed by prek for Python hook envs)
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install Rust (needed for Rust hooks)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust build (for clippy/fmt hooks)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
-      - name: Cache prek hook environments
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/prek
-          key: prek-${{ runner.os }}-${{ hashFiles('prek.toml') }}
-          restore-keys: |
-            prek-${{ runner.os }}-
-
-      - name: Run all pre-commit hooks on changed files
-        # In CI we run against all files so nothing slips through.
-        run: prek run --all-files
-
-  # ── Python lint + type-check ────────────────────────────────────────────────
+  # ── Python lint + type-check (fast, no Rust needed) ─────────────────────────
   python-lint:
     name: Python — ruff + ty
     runs-on: ubuntu-latest
-    needs: prek
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +39,36 @@ jobs:
       - name: ty type check
         run: just type-check
 
-  # ── Python tests ─────────────────────────────────────────────────────────────
+  # ── Rust lint + test (runs in parallel with python-lint) ─────────────────────
+  rust:
+    name: Rust — clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: rustfmt check
+        run: just fmt-rs-check
+
+      - name: clippy
+        run: just lint-rs
+
+      - name: Test
+        run: just test-rs
+
+  # ── Python tests (waits for lint to pass before spending on Rust build) ──────
   python-test:
     name: Python — pytest
     runs-on: ubuntu-latest
@@ -118,54 +106,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # ── Rust lint + test ─────────────────────────────────────────────────────────
-  rust:
-    name: Rust — clippy + test
-    runs-on: ubuntu-latest
-    needs: prek
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
-      - name: Install just
-        uses: extractions/setup-just@v2
-
-      - name: rustfmt check
-        run: just fmt-rs-check
-
-      - name: clippy
-        run: just lint-rs
-
-      - name: Test
-        run: just test-rs
-
-  # ── Benchmarks (informational, no fail) ──────────────────────────────────────
-  rust-bench:
-    name: Rust — benchmarks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-      - name: Install just
-        uses: extractions/setup-just@v2
-
-      - name: Run criterion benchmarks
-        run: just bench -- --output-format=bencher | tee bench_output.txt
-
-  # ── Build Python wheel (check only) ──────────────────────────────────────────
+  # ── Build Python wheel (release build validation) ────────────────────────────
   build-wheel:
     name: Build — maturin wheel
     runs-on: ubuntu-latest
@@ -181,3 +122,20 @@ jobs:
       - run: uv sync
       - name: Build wheel
         run: uv run maturin build --release
+
+  # ── Benchmarks (informational, main-branch pushes only) ──────────────────────
+  rust-bench:
+    name: Rust — benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Run criterion benchmarks
+        run: just bench -- --output-format=bencher | tee bench_output.txt
