@@ -33,6 +33,7 @@ nav:
       - Overview: architecture/overview.md
       - Event-Driven Engine: architecture/backtest_engine.md
       - Python–Rust Bridge: architecture/pyo3_bridge.md
+      - Status & Roadmap: architecture/roadmap.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - Adding a Strategy: guides/adding_strategy.md
