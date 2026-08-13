@@ -22,6 +22,20 @@ class VolTargetAllocator:
     close-price series and derives the weight needed to achieve *vol_target*,
     capped at *max_leverage*.
 
+    .. warning::
+       **This estimator looks ahead.** :meth:`weight` consumes the *entire*
+       close-price array, so in a walk-forward evaluation it sees the test
+       window while sizing the training window.  Realised volatility is
+       strongly autocorrelated, which makes the leakage material rather than
+       cosmetic — it flatters out-of-sample results.
+
+       It is retained because raptorbt accepts only one static weight per leg.
+       For new work prefer
+       :class:`~snippy_scales.backtesting.continuous.TargetPositionEngine`,
+       which honours a continuously-sized position series, and compute sizing
+       from a *trailing* volatility window inside ``generate_signals`` so the
+       estimate only ever uses data available at the decision bar.
+
     For long/short strategies the result is halved because the same total
     capital is split across both books.
 

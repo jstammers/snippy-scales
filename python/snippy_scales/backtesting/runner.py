@@ -17,12 +17,26 @@ Submodule layout:
 * :mod:`.engine`     — ``ExecutionEngine``, ``RaptorExecutionEngine``,
   ``InstrumentSpec``, ``make_config``, ``run_single``, ``run_long_short``,
   ``run_basket``
+* :mod:`.costs`      — ``CostModel``, ``ProportionalCost``, ``FuturesCostModel``
+* :mod:`.continuous` — ``TargetPositionEngine``, ``ContinuousConfig``,
+  ``make_continuous_config``, ``positions_from_signals``
 * :mod:`.runners`    — ``BacktestRunner``, ``BasketRunner``
 """
 
 from __future__ import annotations
 
 from snippy_scales.backtesting.allocation import VolTargetAllocator
+from snippy_scales.backtesting.continuous import (
+    ContinuousConfig,
+    TargetPositionEngine,
+    make_continuous_config,
+    positions_from_signals,
+)
+from snippy_scales.backtesting.costs import (
+    CostModel,
+    FuturesCostModel,
+    ProportionalCost,
+)
 from snippy_scales.backtesting.data import (
     OhlcvArrays,
     extract_ohlcv,
@@ -34,6 +48,7 @@ from snippy_scales.backtesting.domain import (
     BacktestMetrics,
     BacktestResult,
     Trade,
+    drawdown_curve,
 )
 from snippy_scales.backtesting.engine import (
     ExecutionEngine,
@@ -58,6 +73,7 @@ __all__ = [
     "Trade",
     "BacktestMetrics",
     "BacktestResult",
+    "drawdown_curve",
     # data
     "OhlcvArrays",
     "normalize_ohlcv",
@@ -78,6 +94,15 @@ __all__ = [
     "run_single",
     "run_long_short",
     "run_basket",
+    # costs
+    "CostModel",
+    "ProportionalCost",
+    "FuturesCostModel",
+    # continuous execution
+    "TargetPositionEngine",
+    "ContinuousConfig",
+    "make_continuous_config",
+    "positions_from_signals",
     # runners
     "BacktestRunner",
     "BasketRunner",

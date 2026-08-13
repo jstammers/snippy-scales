@@ -47,6 +47,12 @@ class InstrumentSpec:
         exits: Boolean array; ``True`` on the bar where the position closes.
         direction: ``1`` for long positions, ``-1`` for short positions.
         weight: Capital allocation fraction for this leg (0 < w ≤ 1).
+        positions: Optional signed, continuously-sized target positions in units
+            of equity (``0.5`` = half the portfolio long, ``-2.0`` = 2× short).
+            Consumed by
+            :class:`~snippy_scales.backtesting.continuous.TargetPositionEngine`
+            and **ignored by** :class:`RaptorExecutionEngine`, which reads only
+            ``entries``/``exits``.  Leave as ``None`` for sign-only strategies.
     """
 
     symbol: str
@@ -60,6 +66,7 @@ class InstrumentSpec:
     exits: np.ndarray
     direction: int
     weight: float
+    positions: np.ndarray | None = None
 
     def to_tuple(self) -> tuple[Any, ...]:
         """Return the 11-element tuple expected by ``raptorbt.run_basket_backtest``.
