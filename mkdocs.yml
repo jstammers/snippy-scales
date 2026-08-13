@@ -37,6 +37,8 @@ nav:
       - Quickstart: guides/quickstart.md
       - Adding a Strategy: guides/adding_strategy.md
       - Data Ingestion: guides/data_ingestion.md
+  - Research:
+      - SDEs and Neural SDEs: research/sde_market_dynamics.md
   - API Reference:
       - Python: api/python/index.md
       - Rust: api/rust/algo_core/index.html
