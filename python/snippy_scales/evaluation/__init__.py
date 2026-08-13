@@ -32,7 +32,22 @@ from __future__ import annotations
 from snippy_scales.evaluation.database import AnalyticsStore
 from snippy_scales.evaluation.results import EvaluationResult, FoldResult, SweepResult
 from snippy_scales.evaluation.runner import EvaluationRunner
+from snippy_scales.evaluation.scoring import (
+    calibration_error,
+    coverage,
+    crps_ensemble,
+    crps_gaussian,
+    pinball_loss,
+    pit_values,
+)
 from snippy_scales.evaluation.split import SplitFold, WalkForwardSplit
+from snippy_scales.evaluation.statistics import (
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
+    min_track_record_length,
+    probabilistic_sharpe_ratio,
+    probability_of_backtest_overfitting,
+)
 from snippy_scales.evaluation.sweep import OptunaSearch, ParameterGrid, RandomSearch
 from snippy_scales.evaluation.tearsheet import TearsheetGenerator
 
@@ -54,4 +69,17 @@ __all__ = [
     "TearsheetGenerator",
     # runner
     "EvaluationRunner",
+    # statistics — selection-bias corrections
+    "expected_max_sharpe",
+    "probabilistic_sharpe_ratio",
+    "deflated_sharpe_ratio",
+    "probability_of_backtest_overfitting",
+    "min_track_record_length",
+    # scoring — probabilistic forecast evaluation
+    "crps_gaussian",
+    "crps_ensemble",
+    "pinball_loss",
+    "pit_values",
+    "calibration_error",
+    "coverage",
 ]

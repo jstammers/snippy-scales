@@ -23,10 +23,12 @@ import numpy as np
 import pytest
 
 from snippy_scales.backtesting.runner import (
+    BacktestResult,
     ContinuousConfig,
     FuturesCostModel,
     InstrumentSpec,
     ProportionalCost,
+    RaptorExecutionEngine,
     TargetPositionEngine,
     make_config,
     make_continuous_config,
@@ -119,7 +121,7 @@ def _free_config(**overrides: object) -> ContinuousConfig:
     return make_continuous_config(**params)  # type: ignore[arg-type]
 
 
-def _raptor_result(spec: InstrumentSpec) -> object:
+def _raptor_result(spec: InstrumentSpec) -> BacktestResult:
     """Run the same leg through raptorbt with costs disabled.
 
     Args:
@@ -203,6 +205,32 @@ def test_raptorbt_annualises_with_365() -> None:
         ours = float(getattr(mine.metrics, field))
         ref = float(getattr(theirs.metrics, field))
         assert ref / ours == pytest.approx(_ANNUALISATION_GAP, rel=1e-4)
+
+
+def test_raptorbt_multi_leg_path_inflates_sharpe() -> None:
+    """Pin raptorbt's multi-leg Sharpe inflation on identical equity curves.
+
+    ``RaptorExecutionEngine`` (used by every runner and therefore every
+    evaluation fold) reports a Sharpe several times larger than
+    ``run_single`` for the *same* trades and the *same* equity curve.  The
+    factor is not constant, so results cannot be rescaled after the fact.
+    Equity curves are unaffected — only the ratio metrics are wrong.
+    """
+    spec = _make_spec(n=600, seed=1)
+    config = make_config(initial_capital=100_000.0, fees=0.0, slippage=0.0)
+
+    single = _raptor_result(spec)
+    multi = RaptorExecutionEngine().execute([spec], config=config)
+
+    # Same P&L...
+    np.testing.assert_allclose(single.equity_curve, multi.equity_curve, rtol=1e-9)
+    # ...wildly different Sharpe.
+    inflation = multi.metrics.sharpe_ratio / single.metrics.sharpe_ratio
+    assert inflation > 3.0, f"expected multi-leg inflation, got factor {inflation:.2f}"
+
+    # Several trade-level metrics are simply dropped on this path.
+    assert multi.metrics.exposure_pct == 0.0
+    assert single.metrics.exposure_pct > 0.0
 
 
 def test_periods_per_year_scales_sharpe() -> None:
@@ -365,7 +393,7 @@ def test_futures_cost_bigger_contract_is_cheaper_per_notional() -> None:
 def test_proportional_cost_rejects_negative(kwargs: dict[str, float], message: str) -> None:
     """Negative cost parameters must be rejected."""
     with pytest.raises(ValueError, match=message):
-        ProportionalCost(**kwargs)  # type: ignore[arg-type]
+        ProportionalCost(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -380,7 +408,7 @@ def test_proportional_cost_rejects_negative(kwargs: dict[str, float], message: s
 def test_futures_cost_rejects_invalid(kwargs: dict[str, float], message: str) -> None:
     """Invalid contract specifications must be rejected."""
     with pytest.raises(ValueError, match=message):
-        FuturesCostModel(**kwargs)  # type: ignore[arg-type]
+        FuturesCostModel(**kwargs)
 
 
 # ── Multi-leg baskets ─────────────────────────────────────────────────────────

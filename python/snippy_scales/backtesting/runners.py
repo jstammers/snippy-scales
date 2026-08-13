@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 from snippy_scales.backtesting.allocation import VolTargetAllocator
+from snippy_scales.backtesting.continuous import ContinuousConfig, make_continuous_config
+from snippy_scales.backtesting.costs import CostModel, ProportionalCost
 from snippy_scales.backtesting.data import extract_ohlcv
 from snippy_scales.backtesting.engine import (
     ExecutionEngine,
@@ -53,15 +56,36 @@ class BacktestRunner:
         fees: Per-trade commission fraction (default 10 bps).
         slippage: Round-trip slippage fraction (default 5 bps).
         vol_target: Target annualised portfolio volatility used to derive the
-            static capital allocation weight passed to raptorbt.
+            static capital allocation weight passed to raptorbt.  Ignored when
+            *engine* preserves position magnitude, since sizing then comes from
+            the strategy's own output.
         max_leverage: Hard leverage cap on the vol-adjusted weight.
         engine: Execution engine to use (default :class:`RaptorExecutionEngine`).
+            Pass
+            :class:`~snippy_scales.backtesting.continuous.TargetPositionEngine`
+            to honour continuous position sizing — see the note below.
+        cost_model: Transaction-cost model used only by non-raptorbt engines.
+            Defaults to a :class:`ProportionalCost` built from *fees* and
+            *slippage*.
+        periods_per_year: Annualisation factor used only by non-raptorbt
+            engines.  ``252`` for daily bars.
+
+    .. note::
+       The default raptorbt path routes positions through
+       :class:`~snippy_scales.backtesting.signals.SignFlipInterpreter`, which
+       keeps only their **sign** — so vol-scaled sizing has no effect, and
+       raptorbt's own ratio metrics are annualised with 365 rather than 252.
+       Supplying ``engine=TargetPositionEngine()`` preserves magnitude and
+       annualises correctly.
 
     Example::
 
         runner = BacktestRunner(initial_capital=1_000_000.0, fees=0.001)
         result = runner.run(strategy, bars, symbol="ES.c.0")
         print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
+
+        # Honour continuous position sizing:
+        runner = BacktestRunner(engine=TargetPositionEngine())
     """
 
     def __init__(
@@ -73,10 +97,14 @@ class BacktestRunner:
         vol_target: float = 0.10,
         max_leverage: float = 2.0,
         engine: ExecutionEngine | None = None,
+        cost_model: CostModel | None = None,
+        periods_per_year: float = TRADING_DAYS_PER_YEAR,
     ) -> None:
         self.initial_capital = initial_capital
         self.fees = fees
         self.slippage = slippage
+        self.periods_per_year = periods_per_year
+        self._cost_model = cost_model
         self._allocator = VolTargetAllocator(
             vol_target=vol_target,
             max_leverage=max_leverage,
@@ -105,28 +133,63 @@ class BacktestRunner:
         positions = strategy.generate_signals(bars).to_numpy().astype(np.float64)
         bundle = _DEFAULT_INTERPRETER.interpret(positions)
         ohlcv = extract_ohlcv(bars)
-        weight = self._allocator.weight(ohlcv.close)
 
-        cfg = make_config(
-            initial_capital=self.initial_capital,
-            fees=self.fees,
-            slippage=self.slippage,
-        )
-        return run_long_short(
+        if isinstance(self._engine, RaptorExecutionEngine):
+            weight = self._allocator.weight(ohlcv.close)
+            cfg = make_config(
+                initial_capital=self.initial_capital,
+                fees=self.fees,
+                slippage=self.slippage,
+            )
+            return run_long_short(
+                symbol=symbol,
+                timestamps=ohlcv.timestamps,
+                open_prices=ohlcv.open,
+                high_prices=ohlcv.high,
+                low_prices=ohlcv.low,
+                close_prices=ohlcv.close,
+                volume=ohlcv.volume,
+                long_entries=bundle.long_entries,
+                long_exits=bundle.long_exits,
+                short_entries=bundle.short_entries,
+                short_exits=bundle.short_exits,
+                long_weight=weight,
+                short_weight=weight,
+                config=cfg,
+            )
+
+        # Magnitude-preserving path: one leg carrying the signed position
+        # series, so the strategy's own sizing survives into execution.
+        spec = InstrumentSpec(
             symbol=symbol,
             timestamps=ohlcv.timestamps,
-            open_prices=ohlcv.open,
-            high_prices=ohlcv.high,
-            low_prices=ohlcv.low,
-            close_prices=ohlcv.close,
+            open=ohlcv.open,
+            high=ohlcv.high,
+            low=ohlcv.low,
+            close=ohlcv.close,
             volume=ohlcv.volume,
-            long_entries=bundle.long_entries,
-            long_exits=bundle.long_exits,
-            short_entries=bundle.short_entries,
-            short_exits=bundle.short_exits,
-            long_weight=weight,
-            short_weight=weight,
-            config=cfg,
+            entries=bundle.long_entries | bundle.short_entries,
+            exits=bundle.long_exits | bundle.short_exits,
+            direction=1,
+            weight=1.0,
+            positions=positions,
+        )
+        return self._engine.execute([spec], config=self._continuous_config())
+
+    def _continuous_config(self) -> ContinuousConfig:
+        """Build the config consumed by magnitude-preserving engines.
+
+        Returns:
+            A :class:`ContinuousConfig` derived from this runner's capital,
+            cost and annualisation settings.
+        """
+        cost_model = self._cost_model
+        if cost_model is None:
+            cost_model = ProportionalCost(fees=self.fees, slippage=self.slippage)
+        return make_continuous_config(
+            initial_capital=self.initial_capital,
+            cost_model=cost_model,
+            periods_per_year=self.periods_per_year,
         )
 
 
