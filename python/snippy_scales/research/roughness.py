@@ -31,10 +31,15 @@ diffusion, so this is the second gate.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
+from scipy import optimize
 
 __all__ = [
     "hurst_exponent",
+    "hurst_with_nugget",
+    "RoughnessEstimate",
     "variogram",
     "default_lags",
     "realised_variance",
@@ -168,6 +173,133 @@ def hurst_exponent(
     log_values = np.log(values[positive])
     slope = float(np.polyfit(log_lags, log_values, 1)[0])
     return slope / moment
+
+
+@dataclass(frozen=True)
+class RoughnessEstimate:
+    """Result of a nugget-aware Hurst fit.
+
+    Attributes:
+        hurst: Estimated Hurst exponent of the underlying signal, with the
+            measurement-noise contribution separated out.
+        noise_std: Estimated standard deviation of the additive observation
+            noise, in the units of the input series.
+        signal_scale: Fitted variogram scale ``c`` in
+            ``m(d) = c * d^(2H) + 2 * noise_std^2``.
+        noise_share: Fraction of the variogram at the shortest lag explained by
+            noise rather than signal.  Above ~0.5 the Hurst estimate is barely
+            identified and should not be trusted.
+        converged: Whether the non-linear fit converged.
+    """
+
+    hurst: float
+    noise_std: float
+    signal_scale: float
+    noise_share: float
+    converged: bool
+
+
+def hurst_with_nugget(
+    series: np.ndarray,
+    lags: np.ndarray | None = None,
+) -> RoughnessEstimate:
+    """Estimate the Hurst exponent while separating measurement noise.
+
+    :func:`hurst_exponent` fits a straight line to the log-log variogram, which
+    silently assumes the series is observed *exactly*.  Realised variance never
+    is — it is an estimate from a finite number of intraday returns, and a
+    range-based daily proxy is noisier still.  That estimation noise is white,
+    so it adds a constant to the variogram:
+
+    .. math::
+
+        m(\\Delta) = c\\,\\Delta^{2H} + 2\\sigma_\\varepsilon^2
+
+    The constant dominates at short lags, flattening the log-log slope and
+    dragging :math:`H` toward zero — **toward the "rough" verdict**.  The
+    effect is not subtle: an exactly-Markovian :math:`H = 0.5` path observed
+    with noise of one tenth the signal's standard deviation estimates as
+    :math:`H \\approx 0.07` under the log-log slope, which is indistinguishable
+    from the canonical rough-volatility finding.
+
+    This function fits the three parameters :math:`(c, H, \\sigma_\\varepsilon)`
+    directly by non-linear least squares on the variogram, so the noise floor is
+    absorbed by the nugget term instead of corrupting the exponent.
+
+    This is the estimator to use for any gating decision.  Compare its output
+    against :func:`hurst_exponent` — a large gap between them means the answer
+    is being driven by observation noise, not by the volatility path.
+
+    Args:
+        series: 1-D path to analyse, typically log realised variance.
+        lags: Lags passed to :func:`variogram`.  Defaults to
+            :func:`default_lags`.
+
+    Returns:
+        A :class:`RoughnessEstimate`.  On a failed fit, ``converged`` is
+        ``False`` and ``hurst`` falls back to the log-log slope.
+
+    Raises:
+        ValueError: If *series* is too short for a variogram.
+    """
+    lag_array, values = variogram(series, lags=lags, moment=2.0)
+
+    positive = values > 0.0
+    if np.count_nonzero(positive) < 4:
+        fallback = hurst_exponent(series, lags=lags)
+        return RoughnessEstimate(
+            hurst=fallback,
+            noise_std=0.0,
+            signal_scale=0.0,
+            noise_share=0.0,
+            converged=False,
+        )
+
+    x = lag_array[positive].astype(np.float64)
+    y = values[positive]
+
+    def model(params: np.ndarray) -> np.ndarray:
+        scale, hurst, noise_var = params
+        return scale * x ** (2.0 * hurst) + 2.0 * noise_var
+
+    def residual(params: np.ndarray) -> np.ndarray:
+        # Fit in log space: the variogram spans orders of magnitude across
+        # lags, and an unweighted linear fit would be dominated by the
+        # longest lags — the noisiest and least informative part.
+        return np.log(np.maximum(model(params), 1e-300)) - np.log(y)
+
+    # Seed from the naive slope so the optimiser starts in the right basin.
+    naive_h = float(np.clip(hurst_exponent(series, lags=lags), 0.01, 0.99))
+    seed = np.array([max(y[0], 1e-12), naive_h, y[0] * 0.25])
+
+    try:
+        fit = optimize.least_squares(
+            residual,
+            seed,
+            bounds=(np.array([1e-15, 0.001, 0.0]), np.array([np.inf, 0.999, np.inf])),
+            max_nfev=2000,
+        )
+    except (ValueError, RuntimeError):
+        return RoughnessEstimate(
+            hurst=naive_h,
+            noise_std=0.0,
+            signal_scale=0.0,
+            noise_share=0.0,
+            converged=False,
+        )
+
+    scale, hurst, noise_var = (float(v) for v in fit.x)
+    noise_term = 2.0 * noise_var
+    shortest = scale * float(x[0]) ** (2.0 * hurst) + noise_term
+    noise_share = noise_term / shortest if shortest > 0.0 else 0.0
+
+    return RoughnessEstimate(
+        hurst=hurst,
+        noise_std=float(np.sqrt(max(noise_var, 0.0))),
+        signal_scale=scale,
+        noise_share=float(np.clip(noise_share, 0.0, 1.0)),
+        converged=bool(fit.success),
+    )
 
 
 def realised_variance(returns: np.ndarray) -> float:

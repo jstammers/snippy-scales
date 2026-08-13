@@ -283,20 +283,55 @@ retail scale.
 
 Ordered by cost. Each step can kill the thesis before the next is worth starting.
 
-**Step 1 — Is the volatility even rough? (hours)**
-Run `hurst_exponent` on log realised variance for ES, NQ, ZN, CL across walk-forward folds.
+**Step 1 — Is the volatility even rough? (one command)**
 
-- H stably ≈ 0.1 → rough-volatility modelling is justified. Proceed.
-- H ≈ 0.5 → the entire rough/neural motivation evaporates. Use Heston or HAR and stop here.
-- H unstable across folds → the data does not support *any* fitted volatility model. Stop.
+```bash
+algo research roughness ES.c.0 --schema ohlcv-1m
+```
 
-Also run `jump_ratio`. If jumps dominate quadratic variation, no continuous SDE will fit and a
-jump-diffusion is needed instead.
+Exit code 0 authorises Step 4+; exit code 2 is a refusal with a reason. The gate splits the
+log realised-variance series into chronological folds, estimates the Hurst exponent in each,
+and returns one of:
 
-⚠️ Check the answer's stability across lag ranges first. The variogram estimator is biased
-downward at long lags — enough to manufacture a spurious "rough" reading. This bias is
-documented in `roughness.py` and was caught during development, where it turned a true H = 0.7
-into 0.61.
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `ROUGH` | H stably ≤ 0.25 | Proceed. This is the only passing verdict. |
+| `MARKOVIAN` | H stably ≥ 0.40 | Use Heston or HAR. The neural motivation is absent. |
+| `INTERMEDIATE` | H stable, in between | Weak support. Prefer the simpler model. |
+| `UNSTABLE` | H varies across folds | No fitted volatility model will generalise. |
+| `NOISE_DOMINATED` | Noise > 50% of short-lag variogram | **Get better data**, not a different model. |
+| `JUMP_DOMINATED` | Jumps > 30% of quadratic variation | A continuous SDE is the wrong object. |
+
+> ### ⚠️ The naive estimator is biased *toward passing this gate*
+>
+> Realised variance is always estimated, never observed, and estimation noise is white — which
+> adds a constant to the variogram, flattens the short-lag slope, and drags a log-log-slope
+> Hurst estimate **toward zero, i.e. toward "rough"**.
+>
+> The effect is not subtle. An exactly Markovian H = 0.5 path observed with noise one tenth of
+> the signal's standard deviation estimates as **H ≈ 0.07** under the naive estimator —
+> indistinguishable from the canonical rough-volatility finding. Measured across noise levels:
+>
+> | True H | naive, clean | naive, σ=0.1 | naive, σ=0.25 | nugget-aware, σ=0.25 |
+> |---:|---:|---:|---:|---:|
+> | 0.30 | 0.304 | 0.188 | 0.070 | **0.350** |
+> | 0.50 | 0.511 | 0.068 | 0.014 | **0.598** |
+> | 0.70 | 0.730 | 0.014 | 0.003 | *(unidentified — refused)* |
+>
+> A gate biased toward authorising the work it guards is worse than no gate. So the decision is
+> made on `hurst_with_nugget`, which fits the noise floor explicitly as
+> `m(Δ) = c·Δ^2H + 2σ²`, and refuses outright when the noise share exceeds 50%.
+>
+> This is the [Cont & Das](https://arxiv.org/abs/2203.13820) critique of the rough-volatility
+> literature, and it applies directly here.
+
+**Daily bars will often return `NOISE_DOMINATED`**, because a daily range estimator is a noisy
+RV proxy. That verdict means the *data* is inadequate — re-run on 1-minute bars before
+concluding anything. The published H ≈ 0.1 results use 5-minute realised variance.
+
+The gate also checks stability across lag ranges: the variogram is biased downward at long
+lags, enough to manufacture a spurious rough reading on its own. `default_lags` caps the grid
+accordingly; the bias turned a true H = 0.7 into 0.61 during development.
 
 **Step 2 — Do better estimators improve the forecast? (days)**
 Compare Yang–Zhang against close-to-close as inputs to a HAR forecast; score with `crps_ensemble`
@@ -354,7 +389,8 @@ one you are in, cheaply, before you commit.
 | `evaluation/statistics.py` | Deflated Sharpe, PBO (CSCV), minimum track record length — the §4 tables |
 | `evaluation/scoring.py` | CRPS, pinball loss, PIT calibration, coverage — for scoring distributions |
 | `research/volatility.py` | Parkinson, Garman–Klass, Rogers–Satchell, Yang–Zhang |
-| `research/roughness.py` | Hurst exponent, variogram, bipower variation, jump ratio — Step 1 |
+| `research/roughness.py` | Hurst exponent (naive + nugget-aware), variogram, bipower variation, jump ratio |
+| `research/diagnostics.py` | The Step 1 gate — fold-wise stability, noise and jump checks, typed verdict |
 | `research/sde.py` | OU (exact MLE), Heston, rough Bergomi — Steps 4–5 baselines |
 
 Every estimator is validated against simulated data with known ground truth. That discipline

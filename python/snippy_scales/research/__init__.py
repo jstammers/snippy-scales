@@ -29,11 +29,21 @@ continuous SDE will fit well.
 
 from __future__ import annotations
 
+from snippy_scales.research.diagnostics import (
+    FoldRoughness,
+    GateThresholds,
+    RoughnessReport,
+    RoughnessVerdict,
+    log_variance_proxy,
+    roughness_gate,
+)
 from snippy_scales.research.features import carry, realised_vol, zscore
 from snippy_scales.research.roughness import (
+    RoughnessEstimate,
     bipower_variation,
     default_lags,
     hurst_exponent,
+    hurst_with_nugget,
     jump_ratio,
     realised_variance,
     variogram,
@@ -67,6 +77,8 @@ __all__ = [
     "yang_zhang_vol",
     # roughness and jumps
     "hurst_exponent",
+    "hurst_with_nugget",
+    "RoughnessEstimate",
     "variogram",
     "default_lags",
     "realised_variance",
@@ -81,4 +93,11 @@ __all__ = [
     "RoughBergomiParams",
     "simulate_rough_bergomi",
     "fractional_gaussian_noise",
+    # roughness gate
+    "roughness_gate",
+    "RoughnessReport",
+    "RoughnessVerdict",
+    "FoldRoughness",
+    "GateThresholds",
+    "log_variance_proxy",
 ]
