@@ -14,13 +14,13 @@ import math
 import numpy as np
 import pytest
 from scipy import stats
+from sklearn.metrics import mean_pinball_loss
 
 from snippy_scales.evaluation.scoring import (
     calibration_error,
     coverage,
     crps_ensemble,
     crps_gaussian,
-    pinball_loss,
     pit_values,
 )
 from snippy_scales.evaluation.statistics import (
@@ -305,11 +305,16 @@ def test_crps_ensemble_rejects_misaligned_input() -> None:
 
 
 def test_pinball_loss_is_asymmetric() -> None:
-    """A low quantile must punish over-prediction far harder."""
-    over = pinball_loss(np.array([0.0]), np.array([1.0]), quantile=0.05)
-    under = pinball_loss(np.array([1.0]), np.array([0.0]), quantile=0.05)
-    assert over[0] == pytest.approx(0.95)
-    assert under[0] == pytest.approx(0.05)
+    """A low quantile must punish over-prediction far harder.
+
+    Quantile loss comes from scikit-learn rather than this package; these tests
+    are kept because the *property* is what the sizing work depends on, and a
+    silent upstream convention change would be worth catching.
+    """
+    over = mean_pinball_loss(np.array([0.0]), np.array([1.0]), alpha=0.05)
+    under = mean_pinball_loss(np.array([1.0]), np.array([0.0]), alpha=0.05)
+    assert over == pytest.approx(0.95)
+    assert under == pytest.approx(0.05)
 
 
 def test_pinball_loss_minimised_at_true_quantile() -> None:
@@ -318,15 +323,9 @@ def test_pinball_loss_minimised_at_true_quantile() -> None:
     obs = rng.normal(0.0, 1.0, 40_000)
     q = 0.25
     truth = float(stats.norm.ppf(q))
-    best = pinball_loss(obs, np.full_like(obs, truth), q).mean()
+    best = mean_pinball_loss(obs, np.full_like(obs, truth), alpha=q)
     for offset in (-0.5, -0.2, 0.2, 0.5):
-        assert best < pinball_loss(obs, np.full_like(obs, truth + offset), q).mean()
-
-
-def test_pinball_loss_validates_quantile() -> None:
-    """Quantiles outside (0, 1) must raise."""
-    with pytest.raises(ValueError, match="quantile"):
-        pinball_loss(np.zeros(3), np.zeros(3), quantile=0.0)
+        assert best < mean_pinball_loss(obs, np.full_like(obs, truth + offset), alpha=q)
 
 
 # ── Calibration ───────────────────────────────────────────────────────────────

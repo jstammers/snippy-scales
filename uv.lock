@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -639,6 +639,7 @@ wheels = [
 name = "griffelib"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/06/eccbd311c9e2b3ca45dbc063b93134c57a1ccc7607c5e545264ad092c4a9/griffelib-2.0.0.tar.gz", hash = "sha256:e504d637a089f5cab9b5daf18f7645970509bf4f53eda8d79ed71cce8bd97934", size = 166312, upload-time = "2026-03-23T21:06:55.954Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/51/c936033e16d12b627ea334aaaaf42229c37620d0f15593456ab69ab48161/griffelib-2.0.0-py3-none-any.whl", hash = "sha256:01284878c966508b6d6f1dbff9b6fa607bc062d8261c5c7253cb285b06422a7f", size = 142004, upload-time = "2026-02-09T19:09:40.561Z" },
 ]
@@ -1769,15 +1770,15 @@ wheels = [
 
 [[package]]
 name = "raptorbt"
-version = "0.3.2.post1"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8f/68/bcafc6f3a68949f54afe56689944b6f5b87e61cf9e6e8599587c8439135d/raptorbt-0.3.2.post1.tar.gz", hash = "sha256:91b015d769a7d49e08104a4952578629902fcf902f4914b604cf5c41b0f50aa3", size = 109261, upload-time = "2026-02-18T13:50:22.597Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/7a/46ecd5eb400beb9d6ed39f6a6c3f189c259eacef0d354c78cea88b533cf6/raptorbt-0.8.0.tar.gz", hash = "sha256:5359cde521f2c9f8753b69209be1d260186f9eb71c00f8732ec0cb9380684496", size = 562706, upload-time = "2026-08-14T00:37:15.227Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/d1/1136d9625da8f03c3c27e6911325fe0f390d4fb9d31fcf46031447d27a7e/raptorbt-0.3.2.post1-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:aa5a4031e915c32356a3c299cd6c49949f8550419405adcecc316c5613757192", size = 430636, upload-time = "2026-02-18T13:50:15.336Z" },
-    { url = "https://files.pythonhosted.org/packages/f7/5d/3d8c7aee4fcd26e6f04b73c3cf626be6acc553cba47cc97c92a2e0b1b56f/raptorbt-0.3.2.post1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ac3cae3b1fa14ba767060c0cadb74456a3914dc232220fa6f8a1de06354a3b23", size = 406871, upload-time = "2026-02-18T13:50:16.865Z" },
-    { url = "https://files.pythonhosted.org/packages/d4/37/dc95fb19051e4938200239ff1d8dec31cfa994d8abcb25ab1ca0375d47d1/raptorbt-0.3.2.post1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b42789d1e196ef2a71d273a02830933c7324dbeb8f642a2e0079a815680a6d74", size = 427262, upload-time = "2026-02-18T13:50:18.591Z" },
-    { url = "https://files.pythonhosted.org/packages/af/16/b97cb72dedabf24f26aa6cfcae9567f6b4faa95a1b5e80902e8ac370bd53/raptorbt-0.3.2.post1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3644355390fbdca7bac6ffd243645f15be12129bdbce259383ff8ce87f42a58d", size = 458611, upload-time = "2026-02-18T13:50:19.862Z" },
-    { url = "https://files.pythonhosted.org/packages/83/62/b18f3a2f3cccb4abfdb51c78de9b2882ce4a6dedc89ec6e6c5129836834a/raptorbt-0.3.2.post1-cp312-cp312-win_amd64.whl", hash = "sha256:e6d578ff7cb5468221c5a4e8fcf8b7c25f2dfb3f9cac3af37faf91a7918fcb10", size = 393838, upload-time = "2026-02-18T13:50:21.498Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/5a/83d4052d98dc2ab59f88fe678a72724020f7c256f072f97259cec83eef3c/raptorbt-0.8.0-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:3669eb1f142dabd0d974cd1822f86d8e9d71af1c5298cd56972dfa588691c998", size = 909231, upload-time = "2026-08-14T00:37:06.351Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/a4/03c837a226600626f13228a0b60fa5459a80221a04eb3c5eb8d8aa813b62/raptorbt-0.8.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9fb18c23802ff568728d9807f955ec14262529eeb2f3ed25f73c5aeba17a2130", size = 866777, upload-time = "2026-08-14T00:37:08.34Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/88/e04a2c90e846eea8a37a0b7ed0978524eaa34c4ae9e1c714547aa49b9ba8/raptorbt-0.8.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:564e76175998a53323d53bf3b83fdc89417220c8ef6eb19adba17bd57905a5b5", size = 884228, upload-time = "2026-08-14T00:37:09.887Z" },
+    { url = "https://files.pythonhosted.org/packages/65/10/24c0eed6feace38d8744bdb5e474d668378404467fb2514a1077ab2d7909/raptorbt-0.8.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e928557fbb55fc02a16f2dd615318ab98618a4d6daf89733f28b74efa088b58c", size = 952014, upload-time = "2026-08-14T00:37:11.645Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/fd/cdbe8f958cdfd492473fd53fa2c3648df496bbefaafcdae380de99c1de4f/raptorbt-0.8.0-cp312-cp312-win_amd64.whl", hash = "sha256:5b7b7f0dfb5f26abd358ce8ebea24e9c943c1197f9ff72bdd538f4c7cf77b9e5", size = 941681, upload-time = "2026-08-14T00:37:13.477Z" },
 ]
 
 [[package]]
@@ -1942,6 +1943,19 @@ wheels = [
 ]
 
 [[package]]
+name = "scoringrules"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e2/2c/645ef0174c26c2eccffc65596a29f2b3eb61daf441ac1ba79dd71611cc14/scoringrules-0.11.0.tar.gz", hash = "sha256:434d53c292bc319d080657dfdda99a3f6a5ceac45687d0f1218f8180e02a259d", size = 194532, upload-time = "2026-06-06T21:56:02.547Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/c2/646ebbc8a8b9df9244a76c8a523f7e768857ce3abd1c6bd4740470fd6b86/scoringrules-0.11.0-py3-none-any.whl", hash = "sha256:6371a36c856a8055b6751dc401a7e20000f0fd2886d602c90ee35ee0bc8ebb4e", size = 96450, upload-time = "2026-06-06T21:56:01.178Z" },
+]
+
+[[package]]
 name = "seaborn"
 version = "0.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2006,6 +2020,7 @@ dependencies = [
     { name = "rich" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "scoringrules" },
     { name = "typer" },
 ]
 
@@ -2041,7 +2056,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "maturin", specifier = ">=1.5" },
-    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "optuna", marker = "extra == 'optuna'", specifier = ">=3.6" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "polars", specifier = ">=0.20" },
@@ -2052,10 +2067,11 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "quantstats", specifier = ">=0.0.62" },
-    { name = "raptorbt", specifier = ">=0.3.2" },
+    { name = "raptorbt", specifier = ">=0.8.0" },
     { name = "rich", specifier = ">=13" },
     { name = "scikit-learn", specifier = ">=1.4" },
-    { name = "scipy", specifier = ">=1.12" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "scoringrules", specifier = ">=0.11" },
     { name = "typer", specifier = ">=0.12" },
 ]
 provides-extras = ["optuna", "dev"]

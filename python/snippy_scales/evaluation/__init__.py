@@ -37,7 +37,6 @@ from snippy_scales.evaluation.scoring import (
     coverage,
     crps_ensemble,
     crps_gaussian,
-    pinball_loss,
     pit_values,
 )
 from snippy_scales.evaluation.split import SplitFold, WalkForwardSplit
@@ -78,7 +77,6 @@ __all__ = [
     # scoring — probabilistic forecast evaluation
     "crps_gaussian",
     "crps_ensemble",
-    "pinball_loss",
     "pit_values",
     "calibration_error",
     "coverage",

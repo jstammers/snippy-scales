@@ -6,9 +6,9 @@ The load-bearing tests here are:
   must reproduce raptorbt's equity curve and its 29 non-ratio metrics exactly.
   Without this, the new engine could be quietly wrong in a way no other test
   would catch.
-* **Annualisation divergence** — the 4 remaining fields differ *by design*
-  because raptorbt annualises with 365 rather than 252.  That fact is pinned
-  here so it can never silently change.
+* **Annualisation** — ``make_config`` passes ``periods_per_year`` so raptorbt's
+  ratios agree with ours.  ``calmar_ratio`` is the sole remaining divergence:
+  it ignores that setting upstream and stays hard-wired to 365.
 * **Magnitude** — the assertion that fails against ``SignFlipInterpreter``,
   which is the entire reason this engine exists.
 * **Lookahead** — shifting execution earlier must inflate performance.
@@ -21,6 +21,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+import raptorbt
 
 from snippy_scales.backtesting.runner import (
     BacktestResult,
@@ -39,8 +40,11 @@ from snippy_scales.backtesting.runner import (
 _BASE_NS = 1_577_836_800_000_000_000  # 2020-01-01 UTC in nanoseconds
 _DAY_NS = 86_400_000_000_000
 
-#: Ratio metrics diverge from raptorbt purely through its 365-day annualisation.
-_RATIO_FIELDS = frozenset({"sharpe_ratio", "sortino_ratio", "calmar_ratio"})
+#: ``calmar_ratio`` is invariant to raptorbt's ``periods_per_year`` (verified
+#: identical at 252, 365 and 1000), so it remains annualised with 365 upstream
+#: while Sharpe and Sortino now honour the setting.  Excluded from parity until
+#: that is fixed; see ``docs/research/raptorbt_defects.md``.
+_RATIO_FIELDS = frozenset({"calmar_ratio"})
 
 #: sqrt(365 / 252) — the factor by which raptorbt overstates daily-bar Sharpe.
 _ANNUALISATION_GAP = float(np.sqrt(365.0 / 252.0))
@@ -158,8 +162,11 @@ def test_parity_equity_curve_matches_raptorbt() -> None:
     np.testing.assert_allclose(mine.equity_curve, theirs.equity_curve, rtol=1e-9)
 
 
-def test_parity_non_ratio_metrics_match_raptorbt() -> None:
-    """All 29 non-annualised metrics must agree with raptorbt exactly."""
+def test_parity_metrics_match_raptorbt() -> None:
+    """All 32 comparable metrics must agree with raptorbt exactly.
+
+    Only ``calmar_ratio`` is excluded — see :data:`_RATIO_FIELDS`.
+    """
     spec = _make_spec()
     mine = TargetPositionEngine().execute([spec], config=_free_config())
     theirs = _raptor_result(spec)
@@ -190,12 +197,14 @@ def test_parity_trades_match_raptorbt() -> None:
         assert ours.return_pct == pytest.approx(ref.return_pct, rel=1e-9)
 
 
-def test_raptorbt_annualises_with_365() -> None:
-    """Pin raptorbt's 365-day annualisation, which overstates daily Sharpe ~20%.
+def test_make_config_annualises_with_252_not_365() -> None:
+    """``make_config`` must override raptorbt's 365-day default.
 
-    ``TRADING_DAYS_PER_YEAR`` is documented as the repo-wide convention, but
-    raptorbt does not use it.  This test asserts the size of the gap so the
-    divergence stays a known quantity rather than a surprise in a results table.
+    raptorbt annualises with 365 unless told otherwise, which overstates
+    daily-bar Sharpe by ``sqrt(365/252)`` ≈ 1.20.  ``make_config`` passes
+    ``periods_per_year`` explicitly so raptorbt's ratios agree with
+    ``BacktestMetrics.from_returns``.  This test pins both halves: that our
+    default matches, and that raptorbt's bare default still does not.
     """
     spec = _make_spec()
     mine = TargetPositionEngine().execute([spec], config=_free_config())
@@ -204,33 +213,63 @@ def test_raptorbt_annualises_with_365() -> None:
     for field in ("sharpe_ratio", "sortino_ratio"):
         ours = float(getattr(mine.metrics, field))
         ref = float(getattr(theirs.metrics, field))
-        assert ref / ours == pytest.approx(_ANNUALISATION_GAP, rel=1e-4)
+        assert ref == pytest.approx(ours, rel=1e-6), f"{field} diverged from raptorbt"
+
+    # raptorbt's own default remains 365; the agreement above is ours to keep.
+    legacy = run_single(
+        symbol=spec.symbol,
+        timestamps=spec.timestamps,
+        open_prices=spec.open,
+        high_prices=spec.high,
+        low_prices=spec.low,
+        close_prices=spec.close,
+        volume=spec.volume,
+        entries=spec.entries,
+        exits=spec.exits,
+        direction=spec.direction,
+        weight=spec.weight,
+        config=raptorbt.BacktestConfig(initial_capital=100_000.0, fees=0.0, slippage=0.0),
+    )
+    ratio = legacy.metrics.sharpe_ratio / mine.metrics.sharpe_ratio
+    assert ratio == pytest.approx(_ANNUALISATION_GAP, rel=1e-3)
 
 
-def test_raptorbt_multi_leg_path_inflates_sharpe() -> None:
-    """Pin raptorbt's multi-leg Sharpe inflation on identical equity curves.
+def test_raptorbt_basket_path_agrees_with_single_path() -> None:
+    """Basket and single paths must agree on identical equity curves.
 
-    ``RaptorExecutionEngine`` (used by every runner and therefore every
-    evaluation fold) reports a Sharpe several times larger than
-    ``run_single`` for the *same* trades and the *same* equity curve.  The
-    factor is not constant, so results cannot be rescaled after the fact.
-    Equity curves are unaffected — only the ratio metrics are wrong.
+    raptorbt <=0.3.2 inflated the basket path's Sharpe by 4-7x relative to its
+    own single-instrument path on byte-identical equity. That was fixed
+    upstream in 0.8.0; this test is the regression guard, since every runner
+    and therefore every evaluation fold goes through the basket path.
     """
     spec = _make_spec(n=600, seed=1)
     config = make_config(initial_capital=100_000.0, fees=0.0, slippage=0.0)
 
     single = _raptor_result(spec)
-    multi = RaptorExecutionEngine().execute([spec], config=config)
+    basket = RaptorExecutionEngine().execute([spec], config=config)
 
-    # Same P&L...
-    np.testing.assert_allclose(single.equity_curve, multi.equity_curve, rtol=1e-9)
-    # ...wildly different Sharpe.
-    inflation = multi.metrics.sharpe_ratio / single.metrics.sharpe_ratio
-    assert inflation > 3.0, f"expected multi-leg inflation, got factor {inflation:.2f}"
+    np.testing.assert_allclose(single.equity_curve, basket.equity_curve, rtol=1e-9)
+    assert basket.metrics.sharpe_ratio == pytest.approx(single.metrics.sharpe_ratio, rel=1e-6)
 
-    # Several trade-level metrics are simply dropped on this path.
-    assert multi.metrics.exposure_pct == 0.0
+
+def test_raptorbt_basket_path_still_drops_trade_level_metrics() -> None:
+    """Known upstream gap: the basket path zeroes several trade-level metrics.
+
+    Fixed in 0.8.0 for Sharpe, but ``exposure_pct``, ``omega_ratio`` and
+    ``max_drawdown_duration`` are still returned as zero on the basket path
+    while the single path populates them. ``TargetPositionEngine`` computes all
+    of them, so this pins the gap rather than working around it.
+    """
+    spec = _make_spec(n=600, seed=1)
+    config = make_config(initial_capital=100_000.0, fees=0.0, slippage=0.0)
+
+    single = _raptor_result(spec)
+    basket = RaptorExecutionEngine().execute([spec], config=config)
+
     assert single.metrics.exposure_pct > 0.0
+    assert basket.metrics.exposure_pct == 0.0
+    assert basket.metrics.max_drawdown_duration == 0
+    assert single.metrics.max_drawdown_duration > 0
 
 
 def test_periods_per_year_scales_sharpe() -> None:

@@ -111,6 +111,47 @@ def _max_streak(flags: np.ndarray) -> int:
     return longest
 
 
+def _num(obj: Any, name: str, default: float = 0.0) -> float:
+    """Read a numeric attribute that may be absent *or* ``None``.
+
+    raptorbt returns ``None`` for metrics that are mathematically undefined —
+    ``profit_factor`` when there are no losing trades, for example.  A plain
+    ``getattr(obj, name, default)`` only covers the *absent* case and passes
+    ``None`` straight through to ``float()``, which raises.  This covers both,
+    and also collapses non-finite values so they cannot poison downstream
+    aggregation.
+
+    Args:
+        obj: Source object, typically a raptorbt metrics struct.
+        name: Attribute name.
+        default: Value to use when the attribute is missing, ``None``, or
+            non-finite.
+
+    Returns:
+        A finite float.
+    """
+    value = getattr(obj, name, None)
+    if value is None:
+        return default
+    result = float(value)
+    return result if np.isfinite(result) else default
+
+
+def _int(obj: Any, name: str, default: int = 0) -> int:
+    """Read an integer attribute that may be absent or ``None``.
+
+    Args:
+        obj: Source object.
+        name: Attribute name.
+        default: Value to use when the attribute is missing or ``None``.
+
+    Returns:
+        An int.
+    """
+    value = getattr(obj, name, None)
+    return default if value is None else int(value)
+
+
 # ── Trade ─────────────────────────────────────────────────────────────────────
 
 
@@ -154,13 +195,13 @@ class Trade:
         """
         return cls(
             symbol=symbol,
-            entry_time=int(getattr(t, "entry_time", 0)),
-            exit_time=int(getattr(t, "exit_time", 0)),
-            direction=int(getattr(t, "direction", 1)),
-            entry_price=float(getattr(t, "entry_price", 0.0)),
-            exit_price=float(getattr(t, "exit_price", 0.0)),
-            pnl=float(getattr(t, "pnl", 0.0)),
-            return_pct=float(getattr(t, "return_pct", 0.0)),
+            entry_time=_int(t, "entry_time", 0),
+            exit_time=_int(t, "exit_time", 0),
+            direction=_int(t, "direction", 1),
+            entry_price=_num(t, "entry_price", 0.0),
+            exit_price=_num(t, "exit_price", 0.0),
+            pnl=_num(t, "pnl", 0.0),
+            return_pct=_num(t, "return_pct", 0.0),
         )
 
 
@@ -414,45 +455,45 @@ class BacktestMetrics:
         """
         return cls(
             # Core performance
-            total_return_pct=float(getattr(m, "total_return_pct", 0.0)),
-            sharpe_ratio=float(getattr(m, "sharpe_ratio", 0.0)),
-            sortino_ratio=float(getattr(m, "sortino_ratio", 0.0)),
-            calmar_ratio=float(getattr(m, "calmar_ratio", 0.0)),
-            omega_ratio=float(getattr(m, "omega_ratio", 0.0)),
+            total_return_pct=_num(m, "total_return_pct", 0.0),
+            sharpe_ratio=_num(m, "sharpe_ratio", 0.0),
+            sortino_ratio=_num(m, "sortino_ratio", 0.0),
+            calmar_ratio=_num(m, "calmar_ratio", 0.0),
+            omega_ratio=_num(m, "omega_ratio", 0.0),
             # Drawdown
-            max_drawdown_pct=float(getattr(m, "max_drawdown_pct", 0.0)),
-            max_drawdown_duration=int(getattr(m, "max_drawdown_duration", 0)),
+            max_drawdown_pct=_num(m, "max_drawdown_pct", 0.0),
+            max_drawdown_duration=_int(m, "max_drawdown_duration", 0),
             # Trade counts
-            total_trades=int(getattr(m, "total_trades", 0)),
-            total_closed_trades=int(getattr(m, "total_closed_trades", 0)),
-            total_open_trades=int(getattr(m, "total_open_trades", 0)),
-            winning_trades=int(getattr(m, "winning_trades", 0)),
-            losing_trades=int(getattr(m, "losing_trades", 0)),
+            total_trades=_int(m, "total_trades", 0),
+            total_closed_trades=_int(m, "total_closed_trades", 0),
+            total_open_trades=_int(m, "total_open_trades", 0),
+            winning_trades=_int(m, "winning_trades", 0),
+            losing_trades=_int(m, "losing_trades", 0),
             # Trade performance
-            win_rate_pct=float(getattr(m, "win_rate_pct", 0.0)),
-            profit_factor=float(getattr(m, "profit_factor", 0.0)),
-            expectancy=float(getattr(m, "expectancy", 0.0)),
-            sqn=float(getattr(m, "sqn", 0.0)),
-            avg_trade_return_pct=float(getattr(m, "avg_trade_return_pct", 0.0)),
-            avg_win_pct=float(getattr(m, "avg_win_pct", 0.0)),
-            avg_loss_pct=float(getattr(m, "avg_loss_pct", 0.0)),
-            best_trade_pct=float(getattr(m, "best_trade_pct", 0.0)),
-            worst_trade_pct=float(getattr(m, "worst_trade_pct", 0.0)),
-            payoff_ratio=float(getattr(m, "payoff_ratio", 0.0)),
-            recovery_factor=float(getattr(m, "recovery_factor", 0.0)),
+            win_rate_pct=_num(m, "win_rate_pct", 0.0),
+            profit_factor=_num(m, "profit_factor", 0.0),
+            expectancy=_num(m, "expectancy", 0.0),
+            sqn=_num(m, "sqn", 0.0),
+            avg_trade_return_pct=_num(m, "avg_trade_return_pct", 0.0),
+            avg_win_pct=_num(m, "avg_win_pct", 0.0),
+            avg_loss_pct=_num(m, "avg_loss_pct", 0.0),
+            best_trade_pct=_num(m, "best_trade_pct", 0.0),
+            worst_trade_pct=_num(m, "worst_trade_pct", 0.0),
+            payoff_ratio=_num(m, "payoff_ratio", 0.0),
+            recovery_factor=_num(m, "recovery_factor", 0.0),
             # Duration
-            avg_holding_period=float(getattr(m, "avg_holding_period", 0.0)),
-            avg_winning_duration=float(getattr(m, "avg_winning_duration", 0.0)),
-            avg_losing_duration=float(getattr(m, "avg_losing_duration", 0.0)),
+            avg_holding_period=_num(m, "avg_holding_period", 0.0),
+            avg_winning_duration=_num(m, "avg_winning_duration", 0.0),
+            avg_losing_duration=_num(m, "avg_losing_duration", 0.0),
             # Streaks
-            max_consecutive_wins=int(getattr(m, "max_consecutive_wins", 0)),
-            max_consecutive_losses=int(getattr(m, "max_consecutive_losses", 0)),
+            max_consecutive_wins=_int(m, "max_consecutive_wins", 0),
+            max_consecutive_losses=_int(m, "max_consecutive_losses", 0),
             # Portfolio
-            start_value=float(getattr(m, "start_value", 0.0)),
-            end_value=float(getattr(m, "end_value", 0.0)),
-            total_fees_paid=float(getattr(m, "total_fees_paid", 0.0)),
-            open_trade_pnl=float(getattr(m, "open_trade_pnl", 0.0)),
-            exposure_pct=float(getattr(m, "exposure_pct", 0.0)),
+            start_value=_num(m, "start_value", 0.0),
+            end_value=_num(m, "end_value", 0.0),
+            total_fees_paid=_num(m, "total_fees_paid", 0.0),
+            open_trade_pnl=_num(m, "open_trade_pnl", 0.0),
+            exposure_pct=_num(m, "exposure_pct", 0.0),
         )
 
 

@@ -55,7 +55,7 @@ snippy_scales/
 ### Vectorised Backtesting — ✅ Implemented
 
 The research layer provides fast, **vectorised backtesting** using
-[raptorbt](https://github.com/willybrauner/raptorbt) — a Rust extension that processes
+[raptorbt](https://github.com/alphabench/raptorbt) — a Rust extension that processes
 entire OHLCV datasets as arrays without any Python loops.
 
 **How it works:**

@@ -8,7 +8,7 @@ Defines:
   execution backends (e.g. raptorbt, vectorbt, paper-trading).
 * :class:`RaptorExecutionEngine` — the default implementation backed by
   ``raptorbt.run_basket_backtest``.
-* :func:`make_config` — factory for ``raptorbt.PyBacktestConfig``.
+* :func:`make_config` — factory for ``raptorbt.BacktestConfig``.
 * Low-level wrappers :func:`run_single`, :func:`run_long_short`,
   :func:`run_basket` — thin typed wrappers kept for direct use and backward
   compatibility.
@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np  # noqa: TC002
 import raptorbt
 
+from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 from snippy_scales.backtesting.domain import BacktestResult
 
 # ── InstrumentSpec ────────────────────────────────────────────────────────────
@@ -99,8 +100,9 @@ def make_config(
     fees: float = 0.001,
     slippage: float = 0.0005,
     upon_bar_close: bool = True,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
 ) -> Any:
-    """Create a ``raptorbt.PyBacktestConfig`` with sensible defaults.
+    """Create a ``raptorbt.BacktestConfig`` with sensible defaults.
 
     Args:
         initial_capital: Starting portfolio value in currency units.
@@ -109,15 +111,23 @@ def make_config(
         slippage: Round-trip slippage as a fraction of price
             (e.g. ``0.0005`` = 5 bps).
         upon_bar_close: If ``True`` fills execute at bar close; else at open.
+        periods_per_year: Annualisation factor for the ratio metrics.  Defaults
+            to the repo-wide ``TRADING_DAYS_PER_YEAR``.  **raptorbt's own
+            default is 365**, which overstates daily-bar Sharpe by
+            ``sqrt(365/252)`` ≈ 1.20; passing this explicitly is what keeps
+            raptorbt's ratios consistent with
+            :meth:`~snippy_scales.backtesting.domain.BacktestMetrics.from_returns`.
+            Scale it up for intraday bars (e.g. ``252 * 23`` for hourly CME).
 
     Returns:
-        Configured ``raptorbt.PyBacktestConfig`` instance.
+        Configured ``raptorbt.BacktestConfig`` instance.
     """
-    return raptorbt.PyBacktestConfig(
+    return raptorbt.BacktestConfig(
         initial_capital=initial_capital,
         fees=fees,
         slippage=slippage,
         upon_bar_close=upon_bar_close,
+        periods_per_year=periods_per_year,
     )
 
 

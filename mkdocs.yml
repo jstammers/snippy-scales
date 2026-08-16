@@ -39,6 +39,7 @@ nav:
       - Data Ingestion: guides/data_ingestion.md
   - Research:
       - SDEs and Neural SDEs: research/sde_market_dynamics.md
+      - raptorbt Defects: research/raptorbt_defects.md
   - API Reference:
       - Python: api/python/index.md
       - Rust: api/rust/algo_core/index.html

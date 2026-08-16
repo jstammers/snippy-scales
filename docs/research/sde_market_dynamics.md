@@ -19,26 +19,37 @@ decides whether your backtest means anything). Both are quantified below.
 
 ## 0. What this study found in the existing code
 
-Before any of the analysis below, three defects in the current stack had to be fixed, because
-they made the question unanswerable. Two of them were inflating reported performance by
-roughly an order of magnitude.
+Before any of the analysis below, several defects in the stack had to be fixed, because they made
+the question unanswerable. Two of them were inflating reported performance by roughly an order
+of magnitude.
 
-| Finding | Effect | Status |
+| Finding | Effect | Resolution |
 |---|---|---|
-| `SignFlipInterpreter` reads only the **sign** of a position | All vol-scaled sizing silently discarded; `TrendFollowing`'s vol-scalar had zero effect on any result | Fixed — `TargetPositionEngine` |
-| raptorbt annualises with **365**, not 252 | Sharpe overstated by √(365/252) ≈ **1.20×** | Fixed — `periods_per_year`, divergence pinned by test |
-| raptorbt's **multi-leg path** (used by every evaluation fold) | Sharpe **4–7× higher** than its own single-instrument path on *identical* equity curves; `exposure_pct`, `omega_ratio` and trade-return fields silently zero | Fixed — documented, pinned by test |
+| `SignFlipInterpreter` reads only the **sign** of a position | All vol-scaled sizing silently discarded; `TrendFollowing`'s vol-scalar had zero effect on any result | Fixed here — `TargetPositionEngine` |
+| raptorbt annualised with **365**, not 252 | Sharpe overstated by √(365/252) ≈ **1.20×** | Fixed upstream in 0.8.0; `make_config` now passes `periods_per_year` explicitly |
+| raptorbt's **multi-leg path** (used by every evaluation fold) | Sharpe **4–7× higher** than its own single-instrument path on *identical* equity curves | Fixed upstream in 0.8.0; regression-guarded |
+| `from_raptorbt` cast `None` metrics with `float()` | Crashed on any run with no losing trades, where 0.8.0 returns `profit_factor=None` | Fixed here — `_num`/`_int` helpers |
 
-The combined effect, measured end-to-end on a **random walk with negligible drift**:
+**The project was pinned to `raptorbt>=0.3.2` while 0.8.0 had already shipped.** Both raptorbt
+defects were fixed upstream; the floor is now `>=0.8.0`, and 32 of the 33 metrics agree exactly
+between the two engines.
+
+The combined effect of the two annualisation defects, measured end-to-end on a **random walk with
+negligible drift**, is the reason this mattered:
 
 | Engine | Best sweep Sharpe | Deflated Sharpe | Verdict it implies |
 |---|---|---|---|
-| raptorbt (previous default) | **10.72** | 1.000 | "certain skill" |
+| raptorbt 0.3.2 (the old pin) | **10.72** | 1.000 | "certain skill" |
 | `TargetPositionEngine` | **0.42** | 0.606 | "probably nothing" |
 
 Equity curves and total returns were never affected — only the risk-adjusted ratios. But those
-ratios are exactly what a research programme steers by. **Any Sharpe recorded in this repo
-before this change should be treated as unusable.**
+ratios are exactly what a research programme steers by. **Any Sharpe recorded in this repo before
+the 0.8.0 upgrade should be treated as unusable.**
+
+Two narrower raptorbt defects remain open in 0.8.0 and are written up with reproductions in
+[`raptorbt_defects.md`](raptorbt_defects.md): `calmar_ratio` ignores `periods_per_year` (still
+hard-wired to 365, a ~1.46× overstatement on daily bars), and the basket path still returns zero
+for `exposure_pct`, `omega_ratio` and `max_drawdown_duration`. Both are regression-guarded here.
 
 ---
 
@@ -397,6 +408,38 @@ Every estimator is validated against simulated data with known ground truth. Tha
 caught two real defects during development — an inverted bipower scaling constant that made
 Gaussian noise read as 59% jumps, and the variogram lag bias described in Step 1 — either of
 which would have produced a confident, wrong conclusion about market structure.
+
+### Why this code is hand-rolled
+
+A reasonable objection: this is a well-served domain, so why write ~2,700 lines of numerics? The
+landscape was reviewed against PyPI release data and the installed packages. Two things were
+replaced; the rest survived for specific reasons.
+
+| Component | Library considered | Outcome |
+|---|---|---|
+| Quantile / pinball loss | `sklearn.metrics.mean_pinball_loss` | **Deleted** — sklearn was already a dependency and the output is identical |
+| CRPS (Gaussian + ensemble) | **`scoringrules`** | **Replaced** — Apache, actively released, `requires-python >=3.12` matching this repo, and its only dependencies are numpy and scipy (which added *zero* transitive packages). A port of R's canonical `scoringRules` |
+| PIT, calibration, coverage | `scores` | Kept — three lines each over `scipy.stats.kstest`; `scores` needs xarray, pandas and bottleneck |
+| Probabilistic Sharpe | `quantstats` (already a dependency) | Kept — its variance term expands to exactly ours, but it accepts no `benchmark_sharpe`, which the Deflated Sharpe Ratio requires |
+| Deflated Sharpe, PBO, MinTRL | `mlfinlab`, `pypbo` | Kept — `mlfinlab` is commercial and not on PyPI; `pypbo` is GitHub-only and unmaintained |
+| Range volatility estimators | — | Kept — no maintained package exists; the candidates are loose GitHub repos or commercial |
+| Hurst exponent | `whittlehurst`, `nolds`, `hurst` | Kept — `whittlehurst` **cannot be installed** here (see below); `nolds` implements a different estimator family (RS/DFA) and depends on `future`; `hurst` was last released in 2019. **None does the nugget correction**, which is what makes the gate valid rather than biased |
+| fGn, OU, Heston, rough Bergomi | `stochastic`, `fbm`, QuantLib | Kept — `stochastic` **cannot be installed** here; `fbm` is sound but last released in 2019; QuantLib is a large C++ dependency for two textbook simulators |
+
+Two constraints did most of the deciding:
+
+- **`stochastic` pins `python <3.11`.** This repo requires `>=3.12`, so `stochastic` and
+  `whittlehurst` (which depends on it) are both uninstallable. The two most attractive
+  off-the-shelf options for OU simulation and Hurst estimation are ruled out by the Python floor.
+- **`quantstats` operates on a returns series, not a trade list.** Of the 33 `BacktestMetrics`
+  fields, 21 are trade-level — counts, durations, best/worst trade, portfolio values — and of the
+  remainder only about six are computed on comparable terms. It is a poor substitute for
+  `from_returns`, though a useful independent check on the ratio maths.
+
+The general lesson is that quantitative finance has excellent libraries for *pricing* and
+*portfolio optimisation*, and comparatively thin coverage of research-methodology tooling —
+selection-bias corrections, roughness diagnostics, range-based volatility estimators. That is
+where the custom code sits, and it is not an accident.
 
 ## Sources
 

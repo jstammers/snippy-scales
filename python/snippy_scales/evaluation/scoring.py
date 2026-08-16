@@ -18,24 +18,34 @@ Provided:
 
 * :func:`crps_ensemble` / :func:`crps_gaussian` — Continuous Ranked
   Probability Score, a *proper* scoring rule that generalises MAE to
-  distributions (lower is better).
-* :func:`pinball_loss` — quantile loss, for when only specific tail quantiles
-  matter (e.g. sizing against a 5% VaR).
+  distributions (lower is better).  Thin wrappers over ``scoringrules``.
 * :func:`pit_values` / :func:`calibration_error` — Probability Integral
   Transform.  If the forecast distribution is correct, PIT values are uniform;
   deviation from uniformity is exactly miscalibration.
 * :func:`coverage` — realised hit rate of a central prediction interval.
+
+Deliberately *not* provided:
+
+* **Quantile / pinball loss** — use :func:`sklearn.metrics.mean_pinball_loss`,
+  which scikit-learn already ships and this project already depends on.
+* **Rank histograms, threshold-weighted and multivariate scores** — reach for
+  ``scoringrules`` directly; it carries the full catalogue from R's
+  ``scoringRules``.
+
+The CRPS wrappers are kept as named functions rather than inlined call sites so
+that the argument-order and axis conventions live in one place, and so the
+rationale above stays attached to the code that uses it.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import scoringrules as sr
 from scipy import stats
 
 __all__ = [
     "crps_ensemble",
     "crps_gaussian",
-    "pinball_loss",
     "pit_values",
     "calibration_error",
     "coverage",
@@ -61,6 +71,10 @@ def crps_gaussian(
     point forecast (``std → 0``) it reduces to absolute error — which makes it
     directly comparable against an MAE baseline.
 
+    Delegates to :func:`scoringrules.crps_normal`; the degenerate ``std <= 0``
+    case is handled here, since a zero-width forecast is a point forecast and
+    should score as plain absolute error rather than divide by zero.
+
     Args:
         observations: Realised values.
         mean: Forecast means, broadcastable against *observations*.
@@ -75,10 +89,7 @@ def crps_gaussian(
     sigma = np.asarray(std, dtype=np.float64)
 
     safe_sigma = np.where(sigma > 0.0, sigma, 1.0)
-    z = (obs - mu) / safe_sigma
-    score = safe_sigma * (
-        z * (2.0 * stats.norm.cdf(z) - 1.0) + 2.0 * stats.norm.pdf(z) - 1.0 / np.sqrt(np.pi)
-    )
+    score = np.asarray(sr.crps_normal(obs, mu, safe_sigma), dtype=np.float64)
     return np.where(sigma > 0.0, score, np.abs(obs - mu))
 
 
@@ -86,20 +97,13 @@ def crps_ensemble(observations: np.ndarray, samples: np.ndarray) -> np.ndarray:
     """Return the CRPS of a Monte-Carlo forecast ensemble.
 
     This is the estimator to use for a neural SDE, whose forecast distribution
-    is only available as simulated paths.  Uses the energy form
-
-    .. math::
-
-        \\mathrm{CRPS} = E|X - y| - \\tfrac{1}{2} E|X - X'|
-
-    computed exactly from the sorted sample, which costs
-    :math:`O(m \\log m)` per observation rather than the :math:`O(m^2)` of the
-    naive pairwise expansion.
+    is only available as simulated paths.  Delegates to
+    :func:`scoringrules.crps_ensemble`.
 
     Args:
         observations: Realised values, shape ``(n,)``.
         samples: Forecast samples, shape ``(n, m)`` — ``m`` draws per
-            observation.
+            observation.  The sample axis is the last one.
 
     Returns:
         CRPS array of shape ``(n,)``.
@@ -116,50 +120,10 @@ def crps_ensemble(observations: np.ndarray, samples: np.ndarray) -> np.ndarray:
     if draws.shape[0] != obs.shape[0]:
         raise ValueError(f"samples has {draws.shape[0]} rows but observations has {obs.shape[0]}")
 
-    m = draws.shape[1]
-    if m == 0:
+    if draws.shape[1] == 0:
         return np.zeros_like(obs)
 
-    ordered = np.sort(draws, axis=1)
-    term_obs = np.abs(ordered - obs[:, None]).mean(axis=1)
-
-    # E|X - X'| for a sorted sample equals
-    #   (2 / m^2) * sum_i (2i - m + 1) * x_(i)   with i zero-indexed.
-    weights = 2.0 * np.arange(m, dtype=np.float64) - m + 1.0
-    term_spread = 2.0 * (ordered * weights).sum(axis=1) / (m * m)
-
-    return term_obs - 0.5 * term_spread
-
-
-def pinball_loss(
-    observations: np.ndarray,
-    predictions: np.ndarray,
-    quantile: float,
-) -> np.ndarray:
-    """Return the pinball (quantile) loss.
-
-    Asymmetric by design: at ``quantile=0.05`` an over-prediction is penalised
-    19× more heavily than an under-prediction, which is the right shape when
-    the forecast feeds a downside risk limit.
-
-    Args:
-        observations: Realised values.
-        predictions: Predicted quantile values.
-        quantile: Target quantile, strictly between 0 and 1.
-
-    Returns:
-        Elementwise loss array.
-
-    Raises:
-        ValueError: If *quantile* is not strictly between 0 and 1.
-    """
-    if not 0.0 < quantile < 1.0:
-        raise ValueError(f"quantile must be in (0, 1), got {quantile}")
-
-    obs = np.asarray(observations, dtype=np.float64)
-    pred = np.asarray(predictions, dtype=np.float64)
-    error = obs - pred
-    return np.maximum(quantile * error, (quantile - 1.0) * error)
+    return np.asarray(sr.crps_ensemble(obs, draws, m_axis=-1), dtype=np.float64)
 
 
 def pit_values(observations: np.ndarray, samples: np.ndarray) -> np.ndarray:
