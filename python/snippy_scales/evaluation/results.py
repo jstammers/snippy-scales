@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from scipy import stats
+
+from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 
 if TYPE_CHECKING:
     import polars as pl
@@ -123,6 +126,35 @@ class SweepResult:
     def n_folds(self) -> int:
         return len(self.folds)
 
+    @property
+    def n_test_observations(self) -> int:
+        """Total out-of-sample bars across all test folds."""
+        return int(sum(len(f.test_equity_curve) for f in self.folds))
+
+    def test_returns(self) -> np.ndarray:
+        """Return the concatenated out-of-sample bar returns across test folds.
+
+        Each fold's equity curve is differenced independently so that the join
+        between folds does not manufacture a spurious return.  Used to estimate
+        the higher moments the Deflated Sharpe Ratio needs.
+
+        Returns:
+            1-D float64 array of per-bar returns; empty if no folds have data.
+        """
+        segments: list[np.ndarray] = []
+        for fold in sorted(self.folds, key=lambda f: f.fold_idx):
+            equity = np.asarray(fold.test_equity_curve, dtype=np.float64)
+            if equity.size < 2:
+                continue
+            prev = equity[:-1]
+            segments.append(
+                np.where(prev != 0.0, equity[1:] / np.where(prev != 0.0, prev, 1.0) - 1.0, 0.0)
+            )
+
+        if not segments:
+            return np.zeros(0, dtype=np.float64)
+        return np.concatenate(segments)
+
     def to_dict(self) -> dict[str, Any]:
         """Flatten to a plain dict for serialisation."""
         return {
@@ -179,12 +211,79 @@ class EvaluationResult:
         """Parameter dict that achieved the highest mean OOS Sharpe ratio."""
         return self.best_result.params
 
+    # ── Selection-bias correction ───────────────────────────────────────
+
+    @property
+    def n_trials(self) -> int:
+        """Number of parameter sets searched — the sweep's selection breadth."""
+        return len(self.sweep_results)
+
+    @property
+    def sharpe_dispersion(self) -> float:
+        """Std-dev of mean OOS Sharpe across parameter sets.
+
+        This is the scale on which selection noise operates, and the estimator
+        the Deflated Sharpe Ratio uses for ``trial_std``.
+        """
+        vals = [r.mean_test_sharpe for r in self.sweep_results]
+        finite = [v for v in vals if np.isfinite(v)]
+        return float(np.std(finite)) if len(finite) > 1 else 1.0
+
+    def deflated_sharpe(
+        self,
+        sweep: SweepResult | None = None,
+        *,
+        periods_per_year: float = TRADING_DAYS_PER_YEAR,
+    ) -> float:
+        """Return the Deflated Sharpe Ratio for *sweep* (default: the best).
+
+        Corrects the headline Sharpe for the fact that it was *selected* as the
+        maximum of :attr:`n_trials` candidates.  A value above 0.95 is the
+        conventional bar for treating a swept result as evidence of skill; a
+        value near 0.5 means it is indistinguishable from the luckiest of N
+        coin flips.
+
+        Args:
+            sweep: Parameter set to evaluate.  Defaults to :attr:`best_result`.
+            periods_per_year: Annualisation factor behind the fold Sharpe
+                ratios.  Defaults to ``252``; override for intraday bars.
+
+        Returns:
+            Probability in ``[0, 1]``; ``0.0`` when there is insufficient data.
+        """
+        from snippy_scales.evaluation.statistics import deflated_sharpe_ratio
+
+        if not self.sweep_results:
+            return 0.0
+
+        target = sweep if sweep is not None else self.best_result
+        returns = target.test_returns()
+        if returns.size < 2:
+            return 0.0
+
+        observed = target.mean_test_sharpe
+        if not np.isfinite(observed):
+            return 0.0
+
+        return deflated_sharpe_ratio(
+            observed,
+            n_trials=self.n_trials,
+            n_obs=int(returns.size),
+            trial_std=self.sharpe_dispersion,
+            skew=float(stats.skew(returns)),
+            kurtosis=float(stats.kurtosis(returns, fisher=False)),
+            periods_per_year=periods_per_year,
+        )
+
     # ── Summary table ───────────────────────────────────────────────────
 
     def summary_df(self) -> pl.DataFrame:
         """Return a Polars DataFrame with one row per parameter set.
 
-        Columns include all parameter names and aggregate test-window metrics.
+        Columns include all parameter names, aggregate test-window metrics, and
+        ``deflated_sharpe`` — the probability each result reflects skill rather
+        than the selection bias induced by searching :attr:`n_trials`
+        configurations.  Read that column before the Sharpe column.
         """
         import polars as pl
 
@@ -199,6 +298,7 @@ class EvaluationResult:
             row["std_test_max_dd_pct"] = sr.std_test_max_dd
             row["mean_test_sortino"] = sr.mean_test_sortino
             row["std_test_sortino"] = sr.std_test_sortino
+            row["deflated_sharpe"] = self.deflated_sharpe(sr)
             row["n_folds"] = sr.n_folds
             rows.append(row)
 

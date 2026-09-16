@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 from snippy_scales.backtesting.runners import BacktestRunner, BasketRunner
 from snippy_scales.evaluation.results import EvaluationResult, FoldResult, SweepResult
 from snippy_scales.evaluation.split import WalkForwardSplit
@@ -48,6 +49,8 @@ from snippy_scales.evaluation.tearsheet import TearsheetGenerator
 if TYPE_CHECKING:
     import polars as pl
 
+    from snippy_scales.backtesting.costs import CostModel
+    from snippy_scales.backtesting.engine import ExecutionEngine
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
     from snippy_scales.strategies.trend import Strategy
 
@@ -76,12 +79,35 @@ class EvaluationRunner:
         benchmark: Ticker string used as benchmark in tearsheet reports
             (e.g. ``"SPY"``).  Pass ``None`` to omit the benchmark.
             Defaults to ``"SPY"``.
+        engine: Execution engine for every fold.  Defaults to raptorbt — see
+            the warning below.
+        cost_model: Transaction-cost model, used only by non-raptorbt engines.
+        periods_per_year: Annualisation factor, used only by non-raptorbt
+            engines.  ``252`` for daily bars; scale up for intraday.
+
+    .. warning::
+       **The default raptorbt path overstates risk-adjusted metrics.**  Two
+       independent effects compound:
+
+       1. It annualises Sharpe, Sortino and Calmar with **365** periods per
+          year regardless of bar frequency — a factor of ``sqrt(365/252)`` ≈
+          1.20 on daily bars.
+       2. Its multi-leg code path (which every fold goes through) reports
+          Sharpe **4–7× higher** than its own single-instrument path on
+          byte-identical equity curves.  The factor is not constant, so it
+          cannot be corrected after the fact.
+
+       Together these can inflate a reported Sharpe by roughly an order of
+       magnitude.  Equity curves and total returns are unaffected.  Pass
+       ``engine=TargetPositionEngine()`` for trustworthy ratios — that path
+       also preserves continuous position sizing.
 
     Example::
 
         runner = EvaluationRunner(
             n_splits=5,
             db_path="data/analytics.duckdb",
+            engine=TargetPositionEngine(),
         )
         result = runner.evaluate(TrendFollowing, bars, symbol="ES.c.0")
     """
@@ -100,6 +126,9 @@ class EvaluationRunner:
         db_path: Path | str | None = None,
         tearsheet_dir: Path | str | None = None,
         benchmark: str | None = "SPY",
+        engine: ExecutionEngine | None = None,
+        cost_model: CostModel | None = None,
+        periods_per_year: float = TRADING_DAYS_PER_YEAR,
     ) -> None:
         self.initial_capital = initial_capital
         self.fees = fees
@@ -109,6 +138,9 @@ class EvaluationRunner:
         self.gap = gap
         self.window = window
         self.min_train_size = min_train_size
+        self.periods_per_year = periods_per_year
+        self._engine = engine
+        self._cost_model = cost_model
         self._db_path = Path(db_path) if db_path is not None else None
         self._tearsheet_dir = Path(tearsheet_dir) if tearsheet_dir is not None else None
         self._benchmark = benchmark
@@ -343,6 +375,9 @@ class EvaluationRunner:
             initial_capital=self.initial_capital,
             fees=self.fees,
             slippage=self.slippage,
+            engine=self._engine,
+            cost_model=self._cost_model,
+            periods_per_year=self.periods_per_year,
         )
         return runner.run(strategy, bars, symbol=symbol)
 
