@@ -67,6 +67,7 @@ class TestUpsertBarsTimestampResume:
             start="2024-01-01",
             end="2024-01-03",
             output_dir=tmp_path,
+            instrument_type="equities",
         )
         provider.fetch_bars(symbol="AAPL", schema="ohlcv-1m", start="ignored", end="ignored")
         # Second upsert call should ask for data starting just after 20:45:00,
@@ -78,6 +79,7 @@ class TestUpsertBarsTimestampResume:
             start="2024-01-01",
             end="2024-01-03",
             output_dir=tmp_path,
+            instrument_type="equities",
         )
         second_call_start = provider.calls[-1][2]
         assert second_call_start.startswith("2024-01-01T20:45:00.000001")
@@ -91,6 +93,7 @@ class TestUpsertBarsTimestampResume:
             start="2024-01-01",
             end="2024-01-02",
             output_dir=tmp_path,
+            instrument_type="equities",
         )
         assert len(provider.calls) == 1
 
@@ -101,6 +104,7 @@ class TestUpsertBarsTimestampResume:
             start="2024-01-01",
             end="2024-01-01T20:45:00",  # already covered by the single stored bar
             output_dir=tmp_path,
+            instrument_type="equities",
         )
         assert len(provider.calls) == 1  # no second fetch
 
@@ -115,6 +119,7 @@ class TestIsRangeCached:
                 start="2024-01-01",
                 end="2024-01-02",
                 output_dir=tmp_path,
+                instrument_type="equities",
             )
             is False
         )
@@ -128,6 +133,7 @@ class TestIsRangeCached:
             start="2024-01-01",
             end="2024-01-02",
             output_dir=tmp_path,
+            instrument_type="equities",
         )
         assert (
             is_range_cached(
@@ -137,6 +143,7 @@ class TestIsRangeCached:
                 start="2024-01-01",
                 end="2024-01-01T20:45:00.000001",
                 output_dir=tmp_path,
+                instrument_type="equities",
             )
             is True
         )
@@ -150,6 +157,7 @@ class TestIngestFromConfigAlpacaDispatch:
             start="2024-01-01",
             end="2024-01-02",
             asset_classes={"eq": AssetClassConfig(symbols=symbols)},
+            instrument_type="equities",
         )
 
     def test_routes_through_alpaca_provider(
@@ -205,6 +213,7 @@ class TestIngestFromConfigAlpacaDispatch:
             start="2024-01-01",
             end="2024-01-02",
             output_dir=tmp_path,
+            instrument_type="equities",
         )
 
         cfg = IngestConfig(
@@ -213,6 +222,7 @@ class TestIngestFromConfigAlpacaDispatch:
             start="2024-01-01",
             end="2024-01-01T20:45:00.000001",
             asset_classes={"eq": AssetClassConfig(symbols=["AAPL"])},
+            instrument_type="equities",
         )
         rows = estimate_costs_from_config(cfg, output_dir=tmp_path)
         assert rows[0].cached is True

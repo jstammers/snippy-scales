@@ -61,6 +61,7 @@ it.
 │   │   │   ├── schema.py       ← BAR_SCHEMA_COLUMNS, conform_bars — shared Parquet layout
 │   │   │   ├── providers/      ← BarProvider Protocol + DatabentoProvider, AlpacaProvider
 │   │   │   ├── ratelimit.py    ← RateLimiter (used by AlpacaProvider)
+│   │   │   ├── batch.py        ← run_batch_job — shared Databento Batch API submit/poll/download
 │   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
 │   │   │   ├── backfill.py     ← helpers behind `algo data backfill-sp500`
 │   │   │   └── tick.py         ← Event-level (Databento-only) ingestion

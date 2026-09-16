@@ -12,10 +12,15 @@ Storage layout
 --------------
 ::
 
-    data/raw/ES.c.0/trades/
+    data/raw/futures/ES.c.0/trades/
       _dbn/2026-08-03.dbn.zst        ← lossless raw feed as returned by the API
       _empty/2026-08-02.empty        ← day confirmed to contain no records
       date=2026-08-03/data.parquet   ← hive-partitioned columnar
+
+The ``futures/`` segment is the symbol's
+:data:`~snippy_scales.data.config.InstrumentType` classification — see
+:mod:`snippy_scales.data.ingest` for why it's kept separate from the
+free-form ``asset_classes`` config grouping.
 
 The raw ``.dbn.zst`` is kept so the Parquet can be regenerated (different price
 type, different columns) without ever paying Databento a second time.
@@ -39,19 +44,21 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
 
+from snippy_scales.data.batch import run_batch_job
 from snippy_scales.data.paths import RAW_DIR
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import databento as db
 
-    from snippy_scales.data.config import VALID_STYPES
+    from snippy_scales.data.config import VALID_STYPES, DownloadMethod
 
 logger = logging.getLogger(__name__)
 
@@ -67,19 +74,21 @@ _EMPTY_DIR = "_empty"
 # ---------------------------------------------------------------------------
 
 
-def _tick_root(symbol: str, schema: str, output_dir: Path) -> Path:
+def _tick_root(symbol: str, schema: str, output_dir: Path, instrument_type: str) -> Path:
     """Return the root directory for a symbol/schema tick store.
 
     Args:
         symbol: Databento symbol string (e.g. ``"ES.c.0"``).
         schema: Event-level schema name (e.g. ``"trades"``).
         output_dir: Root directory for raw data.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
 
     Returns:
-        A path like ``<output_dir>/ES.c.0/trades``.
+        A path like ``<output_dir>/futures/ES.c.0/trades``.
     """
     safe_symbol = symbol.replace("/", "_")
-    return output_dir / safe_symbol / schema
+    return output_dir / instrument_type / safe_symbol / schema
 
 
 def _day_parquet(root: Path, day: dt.date) -> Path:
@@ -109,7 +118,9 @@ def _parse_day(value: str | dt.date) -> dt.date:
     return dt.date.fromisoformat(value)
 
 
-def covered_days(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> set[dt.date]:
+def covered_days(
+    symbol: str, schema: str, output_dir: Path = RAW_DIR, *, instrument_type: str
+) -> set[dt.date]:
     """Return the set of days already present in the local tick store.
 
     Coverage is derived from the filesystem rather than a manifest, so there is
@@ -119,11 +130,13 @@ def covered_days(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> set[dt
         symbol: Instrument symbol (e.g. ``"ES.c.0"``).
         schema: Event-level schema name (e.g. ``"trades"``).
         output_dir: Root directory for raw data.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
 
     Returns:
         Set of dates for which data (or a confirmed-empty marker) exists.
     """
-    root = _tick_root(symbol, schema, output_dir)
+    root = _tick_root(symbol, schema, output_dir, instrument_type)
     if not root.exists():
         return set()
 
@@ -152,6 +165,8 @@ def missing_days(
     start: str | dt.date,
     end: str | dt.date,
     output_dir: Path = RAW_DIR,
+    *,
+    instrument_type: str,
 ) -> list[dt.date]:
     """Return the sorted days in ``[start, end)`` not yet present locally.
 
@@ -164,6 +179,8 @@ def missing_days(
         start: Inclusive start date (``YYYY-MM-DD`` or ``date``).
         end: **Exclusive** end date (``YYYY-MM-DD`` or ``date``).
         output_dir: Root directory for raw data.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
 
     Returns:
         Chronologically sorted list of uncovered dates.  Empty if the range is
@@ -171,7 +188,7 @@ def missing_days(
     """
     start_date = _parse_day(start)
     end_date = _parse_day(end)
-    covered = covered_days(symbol, schema, output_dir)
+    covered = covered_days(symbol, schema, output_dir, instrument_type=instrument_type)
 
     days: list[dt.date] = []
     day = start_date
@@ -257,6 +274,7 @@ def estimate_tick_cost(
     schema: str,
     start: str | dt.date,
     end: str | dt.date,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
     stype_in: VALID_STYPES = "raw_symbol",
 ) -> TickCostEstimate:
@@ -270,6 +288,8 @@ def estimate_tick_cost(
         schema: Event-level schema name (e.g. ``"trades"``).
         start: Inclusive start date (``YYYY-MM-DD``).
         end: **Exclusive** end date (``YYYY-MM-DD``).
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw data.
         stype_in: Databento symbology type for the request.
 
@@ -285,7 +305,9 @@ def estimate_tick_cost(
     end_date = _parse_day(end)
     total_days = max((end_date - start_date).days, 0)
 
-    missing = missing_days(symbol, schema, start_date, end_date, output_dir)
+    missing = missing_days(
+        symbol, schema, start_date, end_date, output_dir, instrument_type=instrument_type
+    )
     if not missing:
         return TickCostEstimate(
             symbol=symbol,
@@ -333,6 +355,57 @@ def estimate_tick_cost(
 # ---------------------------------------------------------------------------
 
 
+def _mark_day_empty(root: Path, day: dt.date, *, symbol: str, schema: str) -> None:
+    """Write the empty-day marker for *day* (no records found)."""
+    marker = _day_empty_marker(root, day)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    logger.info("[%s] %s %s — no records (marked empty).", symbol, schema, day)
+
+
+def _install_day(
+    store: db.DBNStore,
+    *,
+    symbol: str,
+    schema: str,
+    day: dt.date,
+    root: Path,
+) -> Path | None:
+    """Convert an already-open :class:`DBNStore` to *day*'s Parquet partition.
+
+    Shared by the streaming and batch download paths so a day's Parquet file
+    is byte-for-byte schema-identical no matter which delivery mechanism
+    fetched it — both always go through ``DBNStore.to_parquet()``, never
+    pandas/polars, which is what keeps every partition under
+    ``date=*/data.parquet`` concatenable via :func:`load_ticks`.
+
+    Args:
+        store: A :class:`databento.DBNStore` opened from a single day's DBN.
+        symbol: Instrument symbol (for logging only).
+        schema: Event-level schema name.
+        day: The calendar day *store* covers.
+        root: Tick-store root for this symbol/schema.
+
+    Returns:
+        Path to the written Parquet partition, or ``None`` when the day
+        contained no records (an empty marker is written instead).
+    """
+    parquet_path = _day_parquet(root, day)
+    tmp_parquet = parquet_path.parent.with_name(f".tmp-{day.isoformat()}.parquet")
+    tmp_parquet.unlink(missing_ok=True)
+    store.to_parquet(tmp_parquet, schema=schema)
+
+    # ``to_parquet`` writes nothing at all when the store holds no records, so a
+    # missing temp file is how we detect a non-trading day.
+    if not tmp_parquet.exists():
+        _mark_day_empty(root, day, symbol=symbol, schema=schema)
+        return None
+
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(tmp_parquet, parquet_path)
+    return parquet_path
+
+
 def _download_day(
     client: db.Historical,
     *,
@@ -344,6 +417,9 @@ def _download_day(
     stype_in: VALID_STYPES,
 ) -> Path | None:
     """Download, convert, and atomically install a single day of tick data.
+
+    Uses the Historical Streaming API (one billed call per day). See
+    :func:`_download_batch_range` for the batch equivalent.
 
     Args:
         client: A ``databento.Historical`` client.
@@ -363,7 +439,6 @@ def _download_day(
     next_day = day + dt.timedelta(days=1)
 
     dbn_path = _day_dbn(root, day)
-    parquet_path = _day_parquet(root, day)
     dbn_path.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Stream the raw feed straight to disk (never held in memory) ---
@@ -380,24 +455,98 @@ def _download_day(
     )
     os.replace(tmp_dbn, dbn_path)
 
-    # --- Convert to Parquet in batches ---
-    tmp_parquet = parquet_path.parent.with_name(f".tmp-{day.isoformat()}.parquet")
-    tmp_parquet.unlink(missing_ok=True)
     store = db.DBNStore.from_file(dbn_path)
-    store.to_parquet(tmp_parquet, schema=schema)
+    return _install_day(store, symbol=symbol, schema=schema, day=day, root=root)
 
-    # ``to_parquet`` writes nothing at all when the store holds no records, so a
-    # missing temp file is how we detect a non-trading day.
-    if not tmp_parquet.exists():
-        marker = _day_empty_marker(root, day)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-        logger.info("[%s] %s %s — no records (marked empty).", symbol, schema, day)
-        return None
 
-    parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(tmp_parquet, parquet_path)
-    return parquet_path
+def _download_batch_range(
+    client: db.Historical,
+    *,
+    dataset: str,
+    symbol: str,
+    schema: str,
+    range_start: dt.date,
+    range_end: dt.date,
+    root: Path,
+    stype_in: VALID_STYPES,
+) -> list[Path]:
+    """Download and install every day in ``[range_start, range_end)`` via one batch job.
+
+    Submits a single ``split_duration="day"`` batch job for the whole
+    contiguous range (one billed job instead of one billed call per day),
+    then installs each returned per-day file exactly like
+    :func:`_download_day` does (via :func:`_install_day`), and writes an
+    empty marker for any requested day the job returned no file for.
+
+    Args:
+        client: A ``databento.Historical`` client.
+        dataset: Databento dataset code.
+        symbol: Instrument symbol.
+        schema: Event-level schema name.
+        range_start: Inclusive start of the contiguous missing range.
+        range_end: Exclusive end of the contiguous missing range.
+        root: Tick-store root for this symbol/schema.
+        stype_in: Databento symbology type.
+
+    Returns:
+        Paths of the Parquet partitions written by this call. Days that
+        turned out to be empty are not included.
+
+    Raises:
+        RuntimeError: If a returned file unexpectedly spans more than one
+            UTC day (violates the ``split_duration="day"`` contract this
+            function relies on) — raised rather than guessing how to
+            re-partition it.
+    """
+    import databento as db  # noqa: PLC0415 — optional dep
+
+    written: list[Path] = []
+    covered: set[dt.date] = set()
+
+    with tempfile.TemporaryDirectory(prefix="databento-batch-") as tmp_dir:
+        files = run_batch_job(
+            client,
+            dataset=dataset,
+            symbols=[symbol],
+            schema=schema,
+            start=range_start.isoformat(),
+            end=range_end.isoformat(),
+            stype_in=stype_in,
+            split_duration="day",
+            output_dir=Path(tmp_dir),
+        )
+
+        for downloaded in files:
+            store = db.DBNStore.from_file(downloaded)
+            day = store.start.date()
+            if store.end is not None and store.end - store.start > dt.timedelta(days=1):
+                raise RuntimeError(
+                    f"Batch job file {downloaded.name} for {symbol}/{schema} spans "
+                    f"{store.start} → {store.end}, more than one UTC day despite "
+                    "split_duration='day' — refusing to guess how to re-partition it."
+                )
+
+            dbn_path = _day_dbn(root, day)
+            dbn_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_dbn = dbn_path.with_name(f".tmp-{dbn_path.name}")
+            tmp_dbn.unlink(missing_ok=True)
+            shutil.copy2(downloaded, tmp_dbn)  # source is a throwaway temp download
+            os.replace(tmp_dbn, dbn_path)
+
+            installed = _install_day(
+                db.DBNStore.from_file(dbn_path), symbol=symbol, schema=schema, day=day, root=root
+            )
+            covered.add(day)
+            if installed is not None:
+                written.append(installed)
+
+    day = range_start
+    while day < range_end:
+        if day not in covered:
+            _mark_day_empty(root, day, symbol=symbol, schema=schema)
+        day += dt.timedelta(days=1)
+
+    return written
 
 
 def upsert_ticks(
@@ -407,15 +556,23 @@ def upsert_ticks(
     schema: str,
     start: str | dt.date,
     end: str | dt.date,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
     stype_in: VALID_STYPES = "raw_symbol",
+    download_method: DownloadMethod = "batch",
 ) -> list[Path]:
     """Download every day in ``[start, end)`` that is not already stored locally.
 
-    Days already present are skipped without any API call.  Each missing day is
-    fetched in its own request and installed atomically, so an interrupted run
-    can be resumed by re-issuing the identical command — already-completed days
-    are not re-billed.
+    Days already present are skipped without any API call.
+
+    With ``download_method="streaming"``, each missing day is fetched in its
+    own Historical Streaming API call and installed atomically, so an
+    interrupted run can be resumed by re-issuing the identical command —
+    already-completed days are not re-billed.
+
+    With ``download_method="batch"`` (default), each *contiguous* run of
+    missing days (see :func:`contiguous_ranges`) is fetched as a single
+    Databento batch job — see :func:`_download_batch_range`.
 
     Args:
         dataset: Databento dataset code (e.g. ``"GLBX.MDP3"``).
@@ -423,8 +580,12 @@ def upsert_ticks(
         schema: Event-level schema name (e.g. ``"trades"``).
         start: Inclusive start date (``YYYY-MM-DD``).
         end: **Exclusive** end date (``YYYY-MM-DD``).
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw data.
         stype_in: Databento symbology type for the request.
+        download_method: ``"batch"`` (default) or ``"streaming"`` — see
+            :data:`~snippy_scales.data.config.DownloadMethod`.
 
     Returns:
         Paths of the Parquet partitions written by this call.  Days that turned
@@ -432,8 +593,8 @@ def upsert_ticks(
     """
     import databento as db  # noqa: PLC0415 — optional dep
 
-    root = _tick_root(symbol, schema, output_dir)
-    missing = missing_days(symbol, schema, start, end, output_dir)
+    root = _tick_root(symbol, schema, output_dir, instrument_type)
+    missing = missing_days(symbol, schema, start, end, output_dir, instrument_type=instrument_type)
 
     if not missing:
         logger.info("[%s] %s already covers %s → %s. Nothing to do.", symbol, schema, start, end)
@@ -444,22 +605,47 @@ def upsert_ticks(
     client = db.Historical()
     written: list[Path] = []
 
-    for day in missing:
-        try:
-            path = _download_day(
-                client,
-                dataset=dataset,
-                symbol=symbol,
-                schema=schema,
-                day=day,
-                root=root,
-                stype_in=stype_in,
-            )
-        except Exception:
-            logger.exception("[%s] Failed to ingest %s for %s — skipping.", symbol, schema, day)
-            continue
-        if path is not None:
-            written.append(path)
+    if download_method == "streaming":
+        for day in missing:
+            try:
+                path = _download_day(
+                    client,
+                    dataset=dataset,
+                    symbol=symbol,
+                    schema=schema,
+                    day=day,
+                    root=root,
+                    stype_in=stype_in,
+                )
+            except Exception:
+                logger.exception("[%s] Failed to ingest %s for %s — skipping.", symbol, schema, day)
+                continue
+            if path is not None:
+                written.append(path)
+    else:
+        for range_start, range_end in contiguous_ranges(missing):
+            try:
+                written.extend(
+                    _download_batch_range(
+                        client,
+                        dataset=dataset,
+                        symbol=symbol,
+                        schema=schema,
+                        range_start=range_start,
+                        range_end=range_end,
+                        root=root,
+                        stype_in=stype_in,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "[%s] Failed to ingest %s for %s → %s — skipping.",
+                    symbol,
+                    schema,
+                    range_start,
+                    range_end,
+                )
+                continue
 
     logger.info("[%s] %s: wrote %d day(s) of data.", symbol, schema, len(written))
     return written
@@ -477,6 +663,7 @@ def load_ticks(
     start: str | dt.date | None = None,
     end: str | dt.date | None = None,
     output_dir: Path = RAW_DIR,
+    instrument_type: str | None = None,
 ) -> pl.LazyFrame:
     """Lazily scan a stored tick dataset.
 
@@ -491,6 +678,11 @@ def load_ticks(
         start: Optional inclusive start date filter.
         end: Optional **exclusive** end date filter.
         output_dir: Root directory for raw data.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`. When omitted,
+            resolved by globbing ``output_dir/*/<symbol>/<schema>``; raises
+            if the symbol is missing or exists under more than one
+            classification.
 
     Returns:
         A lazy frame over the day partitions, with a ``date`` column supplied by
@@ -498,8 +690,26 @@ def load_ticks(
 
     Raises:
         FileNotFoundError: If no data exists for the given symbol and schema.
+        ValueError: If *instrument_type* is omitted and the symbol/schema
+            pair exists under more than one classification.
     """
-    root = _tick_root(symbol, schema, output_dir)
+    if instrument_type is not None:
+        root = _tick_root(symbol, schema, output_dir, instrument_type)
+    else:
+        safe_symbol = symbol.replace("/", "_")
+        matches = [
+            p
+            for p in output_dir.glob(f"*/{safe_symbol}/{schema}")
+            if any(p.glob("date=*/data.parquet"))
+        ]
+        if len(matches) > 1:
+            classes = ", ".join(m.parent.parent.name for m in matches)
+            raise ValueError(
+                f"symbol={symbol!r}, schema={schema!r} exists under more than one "
+                f"instrument_type ({classes}) — pass instrument_type explicitly to "
+                "disambiguate."
+            )
+        root = matches[0] if matches else _tick_root(symbol, schema, output_dir, "unclassified")
     if not root.exists() or not any(root.glob("date=*/data.parquet")):
         raise FileNotFoundError(
             f"No tick data found for symbol={symbol!r}, schema={schema!r} at {root}. "

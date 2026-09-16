@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 if TYPE_CHECKING:
-    from snippy_scales.data.config import VALID_STYPES
+    from snippy_scales.data.config import VALID_STYPES, DownloadMethod
 
 app = typer.Typer(help="Data ingestion commands.")
 console = Console()
@@ -49,8 +49,10 @@ def _ingest_bar(
     start: str,
     end: str,
     stype_in: VALID_STYPES,
+    instrument_type: str,
     output_dir: Path,
     yes: bool,
+    download_method: DownloadMethod,
 ) -> None:
     """Cost-estimate, confirm, and download bar data for a single symbol."""
     from snippy_scales.data.ingest import estimate_cost, upsert_symbol  # noqa: PLC0415
@@ -65,6 +67,7 @@ def _ingest_bar(
             schema=schema,
             start=start,
             end=end,
+            instrument_type=instrument_type,
             output_dir=output_dir,
             stype_in=stype_in,
         )
@@ -86,15 +89,22 @@ def _ingest_bar(
         if not typer.confirm("Proceed anyway?"):
             raise typer.Abort()
 
-    console.print(f"Ingesting [bold]{symbol}[/] ({schema})  {start} → {end}  [[dim]{dataset}[/]]")
+    console.print(
+        f"Ingesting [bold]{symbol}[/] ({schema})  {start} → {end}  "
+        f"[[dim]{dataset}, {download_method}[/]]"
+    )
+    if download_method == "batch":
+        console.print("[dim]Submitting a Databento batch job — this may take a while...[/]")
     path = upsert_symbol(
         dataset=dataset,
         symbol=symbol,
         schema=schema,
         start=start,
         end=end,
+        instrument_type=instrument_type,
         output_dir=output_dir,
         stype_in=stype_in,
+        download_method=download_method,
     )
     console.print(f"[green]Saved:[/] {path}")
 
@@ -107,8 +117,10 @@ def _ingest_tick(
     start: str,
     end: str,
     stype_in: VALID_STYPES,
+    instrument_type: str,
     output_dir: Path,
     yes: bool,
+    download_method: DownloadMethod,
 ) -> None:
     """Cost-estimate, confirm, and download tick data for a single symbol."""
     from snippy_scales.data.tick import estimate_tick_cost, upsert_ticks  # noqa: PLC0415
@@ -122,6 +134,7 @@ def _ingest_tick(
             schema=schema,
             start=start,
             end=end,
+            instrument_type=instrument_type,
             output_dir=output_dir,
             stype_in=stype_in,
         )
@@ -158,20 +171,24 @@ def _ingest_tick(
     if not yes and not typer.confirm("\nProceed with download?"):
         raise typer.Abort()
 
+    if download_method == "batch":
+        console.print("[dim]Submitting Databento batch job(s) — this may take a while...[/]")
     written = upsert_ticks(
         dataset=dataset,
         symbol=symbol,
         schema=schema,
         start=start,
         end=end,
+        instrument_type=instrument_type,
         output_dir=output_dir,
         stype_in=stype_in,
+        download_method=download_method,
     )
 
     remaining = len(estimate.missing_days) - len(written)
     console.print(
         f"\n[bold green]Done.[/]  {len(written)} day(s) written to "
-        f"{output_dir / symbol.replace('/', '_') / schema}"
+        f"{output_dir / instrument_type / symbol.replace('/', '_') / schema}"
         + (f"  [dim]({remaining} empty or failed)[/]" if remaining else "")
     )
 
@@ -203,6 +220,25 @@ def ingest(
     ] = "1d",
     stype_in: Literal["raw_symbol", "continuous", "parent", "instrument_id"] = typer.Option(
         "raw_symbol", help="Databento symbology type"
+    ),
+    instrument_class: str = typer.Option(
+        ...,
+        "--instrument-class",
+        help=(
+            "Closed top-level storage classification — determines the "
+            "data/raw/<instrument-class>/ subdirectory. One of: equities, "
+            "futures, options, fx_spot, crypto."
+        ),
+    ),
+    download_method: Literal["batch", "streaming"] = typer.Option(
+        "batch",
+        "--download-method",
+        help=(
+            "Databento delivery mechanism. 'batch' (default) submits a batch job — "
+            "billed the same as streaming, but Databento keeps completed job output "
+            "downloadable free of charge for a retention window. 'streaming' calls "
+            "the Historical Streaming API directly — lower latency, no retention."
+        ),
     ),
     output_dir: Annotated[
         Path | None,
@@ -251,8 +287,10 @@ def ingest(
             start=start,
             end=end,
             stype_in=stype_in,
+            instrument_type=instrument_class,
             output_dir=out_dir,
             yes=yes,
+            download_method=download_method,
         )
     else:
         _ingest_bar(
@@ -262,8 +300,10 @@ def ingest(
             start=start,
             end=end,
             stype_in=stype_in,
+            instrument_type=instrument_class,
             output_dir=out_dir,
             yes=yes,
+            download_method=download_method,
         )
 
 
@@ -349,7 +389,9 @@ def ingest_config(
     effective_schemas = [resolve_schema(schema)] if schema else cfg.resolved_schemas
     is_free_provider = cfg.provider == "alpaca"
     source_label = (
-        f"alpaca, {cfg.alpaca_options.rate_limit_per_min}/min" if is_free_provider else cfg.dataset
+        f"alpaca, {cfg.alpaca_options.rate_limit_per_min}/min"
+        if is_free_provider
+        else f"{cfg.dataset}, {cfg.download_method}"
     )
 
     # --- Plan (cost estimation is skipped for Alpaca — it's free, only rate-limited) ---
@@ -407,6 +449,9 @@ def ingest_config(
     if not yes and not typer.confirm("\nProceed with download?"):
         raise typer.Abort()
 
+    if not is_free_provider and cfg.download_method == "batch":
+        console.print("[dim]Submitting Databento batch job(s) — this may take a while...[/]")
+
     result_rows = ingest_from_config(cfg, schema_override=schema, output_dir=out_dir)
 
     # --- Summary ---
@@ -424,6 +469,17 @@ def coverage(
     schema: Annotated[
         str, typer.Option("--schema", help="Event-level schema: trades, mbo, ...")
     ] = "trades",
+    instrument_class: Annotated[
+        str | None,
+        typer.Option(
+            "--instrument-class",
+            help=(
+                "Closed top-level storage classification the symbol was ingested "
+                "under. Omit to auto-resolve — errors if the symbol exists under "
+                "more than one classification."
+            ),
+        ),
+    ] = None,
     output_dir: Annotated[
         Path | None,
         typer.Option("--output-dir", help="Root directory for raw data."),
@@ -447,7 +503,20 @@ def coverage(
         raise typer.Exit(1) from exc
 
     out_dir = output_dir or RAW_DIR
-    days = sorted(covered_days(symbol, resolved, out_dir))
+
+    if instrument_class is None:
+        safe_symbol = symbol.replace("/", "_")
+        matches = [p for p in out_dir.glob(f"*/{safe_symbol}/{resolved}") if p.is_dir()]
+        if len(matches) > 1:
+            classes = ", ".join(m.parent.parent.name for m in matches)
+            console.print(
+                f"[bold red]Error:[/] {symbol!r} ({resolved}) exists under more than "
+                f"one instrument class ({classes}) — pass --instrument-class to disambiguate."
+            )
+            raise typer.Exit(1)
+        instrument_class = matches[0].parent.parent.name if matches else "unclassified"
+
+    days = sorted(covered_days(symbol, resolved, out_dir, instrument_type=instrument_class))
 
     if not days:
         console.print(f"[yellow]No {resolved} data stored for {symbol}.[/]")
@@ -680,6 +749,7 @@ def backfill_sp500(
 
     cfg = IngestConfig(
         provider="alpaca",
+        instrument_type="equities",
         schemas=["1m"],
         start=start_date.isoformat(),
         end=end_date.isoformat(),
@@ -707,3 +777,117 @@ def backfill_sp500(
         console.print(
             "[yellow]Re-run with[/] [bold]--retry-failed[/] [yellow]to retry just the failures.[/]"
         )
+
+
+@app.command(name="check-layout")
+def check_layout(
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", help="Root directory for raw data."),
+    ] = None,
+) -> None:
+    """Report symbols that exist under more than one instrument classification.
+
+    Every symbol is meant to be unique within its top-level
+    ``instrument_type`` directory (e.g. ``equities``, ``futures``) — the
+    ``asset_classes`` grouping in a YAML config is a separate, free-form
+    display label and may legitimately repeat a symbol across configs.
+    Finding the same symbol under two different ``instrument_type``
+    directories signals a real misconfiguration. Exits with status 1 if any
+    are found.
+    """
+    from snippy_scales.data.ingest import RAW_DIR, find_cross_class_duplicates  # noqa: PLC0415
+
+    out_dir = output_dir or RAW_DIR
+    duplicates = find_cross_class_duplicates(out_dir)
+
+    if not duplicates:
+        console.print(f"[green]No cross-class duplicates found under {out_dir}.[/]")
+        return
+
+    table = Table(title="Cross-Class Duplicates", show_header=True, header_style="bold red")
+    table.add_column("Symbol")
+    table.add_column("Instrument classes")
+    for symbol, classes in sorted(duplicates.items()):
+        table.add_row(symbol, ", ".join(classes))
+    console.print(table)
+    raise typer.Exit(1)
+
+
+@app.command(name="migrate-layout")
+def migrate_layout(
+    instrument_class: Annotated[
+        str,
+        typer.Option(
+            "--instrument-class",
+            help=(
+                "Closed top-level storage classification every currently-flat "
+                "symbol directory should move under."
+            ),
+        ),
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", help="Root directory for raw data."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip the confirmation prompt and move files for real."),
+    ] = False,
+) -> None:
+    """Move symbol directories from the old flat layout under an instrument class.
+
+    Old layout: ``<output-dir>/<symbol>/...``
+    New layout: ``<output-dir>/<instrument-class>/<symbol>/...``
+
+    Dry-run by default — always review the printed plan before passing
+    ``--yes``. Each symbol directory is moved with a single, atomic
+    ``Path.rename()`` (never a copy-then-delete, never a recursive delete of
+    anything). Refuses outright, before moving anything, if the destination
+    for any symbol already exists and is non-empty.
+    """
+    from snippy_scales.data.ingest import RAW_DIR  # noqa: PLC0415
+
+    out_dir = output_dir or RAW_DIR
+
+    if not out_dir.exists():
+        console.print(f"[yellow]{out_dir} does not exist — nothing to migrate.[/]")
+        return
+
+    # Known instrument_type directories are left alone; only directories that
+    # look like flat "<symbol>/<schema>.parquet-or-tick-store" entries are
+    # treated as migration candidates — i.e. anything not already itself an
+    # instrument_type bucket.
+    known_classes = {"equities", "futures", "options", "fx_spot", "crypto"}
+    candidates = sorted(p for p in out_dir.iterdir() if p.is_dir() and p.name not in known_classes)
+
+    if not candidates:
+        console.print(f"[dim]Nothing to migrate under {out_dir} — already fully classified.[/]")
+        return
+
+    dest_root = out_dir / instrument_class
+    moves = [(p, dest_root / p.name) for p in candidates]
+
+    conflicts = [dest for _, dest in moves if dest.exists() and any(dest.iterdir())]
+    if conflicts:
+        console.print("[bold red]Refusing to migrate — destination already exists:[/]")
+        for dest in conflicts:
+            console.print(f"  {dest}")
+        raise typer.Exit(1)
+
+    table = Table(title="Layout Migration Plan", show_header=True, header_style="bold cyan")
+    table.add_column("From")
+    table.add_column("To")
+    for src, dest in moves:
+        table.add_row(str(src), str(dest))
+    console.print(table)
+    console.print(f"\n[dim]{len(moves)} symbol director(y/ies) → {dest_root}[/]")
+
+    if not yes:
+        console.print("\n[yellow]Dry-run mode — pass --yes to move these directories for real.[/]")
+        return
+
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for src, dest in moves:
+        src.rename(dest)
+    console.print(f"\n[bold green]Done.[/]  Moved {len(moves)} symbol director(y/ies).")

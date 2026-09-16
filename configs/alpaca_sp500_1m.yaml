@@ -20,11 +20,12 @@
 # ---------------------------------------------------------------------------
 
 provider: "alpaca"
+instrument_type: "equities"
 schemas: ["1m"]
 
 # `start` is a fixed date, not "5 years ago" — re-run `update-universe` and
 # bump this when you want to roll the window forward.
-start: "2021-09-16"
+start: "2018-01-01"
 # end: omit -> defaults to today
 
 alpaca:

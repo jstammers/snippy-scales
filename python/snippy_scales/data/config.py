@@ -153,6 +153,25 @@ def resolve_schema(value: str) -> str:
 #: (tick) schemas — a config with ``provider: alpaca`` may not list one.
 VALID_PROVIDERS = Literal["databento", "alpaca"]
 
+#: Databento delivery mechanism. ``"batch"`` (default) submits a batch job
+#: and downloads it once complete — billed the same per byte as streaming,
+#: but Databento keeps completed job output downloadable free of charge for
+#: a retention window, so an accidental local-data loss doesn't have to be
+#: repaid. ``"streaming"`` calls the Historical Streaming API directly —
+#: lower latency, but every call is billed with no server-side retention.
+#: Ignored for ``provider == "alpaca"`` (Alpaca has no batch equivalent).
+DownloadMethod = Literal["batch", "streaming"]
+
+#: Closed set of top-level storage classifications. This determines the
+#: ``data/raw/<instrument_type>/`` subdirectory a symbol is stored under —
+#: it is deliberately separate from ``asset_classes`` (below), which is a
+#: free-form display/grouping label chosen per config file and must never
+#: be used as a storage key (two configs could otherwise use different
+#: labels for the same symbol and silently double-store it). Every symbol
+#: must be unique within its ``instrument_type`` — see
+#: :func:`~snippy_scales.data.ingest.find_cross_class_duplicates`.
+InstrumentType = Literal["equities", "futures", "options", "fx_spot", "crypto"]
+
 
 class AssetClassConfig(BaseModel):
     """Configuration for a single asset class grouping.
@@ -222,6 +241,14 @@ class IngestConfig(BaseModel):
         provider: Which data source to use — ``"databento"`` (default) or
             ``"alpaca"``. Alpaca only supports bar schemas, never tick
             schemas.
+        instrument_type: Closed top-level storage classification (e.g.
+            ``"equities"``, ``"futures"``) — determines the
+            ``data/raw/<instrument_type>/`` subdirectory every symbol in
+            this config is stored under. File-level (like ``provider``)
+            because one config always covers one instrument type in
+            practice; split into another file if that ever changes. Not to
+            be confused with ``asset_classes``, which stays a free-form
+            display/grouping label.
         dataset: Databento dataset code (default ``"GLBX.MDP3"``). Ignored
             when ``provider == "alpaca"``.
         schemas: Bar frequency aliases and/or event-level schema names to
@@ -232,6 +259,8 @@ class IngestConfig(BaseModel):
         end: Latest date to fetch (``YYYY-MM-DD``).  Defaults to today when
             ``None``.
         stype_in: Databento symbology type. Ignored for Alpaca.
+        download_method: Databento delivery mechanism — ``"batch"`` (default)
+            or ``"streaming"``. Ignored for Alpaca.
         alpaca: Alpaca-specific options. Ignored (and optional) for Databento.
         asset_classes: Mapping of arbitrary asset-class labels to their
             :class:`AssetClassConfig`.
@@ -240,6 +269,15 @@ class IngestConfig(BaseModel):
     provider: VALID_PROVIDERS = Field(
         default="databento",
         description="Bar-data source: 'databento' or 'alpaca'.",
+    )
+    instrument_type: InstrumentType = Field(
+        ...,
+        description=(
+            "Closed top-level storage classification (e.g. 'equities', "
+            "'futures') — determines the data/raw/<instrument_type>/ "
+            "subdirectory. Separate from asset_classes, which is a "
+            "free-form display/grouping label only."
+        ),
     )
     dataset: str = Field(
         default="GLBX.MDP3",
@@ -268,6 +306,15 @@ class IngestConfig(BaseModel):
         default=None,
         description=(
             "Optional Databento symbology type for API calls (e.g. 'raw_symbol', 'parent'). "
+            "Ignored for Alpaca."
+        ),
+    )
+
+    download_method: DownloadMethod = Field(
+        default="batch",
+        description=(
+            "Databento delivery mechanism: 'batch' (default, free re-download within "
+            "Databento's retention window) or 'streaming' (lower latency, no retention). "
             "Ignored for Alpaca."
         ),
     )

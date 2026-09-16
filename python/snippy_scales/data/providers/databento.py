@@ -8,17 +8,21 @@ Databento as just one more provider alongside Alpaca.
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import polars as pl
 
+from snippy_scales.data.batch import run_batch_job
 from snippy_scales.data.schema import conform_bars
 
 if TYPE_CHECKING:
+    import databento as db
     import pandas as pd
 
-    from snippy_scales.data.config import VALID_STYPES
+    from snippy_scales.data.config import VALID_STYPES, DownloadMethod
 
 
 def _to_polars(df: pd.DataFrame) -> pl.DataFrame:
@@ -45,10 +49,13 @@ class DatabentoProvider:
     Attributes:
         dataset: Databento dataset code (e.g. ``"GLBX.MDP3"``).
         stype_in: Databento symbology type for the request.
+        download_method: ``"batch"`` (default) or ``"streaming"`` — see
+            :data:`~snippy_scales.data.config.DownloadMethod`.
     """
 
     dataset: str
     stype_in: VALID_STYPES = "raw_symbol"
+    download_method: DownloadMethod = "batch"
     name: str = field(default="databento", init=False)
     resume_granularity: Literal["day", "timestamp"] = field(default="day", init=False)
 
@@ -70,6 +77,33 @@ class DatabentoProvider:
         import databento as db  # noqa: PLC0415 — optional dep
 
         client = db.Historical()
+
+        if self.download_method == "streaming":
+            dfs = [
+                self._fetch_streaming(client, symbol=symbol, schema=schema, start=start, end=end)
+            ]
+        else:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                files = run_batch_job(
+                    client,
+                    dataset=self.dataset,
+                    symbols=[symbol],
+                    schema=schema,
+                    start=start,
+                    end=end,
+                    stype_in=self.stype_in,
+                    split_duration="none",
+                    output_dir=Path(tmp_dir),
+                )
+                dfs = [_to_polars(db.DBNStore.from_file(f).to_df()) for f in files]
+
+        combined = pl.concat(dfs, how="diagonal") if len(dfs) > 1 else dfs[0]
+        return conform_bars(combined, symbol=symbol, schema=schema).sort("ts_event")
+
+    def _fetch_streaming(
+        self, client: db.Historical, *, symbol: str, schema: str, start: str, end: str
+    ) -> pl.DataFrame:
+        """Fetch bars via the Historical Streaming API (``timeseries.get_range``)."""
         store = client.timeseries.get_range(
             dataset=self.dataset,
             symbols=[symbol],
@@ -78,5 +112,4 @@ class DatabentoProvider:
             end=end,
             stype_in=self.stype_in,
         )
-        df = _to_polars(store.to_df())
-        return conform_bars(df, symbol=symbol, schema=schema).sort("ts_event")
+        return _to_polars(store.to_df())

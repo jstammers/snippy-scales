@@ -16,6 +16,12 @@
 
 provider: "alpaca"
 
+# Closed top-level storage classification — determines the
+# data/raw/<instrument_type>/ subdirectory. Separate from the asset_classes
+# labels below (mega_cap_tech, dow_sample, ...), which are a free-form
+# display/grouping label only, not a storage key.
+instrument_type: "equities"
+
 # Bar frequency aliases only — see docs/guides/data_ingestion.md#frequency-reference.
 schemas: ["1d"]
 

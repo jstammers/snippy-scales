@@ -291,7 +291,8 @@ def run_all(
     raw_dir = data_dir if data_dir is not None else RAW_DIR
 
     # 1. Discover symbols that have data for the requested schema
-    parquet_files = sorted(raw_dir.glob(f"*/{schema}.parquet"))
+    # (data/raw/<instrument_type>/<symbol>/<schema>.parquet)
+    parquet_files = sorted(raw_dir.glob(f"*/*/{schema}.parquet"))
     if not parquet_files:
         console.print(
             f"[red]No {schema!r} data found under {raw_dir}.[/]  "
@@ -299,14 +300,17 @@ def run_all(
         )
         raise typer.Exit(1)
 
-    symbols = [p.parent.name for p in parquet_files]
-    console.print(f"[cyan]Discovered {len(symbols)} symbol(s):[/] {', '.join(symbols)}")
+    symbols = [(p.parent.parent.name, p.parent.name) for p in parquet_files]
+    console.print(
+        f"[cyan]Discovered {len(symbols)} symbol(s):[/] "
+        f"{', '.join(symbol for _, symbol in symbols)}"
+    )
 
     # 2. Load bars for every symbol
     bars_map: dict[str, Any] = {}
-    for symbol in symbols:
+    for instrument_type, symbol in symbols:
         try:
-            bars_map[symbol] = load_bars(symbol, schema, raw_dir)
+            bars_map[symbol] = load_bars(symbol, schema, raw_dir, instrument_type=instrument_type)
             console.print(f"  [green]loaded[/] {symbol}  ({len(bars_map[symbol]):,} bars)")
         except FileNotFoundError:
             console.print(f"  [yellow]skip[/] {symbol}: file unreadable")

@@ -18,6 +18,8 @@
 # estimate (`--dry-run`) after changing it.
 # ---------------------------------------------------------------------------
 
+instrument_type: "futures"
+
 dataset: "GLBX.MDP3"
 schemas: ["trades"]
 

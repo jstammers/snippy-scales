@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 class TestProviderField:
     def test_defaults_to_databento(self) -> None:
         cfg = IngestConfig(
-            start="2020-01-01", asset_classes={"eq": AssetClassConfig(symbols=["ES.c.0"])}
+            start="2020-01-01",
+            instrument_type="futures",
+            asset_classes={"eq": AssetClassConfig(symbols=["ES.c.0"])},
         )
         assert cfg.provider == "databento"
 
@@ -32,6 +34,7 @@ class TestProviderField:
             provider="alpaca",
             start="2020-01-01",
             schemas=["1m"],
+            instrument_type="equities",
             asset_classes={"eq": AssetClassConfig(symbols=["AAPL"])},
         )
         assert cfg.provider == "alpaca"
@@ -42,6 +45,7 @@ class TestProviderField:
                 provider="alpaca",
                 start="2020-01-01",
                 schemas=["trades"],
+                instrument_type="equities",
                 asset_classes={"eq": AssetClassConfig(symbols=["AAPL"])},
             )
 
@@ -49,6 +53,7 @@ class TestProviderField:
         cfg = IngestConfig(
             provider="alpaca",
             start="2020-01-01",
+            instrument_type="equities",
             asset_classes={"eq": AssetClassConfig(symbols=["AAPL"])},
         )
         assert cfg.alpaca_options == AlpacaConfig()
@@ -57,6 +62,7 @@ class TestProviderField:
         cfg = IngestConfig(
             provider="alpaca",
             start="2020-01-01",
+            instrument_type="equities",
             alpaca=AlpacaConfig(feed="iex", rate_limit_per_min=100),
             asset_classes={"eq": AssetClassConfig(symbols=["AAPL"])},
         )
@@ -97,6 +103,7 @@ class TestAssetClassSymbolsFile:
         config_file.write_text(
             textwrap.dedent("""\
                 provider: alpaca
+                instrument_type: equities
                 schemas: ["1m"]
                 start: "2021-09-15"
                 asset_classes:
@@ -118,6 +125,7 @@ class TestAssetClassSymbolsFile:
         config_file.write_text(
             textwrap.dedent("""\
                 provider: alpaca
+                instrument_type: equities
                 start: "2021-09-15"
                 schemas: ["1d"]
                 asset_classes:
@@ -134,6 +142,7 @@ class TestAssetClassSymbolsFile:
         config_file.write_text(
             textwrap.dedent("""\
                 provider: alpaca
+                instrument_type: equities
                 start: "2021-09-15"
                 schemas: ["1d"]
                 asset_classes:
@@ -149,6 +158,7 @@ class TestAssetClassSymbolsFile:
         config_file = tmp_path / "databento.yaml"
         config_file.write_text(
             textwrap.dedent("""\
+                instrument_type: futures
                 start: "2020-01-01"
                 schemas: ["1d"]
                 asset_classes:

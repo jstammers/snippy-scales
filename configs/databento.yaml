@@ -11,6 +11,13 @@
 # Individual expiries can also be used (e.g. ESZ2024).
 # ---------------------------------------------------------------------------
 
+# Closed top-level storage classification — determines the
+# data/raw/<instrument_type>/ subdirectory. Every symbol below is a futures
+# contract (equity index, rate, fx, or commodity futures), so this whole
+# file is "futures" — separate from the asset_classes labels below, which
+# are just a display/grouping label, not a storage key.
+instrument_type: "futures"
+
 # Databento dataset — CME Globex multi-asset feed
 dataset: "GLBX.MDP3"
 

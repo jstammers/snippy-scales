@@ -37,20 +37,30 @@ works identically regardless of which one fetched a given file.
 
 ## Storage Layout
 
-All raw data is written under `data/raw/`.  Each symbol gets its own
-sub-directory named after the symbol, and each schema variant gets its own
-Parquet file:
+All raw data is written under `data/raw/<instrument_type>/`, where
+`instrument_type` is a closed top-level classification (`equities`,
+`futures`, `options`, `fx_spot`, `crypto`) set once per config — see the
+`instrument_type` field below. This keeps different kinds of instruments
+(e.g. Alpaca equities vs. Databento futures) from ever landing in the same
+directory, even if a symbol string happened to collide. It is **not** the
+same as `asset_classes` (below), which is a free-form display/grouping
+label only. Each symbol gets its own sub-directory, and each schema variant
+gets its own Parquet file:
 
 ```
 data/
   raw/
-    ES.c.0/
-      ohlcv-1d.parquet      ← daily bars
-      ohlcv-1h.parquet      ← hourly bars (if ingested)
-    ZN.c.0/
-      ohlcv-1d.parquet
-    CL.c.0/
-      ohlcv-1d.parquet
+    futures/
+      ES.c.0/
+        ohlcv-1d.parquet      ← daily bars
+        ohlcv-1h.parquet      ← hourly bars (if ingested)
+      ZN.c.0/
+        ohlcv-1d.parquet
+      CL.c.0/
+        ohlcv-1d.parquet
+    equities/
+      AAPL/
+        ohlcv-1d.parquet
 ```
 
 Event-level (tick) schemas are far too large for one file per symbol, so they
@@ -59,21 +69,26 @@ are stored **day-partitioned** under a directory named after the schema:
 ```
 data/
   raw/
-    ES.c.0/
-      ohlcv-1d.parquet             ← bars: one file per schema
-      trades/
-        _dbn/2026-08-03.dbn.zst    ← lossless raw feed as returned by the API
-        _empty/2026-08-02.empty    ← day confirmed to contain no records
-        date=2026-08-03/
-          data.parquet             ← hive-partitioned columnar
-      mbo/
-        date=2026-08-24/
-          data.parquet
+    futures/
+      ES.c.0/
+        ohlcv-1d.parquet             ← bars: one file per schema
+        trades/
+          _dbn/2026-08-03.dbn.zst    ← lossless raw feed as returned by the API
+          _empty/2026-08-02.empty    ← day confirmed to contain no records
+          date=2026-08-03/
+            data.parquet             ← hive-partitioned columnar
+        mbo/
+          date=2026-08-24/
+            data.parquet
 ```
 
 The raw `.dbn.zst` is kept alongside the Parquet so the columnar form can be
 regenerated (different price type, different columns) without paying Databento
-a second time.
+a second time. (This holds regardless of delivery method — see
+[Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming).)
+
+The datastore root (`data` by default) is relocatable via the
+`SNIPPY_DATA_ROOT` environment variable.
 
 !!! note "Gitignore"
     `data/raw/` is gitignored — never commit raw market data to version control.
@@ -126,6 +141,43 @@ cost and makes no API call at all.
 
 This matters most for `mbo`, which can be orders of magnitude larger than
 `trades` for the same date range — read the billable size before confirming.
+Cost is identical regardless of delivery method (see below) — Databento bills
+the same per byte whether the data arrives via batch or streaming.
+
+---
+
+## Delivery Method: Batch vs. Streaming
+
+Databento offers two ways to actually retrieve the bytes for a request, set
+via `download_method` (config) or `--download-method` (CLI), Databento-only
+(ignored for Alpaca):
+
+- **`batch`** (default) — submits a batch job, polls it to completion, then
+  downloads the result. Billed identically to streaming, but Databento keeps
+  a completed job's output downloadable **free of charge for a retention
+  window** — so recovering from an accidental local-data loss (e.g. an
+  overzealous `rm`) doesn't mean repaying for the same bytes, as long as
+  you're still inside that window. Before submitting, `run_batch_job` also
+  checks for an already-submitted, non-expired job covering the exact same
+  `(dataset, symbols, schema, start, end, stype_in, split_duration)` — e.g.
+  one left over from a run that failed *after* the job completed — and
+  reuses it instead of billing a duplicate. The trade-off is latency: a
+  batch job can take anywhere from seconds to a few minutes to complete,
+  even for a small incremental update.
+- **`streaming`** — calls the Historical Streaming API directly. Lower
+  latency (no queueing), but every call is billed with no server-side
+  retention — a lost local file always costs a full re-download.
+
+```bash
+# Explicit streaming for a latency-sensitive small pull
+algo data ingest GLBX.MDP3 -s ES.c.0 --schema 1d --instrument-class futures \
+  --start 2026-09-01 --end 2026-09-02 --download-method streaming
+```
+
+```yaml
+# In a config file (Databento only)
+download_method: streaming  # default: batch
+```
 
 ---
 
@@ -144,11 +196,13 @@ is no separate command for ticks vs. bars.
 algo data ingest GLBX.MDP3 \
   --symbol ES.c.0 \
   --schema trades \
+  --instrument-class futures \
   --start 2026-08-01 \
   --end 2026-09-01
 
 # One week of ES market-by-order
-algo data ingest GLBX.MDP3 -s ES.c.0 --schema mbo --start 2026-08-24 --end 2026-08-31
+algo data ingest GLBX.MDP3 -s ES.c.0 --schema mbo --instrument-class futures \
+  --start 2026-08-24 --end 2026-08-31
 ```
 
 Inspect what is stored, and whether anything is missing:
@@ -185,6 +239,7 @@ The starter config lives at `configs/databento.yaml`:
 
 ```yaml
 dataset: "GLBX.MDP3"
+instrument_type: futures
 schemas: ["1d"]
 start: "2018-01-01"
 
@@ -202,13 +257,15 @@ asset_classes:
 | Field | Description |
 |---|---|
 | `provider` | `"databento"` (default) or `"alpaca"`. Alpaca configs may not list event-level schemas. |
+| `instrument_type` | Closed top-level storage classification: `equities`, `futures`, `options`, `fx_spot`, or `crypto` — determines the `data/raw/<instrument_type>/` subdirectory (see [Storage Layout](#storage-layout)). Required. |
 | `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. Ignored for Alpaca. |
 | `schemas` | List of bar aliases and/or event-level schema names to ingest (see [Frequency Reference](#frequency-reference)). Each is ingested for every symbol below. |
 | `start` | Earliest date to fetch (`YYYY-MM-DD`). |
 | `end` | Latest date to fetch. Omit to default to today. |
 | `stype_in` | Databento symbology type applied to every symbol in this config (e.g. `continuous`, `parent`). Ignored for Alpaca. |
+| `download_method` | `"batch"` (default) or `"streaming"` — see [Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming). Ignored for Alpaca. |
 | `alpaca` | Alpaca-specific options (`feed`, `adjustment`, `rate_limit_per_min`, `max_workers`) — see [Alpaca (Free-Tier Stock Bars)](#alpaca-free-tier-stock-bars). Only meaningful when `provider: alpaca`. |
-| `asset_classes` | Mapping of human-readable labels to `symbols` (and/or `symbols_file` — a text file, one symbol per line, useful for large universes) — explicit identifiers per provider (Databento continuous/raw/parent notation, or plain Alpaca tickers; see [Symbol Format](#symbol-format)). |
+| `asset_classes` | Mapping of human-readable labels to `symbols` (and/or `symbols_file` — a text file, one symbol per line, useful for large universes) — explicit identifiers per provider (Databento continuous/raw/parent notation, or plain Alpaca tickers; see [Symbol Format](#symbol-format)). Free-form display/grouping only — not a storage key. |
 
 ### 2. Run the ingestion
 
@@ -249,20 +306,26 @@ algo data ingest GLBX.MDP3 \
   --symbol ES.c.0 \
   --start 2020-01-01 \
   --end 2024-12-31 \
-  --schema 1d
+  --schema 1d \
+  --instrument-class futures
 ```
 
-This also uses upsert semantics — if `data/raw/ES.c.0/ohlcv-1d.parquet` already
-exists, only the missing tail is fetched. The same command routes to the tick
-store instead when `--schema` names an event-level schema (see
-[Tick (Event-Level) Ingestion](#tick-event-level-ingestion)).
+`--instrument-class` is required — see [Storage Layout](#storage-layout).
+This also uses upsert semantics — if
+`data/raw/futures/ES.c.0/ohlcv-1d.parquet` already exists, only the missing
+tail is fetched. The same command routes to the tick store instead when
+`--schema` names an event-level schema (see
+[Tick (Event-Level) Ingestion](#tick-event-level-ingestion)). Downloads via
+the Batch API by default — pass `--download-method streaming` for lower
+latency on a small pull (see
+[Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming)).
 
 Add `--stype-in` when the symbol is not a raw contract code.  Continuous
 notation such as `ES.c.0` requires `--stype-in continuous`:
 
 ```bash
-algo data ingest GLBX.MDP3 -s ES.c.0 --start 2020-01-01 --end 2024-12-31 \
-  --stype-in continuous
+algo data ingest GLBX.MDP3 -s ES.c.0 --instrument-class futures \
+  --start 2020-01-01 --end 2024-12-31 --stype-in continuous
 ```
 
 Databento's **parent** symbology (`--stype-in parent`) resolves a futures
@@ -272,11 +335,11 @@ with no orchestration needed on our end:
 
 ```bash
 algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
-  --start 2020-01-01 --end 2024-12-31
+  --instrument-class futures --start 2020-01-01 --end 2024-12-31
 ```
 
-The resulting file is written under `data/raw/ES.FUT/ohlcv-1d.parquet` and
-distinguishes contracts via Databento's `instrument_id` column.
+The resulting file is written under `data/raw/futures/ES.FUT/ohlcv-1d.parquet`
+and distinguishes contracts via Databento's `instrument_id` column.
 
 ---
 
@@ -503,13 +566,14 @@ from snippy_scales.data.ingest import ingest_from_config, upsert_symbol
 cfg = load_config(Path("configs/databento.yaml"))
 rows = ingest_from_config(cfg)
 
-# Single symbol upsert
+# Single symbol upsert (download_method defaults to "batch")
 path = upsert_symbol(
     dataset="GLBX.MDP3",
     symbol="ES.c.0",
     schema="ohlcv-1d",
     start="2020-01-01",
     end="2024-12-31",
+    instrument_type="futures",
 )
 
 # Every individual ES contract active in the range, via Databento parent symbology
@@ -519,7 +583,9 @@ path = upsert_symbol(
     schema="ohlcv-1d",
     start="2020-01-01",
     end="2024-12-31",
+    instrument_type="futures",
     stype_in="parent",
+    download_method="streaming",  # lower latency for a small pull
 )
 ```
 
@@ -539,6 +605,7 @@ path = upsert_bars(
     schema="ohlcv-1m",
     start="2024-01-01",
     end="2024-02-01",
+    instrument_type="equities",
 )
 
 # load_bars() works identically regardless of which provider wrote the file.
@@ -583,6 +650,11 @@ df = load_bars("AAPL", "ohlcv-1m")
       members:
         - BarProvider
 
+::: snippy_scales.data.providers.databento
+    options:
+      members:
+        - DatabentoProvider
+
 ::: snippy_scales.data.providers.alpaca
     options:
       members:
@@ -592,6 +664,11 @@ df = load_bars("AAPL", "ohlcv-1m")
     options:
       members:
         - RateLimiter
+
+::: snippy_scales.data.batch
+    options:
+      members:
+        - run_batch_job
 
 ::: snippy_scales.data.universe
     options:

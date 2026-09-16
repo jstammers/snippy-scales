@@ -12,10 +12,13 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import math
-from pathlib import Path
 from typing import TYPE_CHECKING
 
+from snippy_scales.data.paths import RAW_DIR, UNIVERSE_DIR
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from snippy_scales.data.ingest import IngestRow
 
 #: Rough bars/trading-day used only for the printed time/volume estimate —
@@ -26,9 +29,11 @@ MAX_BARS_PER_REQUEST = 10_000
 
 #: Shared default paths for `algo data backfill-sp500` / `algo data update-universe`
 #: and scripts/pull_sp500_alpaca_1m.py, so both refer to the same locations.
-DEFAULT_OUTPUT_DIR = Path("data/raw")
-DEFAULT_MANIFEST = Path("data/raw/_manifests/sp500_1m.csv")
-DEFAULT_SYMBOLS_CACHE = Path("data/universe/sp500_ever_members.txt")
+#: Derived from :mod:`snippy_scales.data.paths` so they move together with
+#: ``SNIPPY_DATA_ROOT`` rather than hardcoding ``"data"`` a second time.
+DEFAULT_OUTPUT_DIR = RAW_DIR
+DEFAULT_MANIFEST = RAW_DIR / "_manifests" / "sp500_1m.csv"
+DEFAULT_SYMBOLS_CACHE = UNIVERSE_DIR / "sp500_ever_members.txt"
 
 _MANIFEST_FIELDNAMES = ["symbol", "asset_class", "schema", "succeeded", "detail", "updated_at"]
 

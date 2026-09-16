@@ -2,16 +2,22 @@
 
 Storage layout
 --------------
-Each symbol gets its own sub-directory under the raw data root so that
-files remain small and individually addressable::
+Each symbol gets its own sub-directory under its
+:data:`~snippy_scales.data.config.InstrumentType` classification so that
+files remain small, individually addressable, and never collide across
+instrument types (e.g. an equity ticker and a futures root symbol)::
 
     data/
       raw/
-        ES.c.0/
-          ohlcv-1d.parquet
-          ohlcv-1h.parquet
-        ZN.c.0/
-          ohlcv-1d.parquet
+        equities/
+          AAPL/
+            ohlcv-1d.parquet
+        futures/
+          ES.c.0/
+            ohlcv-1d.parquet
+            ohlcv-1h.parquet
+          ZN.c.0/
+            ohlcv-1d.parquet
 
 This layout — and the Parquet column schema within it — is shared by every
 :class:`~snippy_scales.data.providers.base.BarProvider`
@@ -62,7 +68,7 @@ from snippy_scales.data.schema import conform_bars
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from snippy_scales.data.config import VALID_STYPES, IngestConfig
+    from snippy_scales.data.config import VALID_STYPES, DownloadMethod, IngestConfig
     from snippy_scales.data.providers.base import BarProvider, ResumeGranularity
 
 logger = logging.getLogger(__name__)
@@ -73,19 +79,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _symbol_path(symbol: str, schema: str, output_dir: Path) -> Path:
+def _symbol_path(symbol: str, schema: str, output_dir: Path, instrument_type: str) -> Path:
     """Return the canonical Parquet path for a symbol/schema pair.
 
     Args:
         symbol: Instrument symbol string (e.g. ``"ES.c.0"``, ``"AAPL"``).
         schema: Bar schema name (e.g. ``"ohlcv-1d"``).
         output_dir: Root directory for raw data.
+        instrument_type: Closed top-level storage classification (e.g.
+            ``"equities"``, ``"futures"``) — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
 
     Returns:
-        A :class:`~pathlib.Path` like ``<output_dir>/ES.c.0/ohlcv-1d.parquet``.
+        A :class:`~pathlib.Path` like
+        ``<output_dir>/equities/AAPL/ohlcv-1d.parquet``.
     """
     safe_symbol = symbol.replace("/", "_")
-    return output_dir / safe_symbol / f"{schema}.parquet"
+    return output_dir / instrument_type / safe_symbol / f"{schema}.parquet"
 
 
 def _effective_start(existing: pl.DataFrame, requested_start: str) -> str | None:
@@ -163,6 +173,7 @@ def is_range_cached(
     schema: str,
     start: str,
     end: str,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
 ) -> bool:
     """Return whether ``[start, end)`` is already fully covered on disk.
@@ -178,12 +189,14 @@ def is_range_cached(
         schema: Bar schema name.
         start: Requested start date/timestamp.
         end: Requested (exclusive) end date/timestamp.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw Parquet files.
 
     Returns:
         ``True`` if no download would be needed for this range.
     """
-    out_path = _symbol_path(symbol, schema, output_dir)
+    out_path = _symbol_path(symbol, schema, output_dir, instrument_type)
     if not out_path.exists():
         return False
     existing = pl.read_parquet(out_path)
@@ -198,6 +211,7 @@ def upsert_bars(
     schema: str,
     start: str,
     end: str,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
 ) -> Path:
     """Download and upsert bar data for a single symbol from any provider.
@@ -211,12 +225,14 @@ def upsert_bars(
         schema: Bar schema name (e.g. ``"ohlcv-1d"``).
         start: Earliest date/timestamp to include.
         end: Exclusive end date/timestamp.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw Parquet files.
 
     Returns:
         Path to the written (or unchanged) Parquet file.
     """
-    out_path = _symbol_path(symbol, schema, output_dir)
+    out_path = _symbol_path(symbol, schema, output_dir, instrument_type)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing: pl.DataFrame | None = None
@@ -273,8 +289,10 @@ def upsert_symbol(
     schema: str,
     start: str,
     end: str,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
     stype_in: VALID_STYPES = "raw_symbol",
+    download_method: DownloadMethod = "batch",
 ) -> Path:
     """Download and upsert Databento bar data for a single symbol.
 
@@ -289,8 +307,12 @@ def upsert_symbol(
         schema: Databento schema name (e.g. ``"ohlcv-1d"``).
         start: Earliest date to include (``YYYY-MM-DD``).
         end: Latest date to include (``YYYY-MM-DD``).
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw Parquet files.
         stype_in: Databento symbology type for the request.
+        download_method: ``"batch"`` (default) or ``"streaming"`` — see
+            :data:`~snippy_scales.data.config.DownloadMethod`.
 
     Returns:
         Path to the written (or unchanged) Parquet file.
@@ -300,13 +322,16 @@ def upsert_symbol(
     """
     from snippy_scales.data.providers.databento import DatabentoProvider  # noqa: PLC0415
 
-    provider = DatabentoProvider(dataset=dataset, stype_in=stype_in)
+    provider = DatabentoProvider(
+        dataset=dataset, stype_in=stype_in, download_method=download_method
+    )
     return upsert_bars(
         provider=provider,
         symbol=symbol,
         schema=schema,
         start=start,
         end=end,
+        instrument_type=instrument_type,
         output_dir=output_dir,
     )
 
@@ -374,8 +399,10 @@ def _ingest_one_databento(
                 schema=schema,
                 start=config.start,
                 end=end,
+                instrument_type=config.instrument_type,
                 output_dir=output_dir,
                 stype_in=stype_in,
+                download_method=config.download_method,
             )
             detail = f"{len(written)} day(s) written"
         else:
@@ -385,8 +412,10 @@ def _ingest_one_databento(
                 schema=schema,
                 start=config.start,
                 end=end,
+                instrument_type=config.instrument_type,
                 output_dir=output_dir,
                 stype_in=stype_in,
+                download_method=config.download_method,
             )
             detail = str(path)
         return IngestRow(class_name, schema, symbol, True, detail)
@@ -403,6 +432,7 @@ def _ingest_one_alpaca(
     symbol: str,
     start: str,
     end: str,
+    instrument_type: str,
     output_dir: Path,
 ) -> IngestRow:
     """Ingest one ``(asset class, schema, symbol)`` triple via *provider* (Alpaca)."""
@@ -413,6 +443,7 @@ def _ingest_one_alpaca(
             schema=schema,
             start=start,
             end=end,
+            instrument_type=instrument_type,
             output_dir=output_dir,
         )
         return IngestRow(class_name, schema, symbol, True, str(path))
@@ -486,6 +517,7 @@ def ingest_from_config(
                         symbol=task[2],
                         start=config.start,
                         end=end,
+                        instrument_type=config.instrument_type,
                         output_dir=output_dir,
                     ),
                     tasks,
@@ -518,6 +550,7 @@ def estimate_cost(
     schema: str,
     start: str,
     end: str,
+    instrument_type: str,
     output_dir: Path = RAW_DIR,
     stype_in: VALID_STYPES = "raw_symbol",
 ) -> float:
@@ -533,6 +566,8 @@ def estimate_cost(
         schema: Databento schema name (e.g. ``"ohlcv-1d"``).
         start: Requested start date (``YYYY-MM-DD``).
         end: Requested end date (``YYYY-MM-DD``).
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`.
         output_dir: Root directory for raw Parquet files.
         stype_in: Optional Databento stype string (e.g. ``"continuous"``) to pass to the API.
 
@@ -545,7 +580,7 @@ def estimate_cost(
     """
     import databento as db  # noqa: PLC0415 — optional dep
 
-    out_path = _symbol_path(symbol, schema, output_dir)
+    out_path = _symbol_path(symbol, schema, output_dir, instrument_type)
     fetch_start = start
 
     if out_path.exists():
@@ -615,6 +650,7 @@ def estimate_costs_from_config(
                     schema=schema,
                     start=config.start,
                     end=end,
+                    instrument_type=config.instrument_type,
                     output_dir=output_dir,
                 ),
             )
@@ -640,6 +676,7 @@ def estimate_costs_from_config(
                             schema=schema,
                             start=config.start,
                             end=end,
+                            instrument_type=config.instrument_type,
                             output_dir=output_dir,
                             stype_in=stype_in,
                         ).cost_usd
@@ -650,6 +687,7 @@ def estimate_costs_from_config(
                             schema=schema,
                             start=config.start,
                             end=end,
+                            instrument_type=config.instrument_type,
                             output_dir=output_dir,
                             stype_in=stype_in,
                         )
@@ -663,7 +701,13 @@ def estimate_costs_from_config(
     return rows
 
 
-def load_bars(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> pl.DataFrame:
+def load_bars(
+    symbol: str,
+    schema: str,
+    output_dir: Path = RAW_DIR,
+    *,
+    instrument_type: str | None = None,
+) -> pl.DataFrame:
     """Load a stored bar file into a Polars DataFrame.
 
     Args:
@@ -671,6 +715,13 @@ def load_bars(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> pl.DataFr
             ingested via Databento parent symbology).
         schema: Databento schema name (e.g. ``"ohlcv-1d"``).
         output_dir: Root directory for raw Parquet files.
+        instrument_type: Closed top-level storage classification — see
+            :data:`~snippy_scales.data.config.InstrumentType`. When omitted,
+            resolved by globbing ``output_dir/*/<symbol>/<schema>.parquet``;
+            this raises if the symbol is missing or if it unexpectedly
+            exists under more than one classification (a genuine
+            cross-class duplicate — see
+            :func:`find_cross_class_duplicates`).
 
     Returns:
         A :class:`polars.DataFrame` sorted by ``ts_event``.
@@ -678,11 +729,58 @@ def load_bars(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> pl.DataFr
     Raises:
         FileNotFoundError: If no Parquet file exists for the given symbol and
             schema.
+        ValueError: If *instrument_type* is omitted and the symbol/schema
+            pair exists under more than one classification.
     """
-    path = _symbol_path(symbol, schema, output_dir)
+    if instrument_type is not None:
+        path = _symbol_path(symbol, schema, output_dir, instrument_type)
+    else:
+        safe_symbol = symbol.replace("/", "_")
+        matches = sorted(output_dir.glob(f"*/{safe_symbol}/{schema}.parquet"))
+        if len(matches) > 1:
+            classes = ", ".join(m.parent.parent.name for m in matches)
+            raise ValueError(
+                f"symbol={symbol!r}, schema={schema!r} exists under more than one "
+                f"instrument_type ({classes}) — pass instrument_type explicitly to "
+                "disambiguate."
+            )
+        path = matches[0] if matches else _symbol_path(symbol, schema, output_dir, "unclassified")
     if not path.exists():
         raise FileNotFoundError(
             f"No data found for symbol={symbol!r}, schema={schema!r} at {path}. "
             "Run `algo data ingest-config` first."
         )
     return pl.read_parquet(path)
+
+
+def find_cross_class_duplicates(output_dir: Path = RAW_DIR) -> dict[str, list[str]]:
+    """Find symbol directory names that exist under more than one instrument_type.
+
+    Every symbol is meant to be unique within its
+    :data:`~snippy_scales.data.config.InstrumentType` classification — the
+    ``asset_classes`` grouping label is free-form and may legitimately repeat
+    a symbol across configs, but ``instrument_type`` must not. This scans the
+    two directory levels directly under *output_dir*
+    (``<instrument_type>/<symbol>/``) and reports any symbol name that
+    appears under more than one ``instrument_type``, which signals a
+    misconfiguration (e.g. the same ticker ingested once as ``equities`` and
+    once as ``futures``) rather than expected reuse.
+
+    Args:
+        output_dir: Root directory for raw data.
+
+    Returns:
+        Mapping of symbol name to the sorted list of ``instrument_type``
+        directories it was found under. Empty when there are no duplicates.
+    """
+    symbol_classes: dict[str, set[str]] = {}
+    if not output_dir.exists():
+        return {}
+
+    for class_dir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
+        for symbol_dir in sorted(p for p in class_dir.iterdir() if p.is_dir()):
+            symbol_classes.setdefault(symbol_dir.name, set()).add(class_dir.name)
+
+    return {
+        symbol: sorted(classes) for symbol, classes in symbol_classes.items() if len(classes) > 1
+    }
