@@ -597,6 +597,16 @@ def update_universe(
 
 @app.command(name="backfill-sp500")
 def backfill_sp500(
+    schema: Annotated[
+        str,
+        typer.Option(
+            "--schema",
+            help=(
+                "Bar frequency to backfill: '1m' (default), '1h', '1d'/'daily', or 'eod'. "
+                "Alpaca does not support event-level (tick) schemas or '1s'."
+            ),
+        ),
+    ] = "1m",
     years: Annotated[int, typer.Option(help="How many years back from --end to backfill.")] = 5,
     end: Annotated[str | None, typer.Option(help="End date YYYY-MM-DD. Defaults to today.")] = None,
     output_dir: Annotated[
@@ -643,16 +653,17 @@ def backfill_sp500(
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
-    """Backfill 1-minute bars from Alpaca for every stock ever in the S&P 500.
+    """Backfill bar data from Alpaca for every stock ever in the S&P 500.
 
-    Pulls `--years` (default 5) of `ohlcv-1m` bars for every ticker that was
-    an S&P 500 constituent at any point in that window — not just today's
-    500 names — via `algo data update-universe`'s underlying resolver, so
-    the dataset isn't survivorship-biased. Respects the Alpaca free-tier
-    rate limit (shared across all symbols/threads) and resumes automatically
-    if interrupted: re-running the same command only fetches what's still
-    missing. Requires `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` in the
-    environment.
+    Pulls `--years` (default 5) of `--schema` (default `1m`) bars for every
+    ticker that was an S&P 500 constituent at any point in that window — not
+    just today's 500 names — via `algo data update-universe`'s underlying
+    resolver, so the dataset isn't survivorship-biased. Respects the Alpaca
+    free-tier rate limit (shared across all symbols/threads) and resumes
+    automatically if interrupted: re-running the same command only fetches
+    what's still missing, including a range that's been widened (e.g.
+    `--years 5` then later `--years 10`) since a symbol was first backfilled.
+    Requires `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` in the environment.
 
     Examples::
 
@@ -662,13 +673,16 @@ def backfill_sp500(
         # Run it (prompts for confirmation; ~3h for the full universe on the free tier).
         algo data backfill-sp500
 
-        # Re-run, only retrying symbols that failed last time.
+        # Backfill daily bars instead (a much smaller/faster pull).
+        algo data backfill-sp500 --schema 1d
+
+        # Re-run, only retrying symbols that failed last time (same --schema's manifest).
         algo data backfill-sp500 --retry-failed
     """
     from snippy_scales.data.backfill import (  # noqa: PLC0415
-        DEFAULT_MANIFEST,
         DEFAULT_OUTPUT_DIR,
         DEFAULT_SYMBOLS_CACHE,
+        default_manifest_path,
         estimate_backfill_plan,
         load_symbols_cache,
         merge_manifest,
@@ -680,12 +694,26 @@ def backfill_sp500(
         AlpacaConfig,
         AssetClassConfig,
         IngestConfig,
+        resolve_schema,
     )
     from snippy_scales.data.ingest import ingest_from_config  # noqa: PLC0415
+    from snippy_scales.data.providers.alpaca import SUPPORTED_BAR_SCHEMAS  # noqa: PLC0415
     from snippy_scales.data.universe import sp500_ever_members  # noqa: PLC0415
 
+    try:
+        resolved_schema = resolve_schema(schema)
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/]")
+        raise typer.Exit(1) from None
+    if resolved_schema not in SUPPORTED_BAR_SCHEMAS:
+        console.print(
+            f"[bold red]--schema {schema!r} resolves to {resolved_schema!r}, which Alpaca "
+            f"does not support.[/] Supported: {', '.join(sorted(SUPPORTED_BAR_SCHEMAS))}."
+        )
+        raise typer.Exit(1)
+
     out_dir = output_dir if output_dir is not None else DEFAULT_OUTPUT_DIR
-    manifest = manifest_path if manifest_path is not None else DEFAULT_MANIFEST
+    manifest = manifest_path if manifest_path is not None else default_manifest_path(schema)
     cache_path = symbols_cache if symbols_cache is not None else DEFAULT_SYMBOLS_CACHE
 
     start_date, end_date = resolve_backfill_window(years, end)
@@ -724,8 +752,10 @@ def backfill_sp500(
         start=start_date,
         end=end_date,
         rate_limit_per_min=rate_limit_per_min,
+        schema=resolved_schema,
     )
-    table = Table(title="S&P 500 1-Minute Backfill Plan", show_header=False)
+    table = Table(title="S&P 500 Backfill Plan", show_header=False)
+    table.add_row("Schema", resolved_schema)
     table.add_row("Symbols", str(len(symbols)))
     table.add_row("Range", f"{start_date} → {end_date}  ({years}y)")
     table.add_row("Feed / Adjustment", f"{feed} / {adjustment}")
@@ -750,7 +780,7 @@ def backfill_sp500(
     cfg = IngestConfig(
         provider="alpaca",
         instrument_type="equities",
-        schemas=["1m"],
+        schemas=[resolved_schema],
         start=start_date.isoformat(),
         end=end_date.isoformat(),
         alpaca=AlpacaConfig(

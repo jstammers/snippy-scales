@@ -406,12 +406,21 @@ an `asset_classes.<label>.symbols_file` in any ingest config (see
     appear as an addition/removal in Wikipedia's changes table, so history
     under the old ticker isn't picked up automatically.
 
-### S&P 500 1-minute backfill
+### S&P 500 backfill
 
 `algo data backfill-sp500` combines `update-universe` with the Alpaca
 ingestion path above, purpose-built for a large (~500+ symbol), long-running
-1-minute backfill: it tracks a per-symbol CSV manifest and supports
-`--retry-failed`, which plain `ingest-config` does not.
+backfill: it tracks a per-symbol CSV manifest and supports `--retry-failed`,
+which plain `ingest-config` does not.
+
+`--schema` selects the bar frequency and defaults to `1m` (1-minute bars —
+the largest, slowest pull). It accepts the same aliases as `ingest`/
+`ingest-config` (`1m`, `1h`, `1d`/`daily`, `eod`) but only bar frequencies
+Alpaca actually supports — event-level schemas (`trades`, `mbo`, ...) and
+`1s` are rejected up front with a clear error, since Alpaca has no tick or
+sub-minute equivalent. Each schema gets its own manifest by default
+(`data/raw/_manifests/sp500_<schema>.csv`), so backfilling `1d` after `1m`
+doesn't clobber or conflate the two runs' pass/fail history.
 
 ```bash
 # Preview: universe size, estimated request count and runtime — no download.
@@ -423,15 +432,19 @@ algo data backfill-sp500 --dry-run
 # manifest (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
 algo data backfill-sp500
 
-# Retry only the symbols that failed last time.
+# Backfill daily bars instead — a much smaller/faster pull, its own manifest.
+algo data backfill-sp500 --schema 1d
+
+# Retry only the symbols that failed last time (same --schema's manifest).
 algo data backfill-sp500 --retry-failed
 ```
 
 The resolved universe is cached to `data/universe/sp500_ever_members.txt` so
 repeat runs (and `--retry-failed`) don't re-query Wikipedia and stay
-reproducible; pass `--refresh-universe` to re-resolve it. Run
-`algo data backfill-sp500 --help` for every option (years, feed, adjustment,
-rate limit, worker count, output/manifest/cache paths) — or `just
+reproducible — shared across every `--schema`, since S&P 500 membership
+doesn't depend on bar frequency; pass `--refresh-universe` to re-resolve it.
+Run `algo data backfill-sp500 --help` for every option (schema, years, feed,
+adjustment, rate limit, worker count, output/manifest/cache paths) — or `just
 backfill-sp500-dry-run` / `just backfill-sp500` for the `just`-wrapped forms.
 
 The config-driven equivalent — useful if you want the plan/confirm/dry-run

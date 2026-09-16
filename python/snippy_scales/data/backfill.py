@@ -21,19 +21,42 @@ if TYPE_CHECKING:
 
     from snippy_scales.data.ingest import IngestRow
 
-#: Rough bars/trading-day used only for the printed time/volume estimate —
-#: actual counts vary (half days, extended-hours coverage per ticker, etc.).
-ESTIMATED_BARS_PER_TRADING_DAY = 410  # ~390 regular-session minutes + a margin
+#: Rough bars/trading-day per bar schema, used only for the printed
+#: time/volume estimate — actual counts vary (half days, extended-hours
+#: coverage per ticker, etc.). Falls back to the 1-minute figure for any
+#: schema not listed here.
+_BARS_PER_TRADING_DAY_BY_SCHEMA: dict[str, float] = {
+    "ohlcv-1m": 410,  # ~390 regular-session minutes + a margin
+    "ohlcv-1h": 8,  # ~6.5 regular-session hours + a margin
+    "ohlcv-1d": 1,
+    "ohlcv-eod": 1,
+}
+ESTIMATED_BARS_PER_TRADING_DAY = _BARS_PER_TRADING_DAY_BY_SCHEMA["ohlcv-1m"]
 TRADING_DAYS_PER_CALENDAR_YEAR = 252
 MAX_BARS_PER_REQUEST = 10_000
 
-#: Shared default paths for `algo data backfill-sp500` / `algo data update-universe`
-#: and scripts/pull_sp500_alpaca_1m.py, so both refer to the same locations.
+#: Shared default paths for `algo data backfill-sp500` / `algo data update-universe`.
 #: Derived from :mod:`snippy_scales.data.paths` so they move together with
 #: ``SNIPPY_DATA_ROOT`` rather than hardcoding ``"data"`` a second time.
 DEFAULT_OUTPUT_DIR = RAW_DIR
-DEFAULT_MANIFEST = RAW_DIR / "_manifests" / "sp500_1m.csv"
 DEFAULT_SYMBOLS_CACHE = UNIVERSE_DIR / "sp500_ever_members.txt"
+
+
+def default_manifest_path(schema_alias: str) -> Path:
+    """Default per-symbol CSV manifest path for a `backfill-sp500` run.
+
+    One manifest per bar frequency (e.g. `sp500_1m.csv`, `sp500_1d.csv`) so
+    backfilling a second schema for the same universe doesn't clobber or
+    conflate the first schema's pass/fail history.
+
+    Args:
+        schema_alias: The `--schema` value as passed on the CLI (e.g. `"1m"`, `"1d"`).
+
+    Returns:
+        Path like ``data/raw/_manifests/sp500_<schema_alias>.csv``.
+    """
+    return RAW_DIR / "_manifests" / f"sp500_{schema_alias}.csv"
+
 
 _MANIFEST_FIELDNAMES = ["symbol", "asset_class", "schema", "succeeded", "detail", "updated_at"]
 
@@ -62,7 +85,12 @@ def resolve_backfill_window(years: int, end: str | dt.date | None) -> tuple[dt.d
 
 
 def estimate_backfill_plan(
-    *, num_symbols: int, start: dt.date, end: dt.date, rate_limit_per_min: int
+    *,
+    num_symbols: int,
+    start: dt.date,
+    end: dt.date,
+    rate_limit_per_min: int,
+    schema: str = "ohlcv-1m",
 ) -> dict[str, float]:
     """Rough upper-bound estimate of request volume and wall-clock time.
 
@@ -75,14 +103,21 @@ def estimate_backfill_plan(
         start: Inclusive start date.
         end: Inclusive end date.
         rate_limit_per_min: Provider request budget per minute.
+        schema: Resolved Databento bar schema (e.g. ``"ohlcv-1m"``,
+            ``"ohlcv-1d"``) — selects the bars/trading-day figure the
+            estimate is built from. Unrecognised schemas fall back to the
+            1-minute figure (a safe, conservative upper bound).
 
     Returns:
         A dict with ``trading_days``, ``bars_per_symbol``, ``total_requests``,
         and ``estimated_minutes``.
     """
+    bars_per_trading_day = _BARS_PER_TRADING_DAY_BY_SCHEMA.get(
+        schema, ESTIMATED_BARS_PER_TRADING_DAY
+    )
     calendar_days = max((end - start).days, 0)
     trading_days = round(calendar_days * (TRADING_DAYS_PER_CALENDAR_YEAR / 365))
-    bars_per_symbol = trading_days * ESTIMATED_BARS_PER_TRADING_DAY
+    bars_per_symbol = trading_days * bars_per_trading_day
     pages_per_symbol = max(math.ceil(bars_per_symbol / MAX_BARS_PER_REQUEST), 1)
     total_requests = num_symbols * pages_per_symbol
     return {

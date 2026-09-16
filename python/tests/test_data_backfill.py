@@ -9,6 +9,7 @@ import datetime as dt
 from typing import TYPE_CHECKING
 
 from snippy_scales.data.backfill import (
+    default_manifest_path,
     estimate_backfill_plan,
     load_symbols_cache,
     merge_manifest,
@@ -75,6 +76,44 @@ class TestEstimateBackfillPlan:
         slow = estimate_backfill_plan(num_symbols=100, start=start, end=end, rate_limit_per_min=50)
         fast = estimate_backfill_plan(num_symbols=100, start=start, end=end, rate_limit_per_min=200)
         assert slow["estimated_minutes"] > fast["estimated_minutes"]
+
+    def test_defaults_to_1m_bars_per_trading_day(self) -> None:
+        start, end = dt.date(2024, 1, 1), dt.date(2025, 1, 1)
+        default = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190
+        )
+        explicit = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190, schema="ohlcv-1m"
+        )
+        assert default == explicit
+
+    def test_daily_schema_needs_far_fewer_requests_than_1m(self) -> None:
+        start, end = dt.date(2010, 1, 1), dt.date(2025, 1, 1)
+        one_minute = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190, schema="ohlcv-1m"
+        )
+        daily = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190, schema="ohlcv-1d"
+        )
+        assert daily["total_requests"] < one_minute["total_requests"]
+        assert daily["total_requests"] == 1  # ~15y of daily bars fits in a single page
+
+    def test_unrecognised_schema_falls_back_to_1m_figure(self) -> None:
+        start, end = dt.date(2024, 1, 1), dt.date(2025, 1, 1)
+        one_minute = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190, schema="ohlcv-1m"
+        )
+        unknown = estimate_backfill_plan(
+            num_symbols=1, start=start, end=end, rate_limit_per_min=190, schema="trades"
+        )
+        assert unknown == one_minute
+
+
+class TestDefaultManifestPath:
+    def test_path_is_schema_specific(self) -> None:
+        assert default_manifest_path("1m").name == "sp500_1m.csv"
+        assert default_manifest_path("1d").name == "sp500_1d.csv"
+        assert default_manifest_path("1m") != default_manifest_path("1d")
 
 
 class TestSymbolsCache:

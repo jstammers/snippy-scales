@@ -43,6 +43,11 @@ _TIMEFRAME_BY_SCHEMA: dict[str, tuple[int, str]] = {
     "ohlcv-eod": (1, "Day"),
 }
 
+#: Public view of :data:`_TIMEFRAME_BY_SCHEMA`'s keys, for callers (e.g. the
+#: CLI) that need to validate a schema up front rather than discovering it's
+#: unsupported from the :exc:`ValueError` :meth:`AlpacaProvider.fetch_bars` raises.
+SUPPORTED_BAR_SCHEMAS: frozenset[str] = frozenset(_TIMEFRAME_BY_SCHEMA)
+
 #: Schemas whose bars are stamped once per session and must be normalised to
 #: 00:00 UTC on the session date to line up with Databento's convention.
 _DAILY_SCHEMAS = frozenset({"ohlcv-1d", "ohlcv-eod"})
