@@ -1,7 +1,17 @@
 # Data Ingestion
 
-This guide covers how to pull futures bar data from [Databento](https://databento.com)
-into the local Parquet store used by the backtesting and research layers.
+This guide covers how to pull bar data into the local Parquet store used by the
+backtesting and research layers. Two providers are supported, selected per
+config via `provider:` (default `"databento"`):
+
+- **[Databento](https://databento.com)** — futures/CME Globex, paid, both bar
+  and event-level (tick) schemas.
+- **[Alpaca](https://alpaca.markets)** — US equities, free (Basic) historical
+  tier, bar schemas only. See [Alpaca (Free-Tier Stock Bars)](#alpaca-free-tier-stock-bars).
+
+Both providers write into the exact same layout and column schema (see
+[Storage Layout](#storage-layout)), so [`load_bars`](#loading-data-in-python)
+works identically regardless of which one fetched a given file.
 
 ---
 
@@ -13,7 +23,12 @@ into the local Parquet store used by the backtesting and research layers.
    ```bash
    export DATABENTO_API_KEY="db-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
    ```
-3. **Install project dependencies** (includes `databento` and `pyyaml`):
+3. **For Alpaca**, sign up at <https://alpaca.markets> and set:
+   ```bash
+   export ALPACA_API_KEY="..."
+   export ALPACA_SECRET_KEY="..."
+   ```
+4. **Install project dependencies** (includes `databento`, `alpaca-py`, and `pyyaml`):
    ```bash
    uv sync
    ```
@@ -22,21 +37,58 @@ into the local Parquet store used by the backtesting and research layers.
 
 ## Storage Layout
 
-All raw data is written under `data/raw/`.  Each symbol gets its own
-sub-directory named after the symbol, and each schema variant gets its own
-Parquet file:
+All raw data is written under `data/raw/<instrument_type>/`, where
+`instrument_type` is a closed top-level classification (`equities`,
+`futures`, `options`, `fx_spot`, `crypto`) set once per config — see the
+`instrument_type` field below. This keeps different kinds of instruments
+(e.g. Alpaca equities vs. Databento futures) from ever landing in the same
+directory, even if a symbol string happened to collide. It is **not** the
+same as `asset_classes` (below), which is a free-form display/grouping
+label only. Each symbol gets its own sub-directory, and each schema variant
+gets its own Parquet file:
 
 ```
 data/
   raw/
-    ES.c.0/
-      ohlcv-1d.parquet      ← daily bars
-      ohlcv-1h.parquet      ← hourly bars (if ingested)
-    ZN.c.0/
-      ohlcv-1d.parquet
-    CL.c.0/
-      ohlcv-1d.parquet
+    futures/
+      ES.c.0/
+        ohlcv-1d.parquet      ← daily bars
+        ohlcv-1h.parquet      ← hourly bars (if ingested)
+      ZN.c.0/
+        ohlcv-1d.parquet
+      CL.c.0/
+        ohlcv-1d.parquet
+    equities/
+      AAPL/
+        ohlcv-1d.parquet
 ```
+
+Event-level (tick) schemas are far too large for one file per symbol, so they
+are stored **day-partitioned** under a directory named after the schema:
+
+```
+data/
+  raw/
+    futures/
+      ES.c.0/
+        ohlcv-1d.parquet             ← bars: one file per schema
+        trades/
+          _dbn/2026-08-03.dbn.zst    ← lossless raw feed as returned by the API
+          _empty/2026-08-02.empty    ← day confirmed to contain no records
+          date=2026-08-03/
+            data.parquet             ← hive-partitioned columnar
+        mbo/
+          date=2026-08-24/
+            data.parquet
+```
+
+The raw `.dbn.zst` is kept alongside the Parquet so the columnar form can be
+regenerated (different price type, different columns) without paying Databento
+a second time. (This holds regardless of delivery method — see
+[Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming).)
+
+The datastore root (`data` by default) is relocatable via the
+`SNIPPY_DATA_ROOT` environment variable.
 
 !!! note "Gitignore"
     `data/raw/` is gitignored — never commit raw market data to version control.
@@ -59,6 +111,121 @@ re-downloading data you already have:
 This means each incremental run costs at most **one day of API credit** per
 symbol, regardless of how much historical data is already on disk.
 
+Note that this is a *high-water mark*: it only ever extends the tail.  Lowering
+`start` will not backfill earlier history, and a hole in the middle of the range
+is not detected.
+
+### Tick coverage semantics
+
+Tick schemas use a stronger rule.  A day is **covered** when either its Parquet
+partition or its empty-day marker exists, and `missing_days()` is simply the
+requested calendar range minus that covered set.  Consequently:
+
+- Interior gaps *are* detected and filled.
+- Backfilling below an existing start works.
+- Re-running an identical command downloads nothing and costs nothing.
+
+Each day is fetched in its own request and installed with an atomic rename, so
+an interrupted run leaves no partial file that would be mistaken for a complete
+day — just re-issue the same command to resume.
+
+---
+
+## Cost Estimation
+
+Every download command queries the Databento metadata API first and asks you to
+confirm the estimated spend.  Pass `--yes` to skip the prompt (or `--dry-run`
+for `ingest-config`, which shows the plan and exits).  Symbols and days already
+stored are excluded from the estimate, so a fully cached request reports zero
+cost and makes no API call at all.
+
+This matters most for `mbo`, which can be orders of magnitude larger than
+`trades` for the same date range — read the billable size before confirming.
+Cost is identical regardless of delivery method (see below) — Databento bills
+the same per byte whether the data arrives via batch or streaming.
+
+---
+
+## Delivery Method: Batch vs. Streaming
+
+Databento offers two ways to actually retrieve the bytes for a request, set
+via `download_method` (config) or `--download-method` (CLI), Databento-only
+(ignored for Alpaca):
+
+- **`batch`** (default) — submits a batch job, polls it to completion, then
+  downloads the result. Billed identically to streaming, but Databento keeps
+  a completed job's output downloadable **free of charge for a retention
+  window** — so recovering from an accidental local-data loss (e.g. an
+  overzealous `rm`) doesn't mean repaying for the same bytes, as long as
+  you're still inside that window. Before submitting, `run_batch_job` also
+  checks for an already-submitted, non-expired job covering the exact same
+  `(dataset, symbols, schema, start, end, stype_in, split_duration)` — e.g.
+  one left over from a run that failed *after* the job completed — and
+  reuses it instead of billing a duplicate. The trade-off is latency: a
+  batch job can take anywhere from seconds to a few minutes to complete,
+  even for a small incremental update.
+- **`streaming`** — calls the Historical Streaming API directly. Lower
+  latency (no queueing), but every call is billed with no server-side
+  retention — a lost local file always costs a full re-download.
+
+```bash
+# Explicit streaming for a latency-sensitive small pull
+algo data ingest GLBX.MDP3 -s ES.c.0 --schema 1d --instrument-class futures \
+  --start 2026-09-01 --end 2026-09-02 --download-method streaming
+```
+
+```yaml
+# In a config file (Databento only)
+download_method: streaming  # default: batch
+```
+
+---
+
+## Tick (Event-Level) Ingestion
+
+`algo data ingest` routes automatically to the event-level (tick) store when
+`--schema` names one of `trades`, `mbo`, `mbp-1`, `mbp-10`, or `tbbo` — there
+is no separate command for ticks vs. bars.
+
+!!! warning "The date range is half-open"
+    `--start 2026-08-01 --end 2026-09-01` fetches all of August.  The end date
+    is **exclusive**, unlike the bar commands.
+
+```bash
+# One month of ES trades
+algo data ingest GLBX.MDP3 \
+  --symbol ES.c.0 \
+  --schema trades \
+  --instrument-class futures \
+  --start 2026-08-01 \
+  --end 2026-09-01
+
+# One week of ES market-by-order
+algo data ingest GLBX.MDP3 -s ES.c.0 --schema mbo --instrument-class futures \
+  --start 2026-08-24 --end 2026-08-31
+```
+
+Inspect what is stored, and whether anything is missing:
+
+```bash
+algo data coverage --symbol ES.c.0 --schema trades
+```
+
+Load it back in Python.  `load_ticks` returns a **`LazyFrame`** — an MBO store
+is routinely larger than memory, so filter and aggregate before collecting:
+
+```python
+import polars as pl
+from snippy_scales.data.tick import load_ticks
+
+daily_volume = (
+    load_ticks("ES.c.0", "trades", start="2026-08-01", end="2026-09-01")
+    .group_by("date")
+    .agg(pl.col("size").sum())
+    .collect()
+)
+```
+
 ---
 
 ## Config-Based Batch Ingestion (Recommended)
@@ -72,7 +239,8 @@ The starter config lives at `configs/databento.yaml`:
 
 ```yaml
 dataset: "GLBX.MDP3"
-tick_frequency: "1d"
+instrument_type: futures
+schemas: ["1d"]
 start: "2018-01-01"
 
 asset_classes:
@@ -88,27 +256,33 @@ asset_classes:
 
 | Field | Description |
 |---|---|
-| `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. |
-| `tick_frequency` | Bar resolution (see [Frequency Reference](#frequency-reference)). |
+| `provider` | `"databento"` (default) or `"alpaca"`. Alpaca configs may not list event-level schemas. |
+| `instrument_type` | Closed top-level storage classification: `equities`, `futures`, `options`, `fx_spot`, or `crypto` — determines the `data/raw/<instrument_type>/` subdirectory (see [Storage Layout](#storage-layout)). Required. |
+| `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. Ignored for Alpaca. |
+| `schemas` | List of bar aliases and/or event-level schema names to ingest (see [Frequency Reference](#frequency-reference)). Each is ingested for every symbol below. |
 | `start` | Earliest date to fetch (`YYYY-MM-DD`). |
 | `end` | Latest date to fetch. Omit to default to today. |
-| `asset_classes` | Mapping of human-readable labels to lists of symbols. |
+| `stype_in` | Databento symbology type applied to every symbol in this config (e.g. `continuous`, `parent`). Ignored for Alpaca. |
+| `download_method` | `"batch"` (default) or `"streaming"` — see [Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming). Ignored for Alpaca. |
+| `alpaca` | Alpaca-specific options (`feed`, `adjustment`, `rate_limit_per_min`, `max_workers`) — see [Alpaca (Free-Tier Stock Bars)](#alpaca-free-tier-stock-bars). Only meaningful when `provider: alpaca`. |
+| `asset_classes` | Mapping of human-readable labels to `symbols` (and/or `symbols_file` — a text file, one symbol per line, useful for large universes) — explicit identifiers per provider (Databento continuous/raw/parent notation, or plain Alpaca tickers; see [Symbol Format](#symbol-format)). Free-form display/grouping only — not a storage key. |
 
 ### 2. Run the ingestion
 
 ```bash
-# Full universe, daily bars (as configured)
+# Full universe, every configured schema
 algo data ingest-config configs/databento.yaml
 
-# Override to hourly bars at the command line
-algo data ingest-config configs/databento.yaml --frequency 1h
+# Restrict to one schema at the command line
+algo data ingest-config configs/databento.yaml --schema 1h
 
 # Preview what would be fetched without downloading anything
 algo data ingest-config configs/databento.yaml --dry-run
 ```
 
-The command prints a table of the ingestion plan, then runs the upsert for
-each symbol in sequence, logging progress and any failures.
+The command prints a table of the ingestion plan — one row per
+`(asset class, schema, symbol)` — then runs the upsert for each row in
+sequence, logging progress and any failures.
 
 ### 3. Incremental refresh
 
@@ -132,18 +306,163 @@ algo data ingest GLBX.MDP3 \
   --symbol ES.c.0 \
   --start 2020-01-01 \
   --end 2024-12-31 \
-  --frequency 1d
+  --schema 1d \
+  --instrument-class futures
 ```
 
-This also uses upsert semantics — if `data/raw/ES.c.0/ohlcv-1d.parquet` already
-exists, only the missing tail is fetched.
+`--instrument-class` is required — see [Storage Layout](#storage-layout).
+This also uses upsert semantics — if
+`data/raw/futures/ES.c.0/ohlcv-1d.parquet` already exists, only the missing
+tail is fetched. The same command routes to the tick store instead when
+`--schema` names an event-level schema (see
+[Tick (Event-Level) Ingestion](#tick-event-level-ingestion)). Downloads via
+the Batch API by default — pass `--download-method streaming` for lower
+latency on a small pull (see
+[Delivery Method: Batch vs. Streaming](#delivery-method-batch-vs-streaming)).
+
+Add `--stype-in` when the symbol is not a raw contract code.  Continuous
+notation such as `ES.c.0` requires `--stype-in continuous`:
+
+```bash
+algo data ingest GLBX.MDP3 -s ES.c.0 --instrument-class futures \
+  --start 2020-01-01 --end 2024-12-31 --stype-in continuous
+```
+
+Databento's **parent** symbology (`--stype-in parent`) resolves a futures
+root directly on their side — a symbol like `ES.FUT` returns every
+individual outright contract active in the date range in a single request,
+with no orchestration needed on our end:
+
+```bash
+algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
+  --instrument-class futures --start 2020-01-01 --end 2024-12-31
+```
+
+The resulting file is written under `data/raw/futures/ES.FUT/ohlcv-1d.parquet`
+and distinguishes contracts via Databento's `instrument_id` column.
+
+---
+
+## Alpaca (Free-Tier Stock Bars)
+
+Alpaca is a second bar provider, aimed at equities. Set `provider: alpaca` in
+a config (`configs/alpaca.yaml` is a starting point) and run it exactly like a
+Databento config:
+
+```bash
+algo data ingest-config configs/alpaca.yaml
+algo data ingest-config configs/alpaca.yaml --dry-run
+```
+
+Since Alpaca's historical data has no per-request charge — only a rate limit —
+`ingest-config` skips the Databento cost-estimation step entirely for an
+Alpaca config: the plan table shows "free" instead of a dollar amount, and no
+network call is made to build it.
+
+Alpaca-specific behaviour, implemented in
+`snippy_scales.data.providers.alpaca.AlpacaProvider`:
+
+- **Rate limiting.** The `alpaca-py` SDK already paginates and retries on
+  429/5xx, but only *reacts* to a 429 after it happens. A shared
+  `snippy_scales.data.ratelimit.RateLimiter` sits in front of every HTTP call
+  (including every page within one symbol's request) so a run stays under
+  `alpaca.rate_limit_per_min` (default 190, free-tier cap is 200) in the
+  first place. `alpaca.max_workers` controls how many symbols are fetched
+  concurrently — throughput is bounded by the shared rate limiter, not by
+  thread count, so raising it mainly reduces idle time between a symbol's
+  pages.
+- **Resume granularity.** Unlike Databento's day-based resume, Alpaca resumes
+  from the exact timestamp after the last stored bar. Extended-hours bars can
+  run past midnight UTC, so "the next calendar day" would silently skip the
+  rest of a session.
+- **Daily bars.** Normalised to `00:00 UTC` on the session date (Alpaca
+  stamps them at session-open in US/Eastern) so they line up with Databento's
+  convention, e.g. if a config or a query mixes both providers.
+- **Adjustment.** Default `adjustment: all` (split + dividend) avoids fake
+  price jumps at split dates across multi-year 1-minute history. Re-run with
+  `--refresh` semantics if you need to re-baseline after a new split (not yet
+  automatic — see the module docstring).
+- **No event-level schemas.** `schemas: [trades]` etc. in an Alpaca config
+  fails validation immediately; use a Databento config for tick data.
+
+### S&P 500 universe
+
+`algo data update-universe` resolves and caches "every ticker that was an
+S&P 500 constituent at any point in the last N years" (default 5) — not just
+today's 500 — via `snippy_scales.data.universe.sp500_ever_members` (sourced
+from Wikipedia), so a dataset built from it isn't survivorship-biased:
+
+```bash
+algo data update-universe                              # -> data/universe/sp500_ever_members.txt
+algo data update-universe --years 10 --output data/universe/sp500_10y.txt
+```
+
+The output is a plain symbols file, one ticker per line — usable directly as
+an `asset_classes.<label>.symbols_file` in any ingest config (see
+`configs/alpaca_sp500_1m.yaml`).
+
+!!! note "Known limitation: pure ticker renames"
+    A ticker rename with no index membership change (e.g. FB → META) doesn't
+    appear as an addition/removal in Wikipedia's changes table, so history
+    under the old ticker isn't picked up automatically.
+
+### S&P 500 backfill
+
+`algo data backfill-sp500` combines `update-universe` with the Alpaca
+ingestion path above, purpose-built for a large (~500+ symbol), long-running
+backfill: it tracks a per-symbol CSV manifest and supports `--retry-failed`,
+which plain `ingest-config` does not.
+
+`--schema` selects the bar frequency and defaults to `1m` (1-minute bars —
+the largest, slowest pull). It accepts the same aliases as `ingest`/
+`ingest-config` (`1m`, `1h`, `1d`/`daily`, `eod`) but only bar frequencies
+Alpaca actually supports — event-level schemas (`trades`, `mbo`, ...) and
+`1s` are rejected up front with a clear error, since Alpaca has no tick or
+sub-minute equivalent. Each schema gets its own manifest by default
+(`data/raw/_manifests/sp500_<schema>.csv`), so backfilling `1d` after `1m`
+doesn't clobber or conflate the two runs' pass/fail history.
+
+```bash
+# Preview: universe size, estimated request count and runtime — no download.
+algo data backfill-sp500 --dry-run
+
+# Run it. Interruptible and resumable — re-running only fetches what's still
+# missing (per-symbol upsert semantics, including a range widened since the
+# last run — e.g. --years 5 then later --years 10), and a per-symbol CSV
+# manifest (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
+algo data backfill-sp500
+
+# Backfill daily bars instead — a much smaller/faster pull, its own manifest.
+algo data backfill-sp500 --schema 1d
+
+# Retry only the symbols that failed last time (same --schema's manifest).
+algo data backfill-sp500 --retry-failed
+```
+
+The resolved universe is cached to `data/universe/sp500_ever_members.txt` so
+repeat runs (and `--retry-failed`) don't re-query Wikipedia and stay
+reproducible — shared across every `--schema`, since S&P 500 membership
+doesn't depend on bar frequency; pass `--refresh-universe` to re-resolve it.
+Run `algo data backfill-sp500 --help` for every option (schema, years, feed,
+adjustment, rate limit, worker count, output/manifest/cache paths) — or `just
+backfill-sp500-dry-run` / `just backfill-sp500` for the `just`-wrapped forms.
+
+The config-driven equivalent — useful if you want the plan/confirm/dry-run
+flow `ingest-config` already has, without the manifest — is
+`configs/alpaca_sp500_1m.yaml`:
+
+```bash
+algo data update-universe
+algo data ingest-config configs/alpaca_sp500_1m.yaml
+```
 
 ---
 
 ## Frequency Reference
 
-The `--frequency` flag (and `tick_frequency` config field) accept the following
-aliases.  Databento natively supports these bar schemas:
+The `--schema` flag (and `schemas` config field) accept the following bar
+aliases, plus the event-level schema names `trades`, `mbo`, `mbp-1`,
+`mbp-10`, and `tbbo`. Databento natively supports these bar schemas:
 
 | Alias | Databento Schema | Notes |
 |---|---|---|
@@ -177,10 +496,16 @@ Databento uses a structured symbol notation for futures:
 | `<ROOT>.c.0` | Front-month continuous | `ES.c.0` |
 | `<ROOT>.c.1` | Second-month continuous | `ES.c.1` |
 | `<ROOT><MONTH><YEAR>` | Individual expiry | `ESZ2024` |
+| `<ROOT>.FUT` (with `stype_in: parent`) | Every outright contract under the root | `ES.FUT` |
 
 For systematic research, continuous contracts (`*.c.0`) are recommended as they
 provide uninterrupted price series.  The raw data captures the roll events;
 you will need to back-adjust separately (see [Continuous Contract Construction](#continuous-contract-construction)).
+
+To verify a continuous series (`ES.c.0`) rolls correctly, ingest `ES.FUT`
+with `--stype-in parent` (see [Single-Symbol Ingestion](#single-symbol-ingestion))
+and compare it against the continuous series — Databento's `instrument_id`
+column in the resulting file distinguishes which contract each row came from.
 
 ---
 
@@ -251,18 +576,56 @@ from pathlib import Path
 from snippy_scales.data.config import load_config
 from snippy_scales.data.ingest import ingest_from_config, upsert_symbol
 
-# Config-based batch ingestion
+# Config-based batch ingestion (schemas × symbols, all expanded)
 cfg = load_config(Path("configs/databento.yaml"))
-results = ingest_from_config(cfg)
+rows = ingest_from_config(cfg)
 
-# Single symbol upsert
+# Single symbol upsert (download_method defaults to "batch")
 path = upsert_symbol(
     dataset="GLBX.MDP3",
     symbol="ES.c.0",
     schema="ohlcv-1d",
     start="2020-01-01",
     end="2024-12-31",
+    instrument_type="futures",
 )
+
+# Every individual ES contract active in the range, via Databento parent symbology
+path = upsert_symbol(
+    dataset="GLBX.MDP3",
+    symbol="ES.FUT",
+    schema="ohlcv-1d",
+    start="2020-01-01",
+    end="2024-12-31",
+    instrument_type="futures",
+    stype_in="parent",
+    download_method="streaming",  # lower latency for a small pull
+)
+```
+
+Or against Alpaca directly, without a config file — `upsert_bars` is the
+provider-agnostic entry point both `upsert_symbol` and the Alpaca path use
+internally:
+
+```python
+from snippy_scales.data.ingest import upsert_bars
+from snippy_scales.data.providers.alpaca import AlpacaProvider
+
+# Reads ALPACA_API_KEY / ALPACA_SECRET_KEY from the environment.
+provider = AlpacaProvider(rate_limit_per_min=190)
+path = upsert_bars(
+    provider=provider,
+    symbol="AAPL",
+    schema="ohlcv-1m",
+    start="2024-01-01",
+    end="2024-02-01",
+    instrument_type="equities",
+)
+
+# load_bars() works identically regardless of which provider wrote the file.
+from snippy_scales.data.ingest import load_bars
+
+df = load_bars("AAPL", "ohlcv-1m")
 ```
 
 ---
@@ -273,13 +636,67 @@ path = upsert_symbol(
     options:
       members:
         - frequency_to_schema
+        - resolve_schema
+        - is_tick_schema
         - AssetClassConfig
+        - AlpacaConfig
         - IngestConfig
         - load_config
 
 ::: snippy_scales.data.ingest
     options:
       members:
+        - upsert_bars
         - upsert_symbol
         - ingest_from_config
+        - estimate_cost
+        - is_range_cached
         - load_bars
+
+::: snippy_scales.data.schema
+    options:
+      members:
+        - conform_bars
+        - BAR_SCHEMA_COLUMNS
+
+::: snippy_scales.data.providers.base
+    options:
+      members:
+        - BarProvider
+
+::: snippy_scales.data.providers.databento
+    options:
+      members:
+        - DatabentoProvider
+
+::: snippy_scales.data.providers.alpaca
+    options:
+      members:
+        - AlpacaProvider
+
+::: snippy_scales.data.ratelimit
+    options:
+      members:
+        - RateLimiter
+
+::: snippy_scales.data.batch
+    options:
+      members:
+        - run_batch_job
+
+::: snippy_scales.data.universe
+    options:
+      members:
+        - sp500_ever_members
+        - fetch_current_constituents
+        - fetch_membership_changes
+
+::: snippy_scales.data.tick
+    options:
+      members:
+        - covered_days
+        - missing_days
+        - estimate_tick_cost
+        - TickCostEstimate
+        - upsert_ticks
+        - load_ticks

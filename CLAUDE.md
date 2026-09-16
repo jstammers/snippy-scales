@@ -4,6 +4,33 @@ Quick-start reference for AI agents and human contributors.
 
 ---
 
+## ⚠️ NEVER delete anything under `data/`
+
+`data/` (`data/raw/`, `data/derived/`, `data/cache/`, `data/universe/`, and
+their contents) is **git-ignored** — nothing under it is tracked, so nothing
+under it can be recovered with `git checkout`/`git reflog`/etc. once it's
+gone. It routinely holds locally-ingested market data that cost real money
+(Databento credit) or real wall-clock time (an hours-long Alpaca backfill) to
+build, and once deleted it is gone unless the user has an independent backup.
+
+**Never run `rm -rf data/`, `rm -rf data/raw/`, `shutil.rmtree(...)` on any
+`data/` subpath, or any other recursive delete under `data/` — not even to
+"clean up" a test artifact, not even if it looks empty, not even inside
+`/tmp`-adjacent throwaway logic that got a real path by mistake.** If you
+create a scratch file under `data/` for a test or a smoke check, delete that
+**exact file**, never the directory. If a whole directory genuinely needs
+clearing, list its contents first, confirm with the user what you're about
+to remove, and only delete the specific paths you created yourself.
+
+This rule exists because an agent working in this repo once ran `rm -rf
+data/` mid-session — while another process was live-writing a real Alpaca
+backfill into the same path — and destroyed pre-existing Databento futures
+history in the process. Treat every path under `data/` as irreplaceable
+unless you personally created it in the same command that's about to delete
+it.
+
+---
+
 ## Repository layout
 
 ```
@@ -28,11 +55,23 @@ Quick-start reference for AI agents and human contributors.
 │   │   │   └── tearsheet.py    ← TearsheetGenerator
 │   │   ├── research/           ← Feature engineering helpers
 │   │   ├── strategies/         ← Concrete strategy implementations
-│   │   ├── data/               ← Data ingestion (Databento)
-│   │   └── cli/                ← Typer CLI (entry point: algo)
+│   │   ├── data/               ← Data ingestion (Databento futures + Alpaca equities)
+│   │   │   ├── config.py       ← IngestConfig, AlpacaConfig, AssetClassConfig, load_config
+│   │   │   ├── ingest.py       ← upsert_bars (provider-agnostic), load_bars, ingest_from_config
+│   │   │   ├── schema.py       ← BAR_SCHEMA_COLUMNS, conform_bars — shared Parquet layout
+│   │   │   ├── providers/      ← BarProvider Protocol + DatabentoProvider, AlpacaProvider
+│   │   │   ├── ratelimit.py    ← RateLimiter (used by AlpacaProvider)
+│   │   │   ├── batch.py        ← run_batch_job — shared Databento Batch API submit/poll/download
+│   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
+│   │   │   ├── backfill.py     ← helpers behind `algo data backfill-sp500`
+│   │   │   └── tick.py         ← Event-level (Databento-only) ingestion
+│   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
+│   │       └── data.py         ← ingest, ingest-config, coverage, update-universe, backfill-sp500
 │   └── tests/
 ├── rust/                       ← Rust extension (algo-pyo3 → _algo_core)
 ├── docs/                       ← MkDocs documentation
+├── configs/                    ← Ingestion configs (databento.yaml, databento_es_trades.yaml,
+│                                  alpaca.yaml, alpaca_sp500_1m.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
 └── pyproject.toml
 ```
@@ -287,3 +326,25 @@ It is also re-exported from `backtesting.domain` and `backtesting.runner`.
 5. `evaluation/database.py` inherits the new column automatically via `METRICS_COLS` / `metrics_values`.
 6. Update `cli/eval.py`'s `_test_metrics()` helper to map the new column.
 7. Run `just check-py`.
+
+<!-- code-graph-mcp:begin v2 -->
+## Code Graph (repo-wide AST index)
+
+AST + FTS + vector index of the whole repo — prefer over multi-round Grep/Read for
+structural queries (LSP only sees open files; this sees everything). Fastest path = Bash CLI:
+
+| Intent | Command |
+|--------|---------|
+| Who calls X / what X calls | `code-graph-mcp callgraph X` |
+| Impact before editing a fn | `code-graph-mcp impact X` |
+| Unfamiliar dir / module | `code-graph-mcp overview <dir>` |
+| Symbol source / signature | `code-graph-mcp show X` |
+| Concept search (no exact name) | `code-graph-mcp search "…"` (vector: MCP `semantic_code_search`) |
+| grep + AST context | `code-graph-mcp grep "pat" [paths] [-t lang] [-g glob] [-c]` |
+
+Not on PATH? A plugin-only install keeps its own copy — same commands, run
+`~/.cache/code-graph/bin/code-graph-mcp` (or `npm i -g @sdsrs/code-graph` once).
+
+Still use Grep for literal strings/regex in non-code files; still Read files you'll edit.
+Full command + MCP-tool table: `.claude/plugin_code_graph_mcp.md`
+<!-- code-graph-mcp:end -->

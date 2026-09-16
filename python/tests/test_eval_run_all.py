@@ -172,8 +172,8 @@ class TestRunAllCommand:
 
     def test_runs_single_asset_strategies_per_symbol(self, tmp_path: Path) -> None:
         """Single symbol: single-asset strategies run; multi-asset is skipped."""
-        sym_dir = tmp_path / "ES.c.0"
-        sym_dir.mkdir()
+        sym_dir = tmp_path / "futures" / "ES.c.0"
+        sym_dir.mkdir(parents=True)
         _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
 
         fake_result = _make_fake_result(["ES.c.0"])
@@ -197,8 +197,8 @@ class TestRunAllCommand:
     def test_runs_multi_asset_strategy_with_multiple_symbols(self, tmp_path: Path) -> None:
         """Two symbols: all strategies including multi-asset run."""
         for sym in ["ES.c.0", "NQ.c.0"]:
-            sym_dir = tmp_path / sym
-            sym_dir.mkdir()
+            sym_dir = tmp_path / "futures" / sym
+            sym_dir.mkdir(parents=True)
             _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
 
         fake_single = _make_fake_result(["ES.c.0"])
@@ -221,8 +221,8 @@ class TestRunAllCommand:
 
     def test_error_in_one_strategy_does_not_abort(self, tmp_path: Path) -> None:
         """An error in one strategy is caught; remaining strategies still run."""
-        sym_dir = tmp_path / "ES.c.0"
-        sym_dir.mkdir()
+        sym_dir = tmp_path / "futures" / "ES.c.0"
+        sym_dir.mkdir(parents=True)
         _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
 
         fake_result = _make_fake_result(["ES.c.0"])
@@ -250,8 +250,8 @@ class TestRunAllCommand:
 
     def test_respects_schema_option(self, tmp_path: Path) -> None:
         """--schema filters which parquet files are discovered."""
-        sym_dir = tmp_path / "ES.c.0"
-        sym_dir.mkdir()
+        sym_dir = tmp_path / "futures" / "ES.c.0"
+        sym_dir.mkdir(parents=True)
         # Write ohlcv-1h.parquet but NOT ohlcv-1d.parquet
         _make_bars(400).write_parquet(sym_dir / "ohlcv-1h.parquet")
 

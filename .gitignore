@@ -17,6 +17,7 @@ Cargo.lock
 data/raw/
 data/derived/
 data/cache/
+data/universe/
 *.parquet
 *.dbn
 
@@ -31,3 +32,5 @@ python/**/*.so
 site/
 docs/api/rust/**/*.html
 data/*.db
+.code-graph/
+notebooks/

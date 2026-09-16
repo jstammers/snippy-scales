@@ -32,6 +32,7 @@ from snippy_scales.data.ingest import (
     _to_polars,
     estimate_cost,
     estimate_costs_from_config,
+    find_cross_class_duplicates,
     ingest_from_config,
     load_bars,
     upsert_symbol,
@@ -91,9 +92,19 @@ class TestIngestConfig:
             dataset="GLBX.MDP3",
             start="2020-01-01",
             asset_classes={"eq": AssetClassConfig(symbols=["ES.c.0"])},
+            instrument_type="futures",
         )
-        assert cfg.schema == "ohlcv-1d"
+        assert cfg.resolved_schemas == ["ohlcv-1d"]
         assert cfg.all_symbols == ["ES.c.0"]
+
+    def test_download_method_defaults_to_batch(self) -> None:
+        cfg = IngestConfig(
+            dataset="GLBX.MDP3",
+            start="2020-01-01",
+            asset_classes={"eq": AssetClassConfig(symbols=["ES.c.0"])},
+            instrument_type="futures",
+        )
+        assert cfg.download_method == "batch"
 
     def test_all_symbols_across_classes(self) -> None:
         cfg = IngestConfig(
@@ -103,29 +114,34 @@ class TestIngestConfig:
                 "eq": AssetClassConfig(symbols=["ES.c.0", "NQ.c.0"]),
                 "rates": AssetClassConfig(symbols=["ZN.c.0"]),
             },
+            instrument_type="futures",
         )
         assert cfg.all_symbols == ["ES.c.0", "NQ.c.0", "ZN.c.0"]
 
-    def test_schema_property_respects_tick_frequency(self) -> None:
+    def test_resolved_schemas_respects_schemas_field(self) -> None:
         cfg = IngestConfig(
             dataset="GLBX.MDP3",
             start="2020-01-01",
-            tick_frequency="1h",
+            schemas=["1h", "trades"],
             asset_classes={},
+            instrument_type="futures",
         )
-        assert cfg.schema == "ohlcv-1h"
+        assert cfg.resolved_schemas == ["ohlcv-1h", "trades"]
 
-    def test_invalid_tick_frequency_raises(self) -> None:
+    def test_invalid_schema_raises(self) -> None:
         with pytest.raises(ValueError):
             IngestConfig(
                 dataset="GLBX.MDP3",
                 start="2020-01-01",
-                tick_frequency="5min",
+                schemas=["5min"],
                 asset_classes={},
+                instrument_type="futures",
             )
 
     def test_end_defaults_to_none(self) -> None:
-        cfg = IngestConfig(dataset="GLBX.MDP3", start="2020-01-01", asset_classes={})
+        cfg = IngestConfig(
+            dataset="GLBX.MDP3", start="2020-01-01", asset_classes={}, instrument_type="futures"
+        )
         assert cfg.end is None
 
 
@@ -133,7 +149,8 @@ class TestLoadConfig:
     def test_loads_valid_yaml(self, tmp_path: Path) -> None:
         yaml_text = textwrap.dedent("""\
             dataset: "GLBX.MDP3"
-            tick_frequency: "1d"
+            instrument_type: futures
+            schemas: ["1d"]
             start: "2020-01-01"
             asset_classes:
               equity_index:
@@ -147,7 +164,7 @@ class TestLoadConfig:
         cfg = load_config(config_file)
 
         assert cfg.dataset == "GLBX.MDP3"
-        assert cfg.tick_frequency == "1d"
+        assert cfg.schemas == ["1d"]
         assert cfg.start == "2020-01-01"
         assert cfg.all_symbols == ["ES.c.0", "NQ.c.0", "ZN.c.0"]
 
@@ -155,10 +172,10 @@ class TestLoadConfig:
         with pytest.raises(FileNotFoundError):
             load_config(tmp_path / "nonexistent.yaml")
 
-    def test_invalid_frequency_in_yaml_raises(self, tmp_path: Path) -> None:
+    def test_invalid_schema_in_yaml_raises(self, tmp_path: Path) -> None:
         yaml_text = textwrap.dedent("""\
             dataset: "GLBX.MDP3"
-            tick_frequency: "5min"
+            schemas: ["5min"]
             start: "2020-01-01"
             asset_classes: {}
         """)
@@ -171,6 +188,7 @@ class TestLoadConfig:
     def test_optional_end_date_absent(self, tmp_path: Path) -> None:
         yaml_text = textwrap.dedent("""\
             dataset: "GLBX.MDP3"
+            instrument_type: futures
             start: "2020-01-01"
             asset_classes: {}
         """)
@@ -187,11 +205,11 @@ class TestLoadConfig:
 
 class TestSymbolPath:
     def test_basic(self, tmp_path: Path) -> None:
-        p = _symbol_path("ES.c.0", "ohlcv-1d", tmp_path)
-        assert p == tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        p = _symbol_path("ES.c.0", "ohlcv-1d", tmp_path, "futures")
+        assert p == tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
 
     def test_slash_in_symbol_is_sanitised(self, tmp_path: Path) -> None:
-        p = _symbol_path("BTC/USD", "ohlcv-1d", tmp_path)
+        p = _symbol_path("BTC/USD", "ohlcv-1d", tmp_path, "crypto")
         assert "/" not in str(p.name)
 
 
@@ -324,6 +342,8 @@ class TestUpsertSymbol:
                 start="2024-01-01",
                 end="2024-01-04",
                 output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
             )
 
         assert path.exists()
@@ -333,7 +353,7 @@ class TestUpsertSymbol:
     def test_upsert_appends_new_rows(self, tmp_path: Path) -> None:
         # Pre-populate with 3 days
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -350,6 +370,8 @@ class TestUpsertSymbol:
                 start="2024-01-01",
                 end="2024-01-05",
                 output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
             )
 
         df = pl.read_parquet(path)
@@ -360,7 +382,7 @@ class TestUpsertSymbol:
 
     def test_no_download_when_already_up_to_date(self, tmp_path: Path) -> None:
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -374,13 +396,15 @@ class TestUpsertSymbol:
                 start="2024-01-01",
                 end="2024-01-03",  # already covered
                 output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
             )
 
         client_mock.timeseries.get_range.assert_not_called()
 
     def test_deduplication_on_overlap(self, tmp_path: Path) -> None:
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -397,11 +421,75 @@ class TestUpsertSymbol:
                 start="2024-01-01",
                 end="2024-01-05",
                 output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
             )
 
         df = pl.read_parquet(path)
         # Deduplicated: 4 unique days, not 5
         assert len(df) == 4
+
+    def test_widening_start_backfills_head_gap(self, tmp_path: Path) -> None:
+        """Regression: widening --years on an already-ingested symbol (e.g. 5 → 10)
+        must backfill the newly-requested earlier range, not just look forward
+        from the latest stored bar and conclude "already up to date."
+        """
+        initial_df = _make_ohlcv_df(["2024-01-08", "2024-01-09", "2024-01-10"])
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        head_store = _make_mock_store(["2024-01-01", "2024-01-02"])
+        client_mock = MagicMock()
+        client_mock.timeseries.get_range.return_value = head_store
+
+        with _mock_databento(client_mock):
+            path = upsert_symbol(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",  # earlier than the earliest cached day (2024-01-08)
+                end="2024-01-10",  # tail already fully covered — no tail fetch needed
+                output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
+            )
+
+        df = pl.read_parquet(path)
+        assert len(df) == 5  # 2 new head days + 3 pre-existing days
+        assert df.select(pl.col("ts_event").cast(pl.Date).min()).item().isoformat() == "2024-01-01"
+        client_mock.timeseries.get_range.assert_called_once()
+        call_kwargs = client_mock.timeseries.get_range.call_args.kwargs
+        assert call_kwargs["start"] == "2024-01-01"
+        assert call_kwargs["end"] == "2024-01-08"  # exclusive, up to earliest cached day
+
+    def test_widening_start_and_new_tail_both_fetched(self, tmp_path: Path) -> None:
+        """Both a head gap and a tail gap can exist at once and must both be fetched."""
+        initial_df = _make_ohlcv_df(["2024-01-08", "2024-01-09", "2024-01-10"])
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        head_store = _make_mock_store(["2024-01-01"])
+        tail_store = _make_mock_store(["2024-01-11"])
+        client_mock = MagicMock()
+        client_mock.timeseries.get_range.side_effect = [head_store, tail_store]
+
+        with _mock_databento(client_mock):
+            path = upsert_symbol(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",
+                end="2024-01-12",
+                output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
+            )
+
+        df = pl.read_parquet(path)
+        assert len(df) == 5  # 1 head + 3 existing + 1 tail
+        assert client_mock.timeseries.get_range.call_count == 2
 
 
 # ===========================================================================
@@ -410,13 +498,15 @@ class TestUpsertSymbol:
 
 
 class TestIngestFromConfig:
-    def _make_config(self, symbols: list[str], frequency: str = "1d") -> IngestConfig:
+    def _make_config(self, symbols: list[str], schemas: list[str] | None = None) -> IngestConfig:
         return IngestConfig(
             dataset="GLBX.MDP3",
-            tick_frequency=frequency,
+            schemas=schemas or ["1d"],
             start="2024-01-01",
             end="2024-01-05",
             asset_classes={"test": AssetClassConfig(symbols=symbols)},
+            instrument_type="futures",
+            download_method="streaming",
         )
 
     def test_all_symbols_ingested(self, tmp_path: Path) -> None:
@@ -425,29 +515,43 @@ class TestIngestFromConfig:
         client_mock.timeseries.get_range.return_value = store
 
         with _mock_databento(client_mock):
-            results = ingest_from_config(
+            rows = ingest_from_config(
                 self._make_config(["ES.c.0", "ZN.c.0"]),
                 output_dir=tmp_path,
             )
 
-        assert set(results.keys()) == {"ES.c.0", "ZN.c.0"}
+        assert {row.symbol for row in rows} == {"ES.c.0", "ZN.c.0"}
+        assert all(row.succeeded for row in rows)
         assert client_mock.timeseries.get_range.call_count == 2
 
-    def test_frequency_override(self, tmp_path: Path) -> None:
+    def test_schema_override(self, tmp_path: Path) -> None:
         store = _make_mock_store(["2024-01-01"])
         client_mock = MagicMock()
         client_mock.timeseries.get_range.return_value = store
 
         with _mock_databento(client_mock):
-            results = ingest_from_config(
-                self._make_config(["ES.c.0"], frequency="1d"),
-                frequency_override="1h",
+            rows = ingest_from_config(
+                self._make_config(["ES.c.0"], schemas=["1d"]),
+                schema_override="1h",
                 output_dir=tmp_path,
             )
 
         # With hourly override, file should be under ohlcv-1h
-        path = results["ES.c.0"]
-        assert "ohlcv-1h" in str(path)
+        assert rows[0].schema == "ohlcv-1h"
+        assert "ohlcv-1h" in rows[0].detail
+
+    def test_multiple_schemas_each_produce_a_row(self, tmp_path: Path) -> None:
+        store = _make_mock_store(["2024-01-01"])
+        client_mock = MagicMock()
+        client_mock.timeseries.get_range.return_value = store
+
+        with _mock_databento(client_mock):
+            rows = ingest_from_config(
+                self._make_config(["ES.c.0"], schemas=["1d", "1h"]),
+                output_dir=tmp_path,
+            )
+
+        assert {row.schema for row in rows} == {"ohlcv-1d", "ohlcv-1h"}
 
     def test_failed_symbol_does_not_abort_others(self, tmp_path: Path) -> None:
         good_store = _make_mock_store(["2024-01-01"])
@@ -461,14 +565,15 @@ class TestIngestFromConfig:
         client_mock.timeseries.get_range.side_effect = side_effect
 
         with _mock_databento(client_mock):
-            results = ingest_from_config(
+            rows = ingest_from_config(
                 self._make_config(["ES.c.0", "ZN.c.0"]),
                 output_dir=tmp_path,
             )
 
+        by_symbol = {row.symbol: row.succeeded for row in rows}
         # ZN should succeed even though ES failed
-        assert "ZN.c.0" in results
-        assert "ES.c.0" not in results
+        assert by_symbol["ZN.c.0"] is True
+        assert by_symbol["ES.c.0"] is False
 
 
 # ===========================================================================
@@ -479,7 +584,7 @@ class TestIngestFromConfig:
 class TestLoadBars:
     def test_returns_dataframe(self, tmp_path: Path) -> None:
         df = _make_ohlcv_df(["2024-01-01", "2024-01-02"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         df.write_parquet(out_path)
 
@@ -501,7 +606,7 @@ class TestEstimateCost:
     def test_returns_zero_when_already_up_to_date(self, tmp_path: Path) -> None:
         """No API call should be made when local data already covers the range."""
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -515,6 +620,7 @@ class TestEstimateCost:
                 start="2024-01-01",
                 end="2024-01-03",  # already covered
                 output_dir=tmp_path,
+                instrument_type="futures",
             )
 
         assert cost == 0.0
@@ -533,6 +639,7 @@ class TestEstimateCost:
                 start="2024-01-01",
                 end="2024-01-10",
                 output_dir=tmp_path,
+                instrument_type="futures",
             )
 
         assert cost == pytest.approx(1.23)
@@ -545,7 +652,7 @@ class TestEstimateCost:
     def test_uses_effective_start_for_partial_coverage(self, tmp_path: Path) -> None:
         """Cost query start should be trimmed to the day after the last stored bar."""
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -560,6 +667,7 @@ class TestEstimateCost:
                 start="2024-01-01",
                 end="2024-01-10",
                 output_dir=tmp_path,
+                instrument_type="futures",
             )
 
         assert cost == pytest.approx(0.50)
@@ -580,6 +688,7 @@ class TestEstimateCost:
                 start="2024-01-05",
                 end="2024-01-05",  # same day — no range
                 output_dir=tmp_path,
+                instrument_type="futures",
             )
 
         # get_cost is still called (no local file exists), but returns 0.0
@@ -592,13 +701,14 @@ class TestEstimateCost:
 
 
 class TestEstimateCostsFromConfig:
-    def _make_config(self, symbols: list[str], frequency: str = "1d") -> IngestConfig:
+    def _make_config(self, symbols: list[str], schemas: list[str] | None = None) -> IngestConfig:
         return IngestConfig(
             dataset="GLBX.MDP3",
-            tick_frequency=frequency,
+            schemas=schemas or ["1d"],
             start="2024-01-01",
             end="2024-01-10",
             asset_classes={"test": AssetClassConfig(symbols=symbols)},
+            instrument_type="futures",
         )
 
     def test_returns_cost_per_symbol(self, tmp_path: Path) -> None:
@@ -606,11 +716,12 @@ class TestEstimateCostsFromConfig:
         client_mock.metadata.get_cost.return_value = 2.00
 
         with _mock_databento(client_mock):
-            costs = estimate_costs_from_config(
+            rows = estimate_costs_from_config(
                 self._make_config(["ES.c.0", "ZN.c.0"]),
                 output_dir=tmp_path,
             )
 
+        costs = {row.symbol: row.cost_usd for row in rows}
         assert set(costs.keys()) == {"ES.c.0", "ZN.c.0"}
         assert costs["ES.c.0"] == pytest.approx(2.00)
         assert costs["ZN.c.0"] == pytest.approx(2.00)
@@ -619,7 +730,7 @@ class TestEstimateCostsFromConfig:
     def test_cached_symbol_shows_zero_cost(self, tmp_path: Path) -> None:
         """Symbols already on disk within the requested range should cost $0."""
         initial_df = _make_ohlcv_df(["2024-01-01", "2024-01-02", "2024-01-03"])
-        out_path = tmp_path / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
         out_path.parent.mkdir(parents=True)
         initial_df.write_parquet(out_path)
 
@@ -627,18 +738,19 @@ class TestEstimateCostsFromConfig:
         client_mock.metadata.get_cost.return_value = 1.00
 
         with _mock_databento(client_mock):
-            costs = estimate_costs_from_config(
+            rows = estimate_costs_from_config(
                 IngestConfig(
                     dataset="GLBX.MDP3",
-                    tick_frequency="1d",
+                    schemas=["1d"],
                     start="2024-01-01",
                     end="2024-01-03",  # fully covered by existing data
                     asset_classes={"test": AssetClassConfig(symbols=["ES.c.0"])},
+                    instrument_type="futures",
                 ),
                 output_dir=tmp_path,
             )
 
-        assert costs["ES.c.0"] == 0.0
+        assert rows[0].cost_usd == 0.0
         client_mock.metadata.get_cost.assert_not_called()
 
     def test_failed_estimate_recorded_as_nan(self, tmp_path: Path) -> None:
@@ -646,25 +758,48 @@ class TestEstimateCostsFromConfig:
         client_mock.metadata.get_cost.side_effect = RuntimeError("API error")
 
         with _mock_databento(client_mock):
-            costs = estimate_costs_from_config(
+            rows = estimate_costs_from_config(
                 self._make_config(["ES.c.0"]),
                 output_dir=tmp_path,
             )
 
         import math
 
-        assert math.isnan(costs["ES.c.0"])
+        assert math.isnan(rows[0].cost_usd)
 
-    def test_frequency_override_applied(self, tmp_path: Path) -> None:
+    def test_schema_override_applied(self, tmp_path: Path) -> None:
         client_mock = MagicMock()
         client_mock.metadata.get_cost.return_value = 5.00
 
         with _mock_databento(client_mock):
-            estimate_costs_from_config(
-                self._make_config(["ES.c.0"], frequency="1d"),
-                frequency_override="1h",
+            rows = estimate_costs_from_config(
+                self._make_config(["ES.c.0"], schemas=["1d"]),
+                schema_override="1h",
                 output_dir=tmp_path,
             )
 
+        assert rows[0].schema == "ohlcv-1h"
         call_kwargs = client_mock.metadata.get_cost.call_args.kwargs
         assert call_kwargs["schema"] == "ohlcv-1h"
+
+
+# ===========================================================================
+# find_cross_class_duplicates
+# ===========================================================================
+
+
+class TestFindCrossClassDuplicates:
+    def test_empty_when_no_output_dir(self, tmp_path: Path) -> None:
+        assert find_cross_class_duplicates(tmp_path / "does-not-exist") == {}
+
+    def test_empty_when_no_duplicates(self, tmp_path: Path) -> None:
+        (tmp_path / "equities" / "AAPL").mkdir(parents=True)
+        (tmp_path / "futures" / "ES.c.0").mkdir(parents=True)
+        assert find_cross_class_duplicates(tmp_path) == {}
+
+    def test_detects_symbol_under_two_classes(self, tmp_path: Path) -> None:
+        (tmp_path / "equities" / "AAPL").mkdir(parents=True)
+        (tmp_path / "futures" / "AAPL").mkdir(parents=True)
+        (tmp_path / "futures" / "ES.c.0").mkdir(parents=True)
+
+        assert find_cross_class_duplicates(tmp_path) == {"AAPL": ["equities", "futures"]}
