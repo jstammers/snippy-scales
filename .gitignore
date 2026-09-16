@@ -31,3 +31,5 @@ python/**/*.so
 site/
 docs/api/rust/**/*.html
 data/*.db
+.code-graph/
+notebooks/

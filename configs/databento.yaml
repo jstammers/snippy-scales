@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Pass this file to the CLI:
 #   algo data ingest-config configs/databento.yaml
-#   algo data ingest-config configs/databento.yaml --frequency 1h
+#   algo data ingest-config configs/databento.yaml --schema 1h
 #
 # Symbols use Databento continuous-contract notation:
 #   <ROOT>.c.0  → front-month continuous
@@ -14,14 +14,24 @@
 # Databento dataset — CME Globex multi-asset feed
 dataset: "GLBX.MDP3"
 
-# Default bar frequency. Overridable at runtime via --frequency.
-# Valid aliases: 1d / daily / 1h / 1m / 1min / 1s / eod
-tick_frequency: "1d"
+# Schemas to ingest — bar aliases (1d / daily / 1h / 1m / 1min / 1s / eod) and/or
+# event-level schema names (trades / mbo / mbp-1 / mbp-10 / tbbo). Every entry is
+# ingested for every symbol below. Narrow to one at runtime via --schema.
+schemas: ["1d"]
 
 # Historical pull range
 start: "2010-06-06"
 # end: "2024-12-31"  # Omit to default to today
 
+# stype_in applies to every symbol in this config. To also pull every
+# individual outright contract under a root (e.g. for verifying a continuous
+# contract's rolls), use Databento parent symbology — a symbol like "ES.FUT"
+# with stype_in: parent returns every contract active in the date range in
+# one request. Since stype_in is set once per config, do that as a separate
+# config/asset-class run rather than mixing it with the continuous symbols
+# below:
+#   algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
+#     --start 2010-06-06 --end 2024-12-31
 stype_in: "continuous"
 # ---------------------------------------------------------------------------
 # Asset classes

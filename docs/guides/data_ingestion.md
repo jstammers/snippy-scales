@@ -38,6 +38,28 @@ data/
       ohlcv-1d.parquet
 ```
 
+Event-level (tick) schemas are far too large for one file per symbol, so they
+are stored **day-partitioned** under a directory named after the schema:
+
+```
+data/
+  raw/
+    ES.c.0/
+      ohlcv-1d.parquet             ← bars: one file per schema
+      trades/
+        _dbn/2026-08-03.dbn.zst    ← lossless raw feed as returned by the API
+        _empty/2026-08-02.empty    ← day confirmed to contain no records
+        date=2026-08-03/
+          data.parquet             ← hive-partitioned columnar
+      mbo/
+        date=2026-08-24/
+          data.parquet
+```
+
+The raw `.dbn.zst` is kept alongside the Parquet so the columnar form can be
+regenerated (different price type, different columns) without paying Databento
+a second time.
+
 !!! note "Gitignore"
     `data/raw/` is gitignored — never commit raw market data to version control.
 
@@ -59,6 +81,82 @@ re-downloading data you already have:
 This means each incremental run costs at most **one day of API credit** per
 symbol, regardless of how much historical data is already on disk.
 
+Note that this is a *high-water mark*: it only ever extends the tail.  Lowering
+`start` will not backfill earlier history, and a hole in the middle of the range
+is not detected.
+
+### Tick coverage semantics
+
+Tick schemas use a stronger rule.  A day is **covered** when either its Parquet
+partition or its empty-day marker exists, and `missing_days()` is simply the
+requested calendar range minus that covered set.  Consequently:
+
+- Interior gaps *are* detected and filled.
+- Backfilling below an existing start works.
+- Re-running an identical command downloads nothing and costs nothing.
+
+Each day is fetched in its own request and installed with an atomic rename, so
+an interrupted run leaves no partial file that would be mistaken for a complete
+day — just re-issue the same command to resume.
+
+---
+
+## Cost Estimation
+
+Every download command queries the Databento metadata API first and asks you to
+confirm the estimated spend.  Pass `--yes` to skip the prompt (or `--dry-run`
+for `ingest-config`, which shows the plan and exits).  Symbols and days already
+stored are excluded from the estimate, so a fully cached request reports zero
+cost and makes no API call at all.
+
+This matters most for `mbo`, which can be orders of magnitude larger than
+`trades` for the same date range — read the billable size before confirming.
+
+---
+
+## Tick (Event-Level) Ingestion
+
+`algo data ingest` routes automatically to the event-level (tick) store when
+`--schema` names one of `trades`, `mbo`, `mbp-1`, `mbp-10`, or `tbbo` — there
+is no separate command for ticks vs. bars.
+
+!!! warning "The date range is half-open"
+    `--start 2026-08-01 --end 2026-09-01` fetches all of August.  The end date
+    is **exclusive**, unlike the bar commands.
+
+```bash
+# One month of ES trades
+algo data ingest GLBX.MDP3 \
+  --symbol ES.c.0 \
+  --schema trades \
+  --start 2026-08-01 \
+  --end 2026-09-01
+
+# One week of ES market-by-order
+algo data ingest GLBX.MDP3 -s ES.c.0 --schema mbo --start 2026-08-24 --end 2026-08-31
+```
+
+Inspect what is stored, and whether anything is missing:
+
+```bash
+algo data coverage --symbol ES.c.0 --schema trades
+```
+
+Load it back in Python.  `load_ticks` returns a **`LazyFrame`** — an MBO store
+is routinely larger than memory, so filter and aggregate before collecting:
+
+```python
+import polars as pl
+from snippy_scales.data.tick import load_ticks
+
+daily_volume = (
+    load_ticks("ES.c.0", "trades", start="2026-08-01", end="2026-09-01")
+    .group_by("date")
+    .agg(pl.col("size").sum())
+    .collect()
+)
+```
+
 ---
 
 ## Config-Based Batch Ingestion (Recommended)
@@ -72,7 +170,7 @@ The starter config lives at `configs/databento.yaml`:
 
 ```yaml
 dataset: "GLBX.MDP3"
-tick_frequency: "1d"
+schemas: ["1d"]
 start: "2018-01-01"
 
 asset_classes:
@@ -89,26 +187,28 @@ asset_classes:
 | Field | Description |
 |---|---|
 | `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. |
-| `tick_frequency` | Bar resolution (see [Frequency Reference](#frequency-reference)). |
+| `schemas` | List of bar aliases and/or event-level schema names to ingest (see [Frequency Reference](#frequency-reference)). Each is ingested for every symbol below. |
 | `start` | Earliest date to fetch (`YYYY-MM-DD`). |
 | `end` | Latest date to fetch. Omit to default to today. |
-| `asset_classes` | Mapping of human-readable labels to lists of symbols. |
+| `stype_in` | Databento symbology type applied to every symbol in this config (e.g. `continuous`, `parent`). |
+| `asset_classes` | Mapping of human-readable labels to `symbols` — explicit Databento identifiers (continuous, raw, or parent notation; see [Symbol Format](#symbol-format)). |
 
 ### 2. Run the ingestion
 
 ```bash
-# Full universe, daily bars (as configured)
+# Full universe, every configured schema
 algo data ingest-config configs/databento.yaml
 
-# Override to hourly bars at the command line
-algo data ingest-config configs/databento.yaml --frequency 1h
+# Restrict to one schema at the command line
+algo data ingest-config configs/databento.yaml --schema 1h
 
 # Preview what would be fetched without downloading anything
 algo data ingest-config configs/databento.yaml --dry-run
 ```
 
-The command prints a table of the ingestion plan, then runs the upsert for
-each symbol in sequence, logging progress and any failures.
+The command prints a table of the ingestion plan — one row per
+`(asset class, schema, symbol)` — then runs the upsert for each row in
+sequence, logging progress and any failures.
 
 ### 3. Incremental refresh
 
@@ -132,18 +232,42 @@ algo data ingest GLBX.MDP3 \
   --symbol ES.c.0 \
   --start 2020-01-01 \
   --end 2024-12-31 \
-  --frequency 1d
+  --schema 1d
 ```
 
 This also uses upsert semantics — if `data/raw/ES.c.0/ohlcv-1d.parquet` already
-exists, only the missing tail is fetched.
+exists, only the missing tail is fetched. The same command routes to the tick
+store instead when `--schema` names an event-level schema (see
+[Tick (Event-Level) Ingestion](#tick-event-level-ingestion)).
+
+Add `--stype-in` when the symbol is not a raw contract code.  Continuous
+notation such as `ES.c.0` requires `--stype-in continuous`:
+
+```bash
+algo data ingest GLBX.MDP3 -s ES.c.0 --start 2020-01-01 --end 2024-12-31 \
+  --stype-in continuous
+```
+
+Databento's **parent** symbology (`--stype-in parent`) resolves a futures
+root directly on their side — a symbol like `ES.FUT` returns every
+individual outright contract active in the date range in a single request,
+with no orchestration needed on our end:
+
+```bash
+algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
+  --start 2020-01-01 --end 2024-12-31
+```
+
+The resulting file is written under `data/raw/ES.FUT/ohlcv-1d.parquet` and
+distinguishes contracts via Databento's `instrument_id` column.
 
 ---
 
 ## Frequency Reference
 
-The `--frequency` flag (and `tick_frequency` config field) accept the following
-aliases.  Databento natively supports these bar schemas:
+The `--schema` flag (and `schemas` config field) accept the following bar
+aliases, plus the event-level schema names `trades`, `mbo`, `mbp-1`,
+`mbp-10`, and `tbbo`. Databento natively supports these bar schemas:
 
 | Alias | Databento Schema | Notes |
 |---|---|---|
@@ -177,10 +301,16 @@ Databento uses a structured symbol notation for futures:
 | `<ROOT>.c.0` | Front-month continuous | `ES.c.0` |
 | `<ROOT>.c.1` | Second-month continuous | `ES.c.1` |
 | `<ROOT><MONTH><YEAR>` | Individual expiry | `ESZ2024` |
+| `<ROOT>.FUT` (with `stype_in: parent`) | Every outright contract under the root | `ES.FUT` |
 
 For systematic research, continuous contracts (`*.c.0`) are recommended as they
 provide uninterrupted price series.  The raw data captures the roll events;
 you will need to back-adjust separately (see [Continuous Contract Construction](#continuous-contract-construction)).
+
+To verify a continuous series (`ES.c.0`) rolls correctly, ingest `ES.FUT`
+with `--stype-in parent` (see [Single-Symbol Ingestion](#single-symbol-ingestion))
+and compare it against the continuous series — Databento's `instrument_id`
+column in the resulting file distinguishes which contract each row came from.
 
 ---
 
@@ -251,9 +381,9 @@ from pathlib import Path
 from snippy_scales.data.config import load_config
 from snippy_scales.data.ingest import ingest_from_config, upsert_symbol
 
-# Config-based batch ingestion
+# Config-based batch ingestion (schemas × symbols, all expanded)
 cfg = load_config(Path("configs/databento.yaml"))
-results = ingest_from_config(cfg)
+rows = ingest_from_config(cfg)
 
 # Single symbol upsert
 path = upsert_symbol(
@@ -262,6 +392,16 @@ path = upsert_symbol(
     schema="ohlcv-1d",
     start="2020-01-01",
     end="2024-12-31",
+)
+
+# Every individual ES contract active in the range, via Databento parent symbology
+path = upsert_symbol(
+    dataset="GLBX.MDP3",
+    symbol="ES.FUT",
+    schema="ohlcv-1d",
+    start="2020-01-01",
+    end="2024-12-31",
+    stype_in="parent",
 )
 ```
 
@@ -273,6 +413,8 @@ path = upsert_symbol(
     options:
       members:
         - frequency_to_schema
+        - resolve_schema
+        - is_tick_schema
         - AssetClassConfig
         - IngestConfig
         - load_config
@@ -282,4 +424,15 @@ path = upsert_symbol(
       members:
         - upsert_symbol
         - ingest_from_config
+        - estimate_cost
         - load_bars
+
+::: snippy_scales.data.tick
+    options:
+      members:
+        - covered_days
+        - missing_days
+        - estimate_tick_cost
+        - TickCostEstimate
+        - upsert_ticks
+        - load_ticks

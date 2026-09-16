@@ -35,20 +35,23 @@ on incremental runs.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
 
+from snippy_scales.data.config import is_tick_schema, resolve_schema
+from snippy_scales.data.paths import RAW_DIR
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pandas as pd
 
     from snippy_scales.data.config import VALID_STYPES, IngestConfig
 
 logger = logging.getLogger(__name__)
-
-RAW_DIR = Path("data/raw")
 
 
 # ---------------------------------------------------------------------------
@@ -204,70 +207,115 @@ def upsert_symbol(
     return out_path
 
 
+@dataclass(frozen=True)
+class IngestRow:
+    """One row of a config-driven batch ingestion result.
+
+    Attributes:
+        asset_class: Asset-class label the item belongs to.
+        schema: Resolved Databento schema name.
+        symbol: Instrument symbol ingested, as listed in the config.
+        succeeded: Whether ingestion completed without error.
+        detail: Human-readable outcome (path written, day count, or error).
+    """
+
+    asset_class: str
+    schema: str
+    symbol: str
+    succeeded: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class CostRow:
+    """One row of a config-driven batch cost estimate.
+
+    Attributes:
+        asset_class: Asset-class label the item belongs to.
+        schema: Resolved Databento schema name.
+        symbol: Instrument symbol the estimate applies to.
+        cost_usd: Estimated cost in US dollars, or ``NaN`` if estimation failed.
+    """
+
+    asset_class: str
+    schema: str
+    symbol: str
+    cost_usd: float
+
+
 def ingest_from_config(
     config: IngestConfig,
     *,
-    frequency_override: str | None = None,
+    schema_override: str | None = None,
     output_dir: Path = RAW_DIR,
-) -> dict[str, Path]:
-    """Batch-ingest all symbols defined in a :class:`~snippy_scales.data.config.IngestConfig`.
+) -> list[IngestRow]:
+    """Batch-ingest every symbol across every requested schema in a config.
 
-    Iterates over every symbol in every asset class and calls
-    :func:`upsert_symbol` for each one.  A ``frequency_override`` (from the
-    ``--frequency`` CLI flag) takes precedence over the value in the config
-    file.
+    Each asset class's ``symbols`` are ingested as-is — including Databento
+    parent symbology (e.g. ``"ES.FUT"`` with ``stype_in: parent``), which
+    Databento itself expands to every individual outright contract in a
+    single request. Each resolved schema is routed to the bar
+    (:func:`upsert_symbol`) or event-level
+    (:func:`snippy_scales.data.tick.upsert_ticks`) ingestion path via
+    :func:`~snippy_scales.data.config.is_tick_schema`.
 
     Args:
         config: Validated ingestion configuration.
-        frequency_override: Optional frequency string (e.g. ``"1h"``) that
-            overrides ``config.tick_frequency``.  Useful when the same config
-            file is used at different resolutions from the command line.
-        output_dir: Root directory for raw Parquet files.
+        schema_override: Optional schema string (bar alias or tick schema
+            name) that restricts ingestion to a single schema instead of the
+            full ``config.schemas`` list.
+        output_dir: Root directory for raw data.
 
     Returns:
-        Mapping of symbol → path for every successfully ingested file.
+        One :class:`IngestRow` per ``(asset class, schema, symbol)`` triple.
 
     Raises:
-        ValueError: If *frequency_override* is not a recognised frequency.
+        ValueError: If *schema_override* is not a recognised schema.
     """
-    from snippy_scales.data.config import frequency_to_schema  # noqa: PLC0415
-
-    if frequency_override is not None:
-        schema = frequency_to_schema(frequency_override)
-    else:
-        schema = config.schema
-
     import datetime  # noqa: PLC0415
 
+    from snippy_scales.data.tick import upsert_ticks  # noqa: PLC0415
+
+    schemas = [resolve_schema(schema_override)] if schema_override else config.resolved_schemas
     end = config.end or datetime.date.today().isoformat()
+    stype_in = config.stype_in or "raw_symbol"
 
-    results: dict[str, Path] = {}
-    symbols = config.all_symbols
+    rows: list[IngestRow] = []
 
-    logger.info(
-        "Starting ingestion of %d symbol(s) [%s / %s].",
-        len(symbols),
-        config.dataset,
-        schema,
-    )
+    for class_name, ac in config.asset_classes.items():
+        for schema in schemas:
+            for symbol in ac.symbols:
+                try:
+                    if is_tick_schema(schema):
+                        written = upsert_ticks(
+                            dataset=config.dataset,
+                            symbol=symbol,
+                            schema=schema,
+                            start=config.start,
+                            end=end,
+                            output_dir=output_dir,
+                            stype_in=stype_in,
+                        )
+                        detail = f"{len(written)} day(s) written"
+                    else:
+                        path = upsert_symbol(
+                            dataset=config.dataset,
+                            symbol=symbol,
+                            schema=schema,
+                            start=config.start,
+                            end=end,
+                            output_dir=output_dir,
+                            stype_in=stype_in,
+                        )
+                        detail = str(path)
+                    rows.append(IngestRow(class_name, schema, symbol, True, detail))
+                except Exception as exc:
+                    logger.exception("Failed to ingest %s (%s) — skipping.", symbol, schema)
+                    rows.append(IngestRow(class_name, schema, symbol, False, str(exc)))
 
-    for symbol in symbols:
-        try:
-            path = upsert_symbol(
-                dataset=config.dataset,
-                symbol=symbol,
-                schema=schema,
-                start=config.start,
-                end=end,
-                output_dir=output_dir,
-                stype_in=config.stype_in or "raw_symbol",
-            )
-            results[symbol] = path
-        except Exception:
-            logger.exception("Failed to ingest symbol %s — skipping.", symbol)
-
-    logger.info("Ingestion complete. %d/%d symbols succeeded.", len(results), len(symbols))
-    return results
+    succeeded = sum(1 for row in rows if row.succeeded)
+    logger.info("Ingestion complete. %d/%d item(s) succeeded.", succeeded, len(rows))
+    return rows
 
 
 def estimate_cost(
@@ -329,59 +377,79 @@ def estimate_cost(
 def estimate_costs_from_config(
     config: IngestConfig,
     *,
-    frequency_override: str | None = None,
+    schema_override: str | None = None,
     output_dir: Path = RAW_DIR,
-) -> dict[str, float]:
-    """Estimate download costs for every symbol in a config.
+) -> list[CostRow]:
+    """Estimate download costs for every symbol across every requested schema.
 
-    Wraps :func:`estimate_cost` for each symbol defined in *config*.
+    Mirrors :func:`ingest_from_config`'s bar/tick routing, but calls
+    :func:`estimate_cost` / :func:`snippy_scales.data.tick.estimate_tick_cost`
+    instead of downloading.
 
-    Per-symbol costs respect upsert state: symbols whose local data already
-    covers the requested range contribute ``0.0``.  Symbols where the
-    Databento metadata call fails contribute ``float('nan')`` so the caller
-    can surface a warning without aborting the entire estimate.
+    Per-item costs respect upsert state: items whose local data already
+    covers the requested range contribute ``0.0``. Items where the Databento
+    metadata call fails contribute ``float('nan')`` so the caller can surface
+    a warning without aborting the entire estimate.
 
     Args:
         config: Validated ingestion configuration.
-        frequency_override: Optional frequency string that overrides
-            ``config.tick_frequency`` (mirrors :func:`ingest_from_config`).
-        output_dir: Root directory for raw Parquet files.
+        schema_override: Optional schema string that restricts estimation to
+            a single schema instead of the full ``config.schemas`` list.
+        output_dir: Root directory for raw data.
 
     Returns:
-        Mapping of symbol → estimated cost in USD.
+        One :class:`CostRow` per ``(asset class, schema, symbol)`` triple.
     """
     import datetime  # noqa: PLC0415
 
-    from snippy_scales.data.config import frequency_to_schema  # noqa: PLC0415
+    from snippy_scales.data.tick import estimate_tick_cost  # noqa: PLC0415
 
-    schema = (
-        frequency_to_schema(frequency_override) if frequency_override is not None else config.schema
-    )
+    schemas = [resolve_schema(schema_override)] if schema_override else config.resolved_schemas
     end = config.end or datetime.date.today().isoformat()
+    stype_in = config.stype_in or "raw_symbol"
 
-    costs: dict[str, float] = {}
-    for symbol in config.all_symbols:
-        try:
-            costs[symbol] = estimate_cost(
-                dataset=config.dataset,
-                symbol=symbol,
-                schema=schema,
-                start=config.start,
-                end=end,
-                output_dir=output_dir,
-                stype_in=config.stype_in or "raw_symbol",
-            )
-        except Exception:
-            logger.warning("Could not estimate cost for %s — recorded as NaN.", symbol)
-            costs[symbol] = float("nan")
-    return costs
+    rows: list[CostRow] = []
+
+    for class_name, ac in config.asset_classes.items():
+        for schema in schemas:
+            for symbol in ac.symbols:
+                try:
+                    if is_tick_schema(schema):
+                        cost = estimate_tick_cost(
+                            dataset=config.dataset,
+                            symbol=symbol,
+                            schema=schema,
+                            start=config.start,
+                            end=end,
+                            output_dir=output_dir,
+                            stype_in=stype_in,
+                        ).cost_usd
+                    else:
+                        cost = estimate_cost(
+                            dataset=config.dataset,
+                            symbol=symbol,
+                            schema=schema,
+                            start=config.start,
+                            end=end,
+                            output_dir=output_dir,
+                            stype_in=stype_in,
+                        )
+                    rows.append(CostRow(class_name, schema, symbol, cost))
+                except Exception:
+                    logger.warning(
+                        "Could not estimate cost for %s (%s) — recorded as NaN.", symbol, schema
+                    )
+                    rows.append(CostRow(class_name, schema, symbol, float("nan")))
+
+    return rows
 
 
 def load_bars(symbol: str, schema: str, output_dir: Path = RAW_DIR) -> pl.DataFrame:
     """Load a stored bar file into a Polars DataFrame.
 
     Args:
-        symbol: Instrument symbol (e.g. ``"ES.c.0"``).
+        symbol: Instrument symbol (e.g. ``"ES.c.0"``, or ``"ES.FUT"`` if
+            ingested via Databento parent symbology).
         schema: Databento schema name (e.g. ``"ohlcv-1d"``).
         output_dir: Root directory for raw Parquet files.
 
