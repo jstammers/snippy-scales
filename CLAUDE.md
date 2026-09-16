@@ -35,15 +35,14 @@ Quick-start reference for AI agents and human contributors.
 │   │   │   ├── providers/      ← BarProvider Protocol + DatabentoProvider, AlpacaProvider
 │   │   │   ├── ratelimit.py    ← RateLimiter (used by AlpacaProvider)
 │   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
-│   │   │   ├── backfill.py     ← helpers behind scripts/pull_sp500_alpaca_1m.py
+│   │   │   ├── backfill.py     ← helpers behind `algo data backfill-sp500`
 │   │   │   └── tick.py         ← Event-level (Databento-only) ingestion
-│   │   └── cli/                ← Typer CLI (entry point: algo)
+│   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
+│   │       └── data.py         ← ingest, ingest-config, coverage, update-universe, backfill-sp500
 │   └── tests/
 ├── rust/                       ← Rust extension (algo-pyo3 → _algo_core)
-├── scripts/                    ← Standalone operational scripts (not part of the package)
-│   └── pull_sp500_alpaca_1m.py ← 5y 1m S&P-500-ever-members backfill from Alpaca
 ├── docs/                       ← MkDocs documentation
-├── configs/                    ← Ingestion configs (databento.yaml, alpaca.yaml)
+├── configs/                    ← Ingestion configs (databento.yaml, alpaca.yaml, alpaca_sp500_1m.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
 └── pyproject.toml
 ```

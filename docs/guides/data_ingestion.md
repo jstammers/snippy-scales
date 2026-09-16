@@ -322,38 +322,62 @@ Alpaca-specific behaviour, implemented in
 - **No event-level schemas.** `schemas: [trades]` etc. in an Alpaca config
   fails validation immediately; use a Databento config for tick data.
 
-### S&P 500 1-minute backfill script
+### S&P 500 universe
 
-`scripts/pull_sp500_alpaca_1m.py` pulls N years (default 5) of 1-minute bars
-for every ticker that was an S&P 500 constituent at *any point* in that
-window — not just today's 500 — using
-`snippy_scales.data.universe.sp500_ever_members` (sourced from Wikipedia) to
-avoid survivorship bias:
+`algo data update-universe` resolves and caches "every ticker that was an
+S&P 500 constituent at any point in the last N years" (default 5) — not just
+today's 500 — via `snippy_scales.data.universe.sp500_ever_members` (sourced
+from Wikipedia), so a dataset built from it isn't survivorship-biased:
+
+```bash
+algo data update-universe                              # -> data/universe/sp500_ever_members.txt
+algo data update-universe --years 10 --output data/universe/sp500_10y.txt
+```
+
+The output is a plain symbols file, one ticker per line — usable directly as
+an `asset_classes.<label>.symbols_file` in any ingest config (see
+`configs/alpaca_sp500_1m.yaml`).
+
+!!! note "Known limitation: pure ticker renames"
+    A ticker rename with no index membership change (e.g. FB → META) doesn't
+    appear as an addition/removal in Wikipedia's changes table, so history
+    under the old ticker isn't picked up automatically.
+
+### S&P 500 1-minute backfill
+
+`algo data backfill-sp500` combines `update-universe` with the Alpaca
+ingestion path above, purpose-built for a large (~500+ symbol), long-running
+1-minute backfill: it tracks a per-symbol CSV manifest and supports
+`--retry-failed`, which plain `ingest-config` does not.
 
 ```bash
 # Preview: universe size, estimated request count and runtime — no download.
-uv run python scripts/pull_sp500_alpaca_1m.py --dry-run
+algo data backfill-sp500 --dry-run
 
 # Run it. Interruptible and resumable — re-running only fetches what's still
 # missing (per-symbol upsert semantics), and a per-symbol CSV manifest
 # (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
-uv run python scripts/pull_sp500_alpaca_1m.py
+algo data backfill-sp500
 
 # Retry only the symbols that failed last time.
-uv run python scripts/pull_sp500_alpaca_1m.py --retry-failed
+algo data backfill-sp500 --retry-failed
 ```
 
 The resolved universe is cached to `data/universe/sp500_ever_members.txt` so
 repeat runs (and `--retry-failed`) don't re-query Wikipedia and stay
 reproducible; pass `--refresh-universe` to re-resolve it. Run
-`--help` for every option (years, feed, adjustment, rate limit, worker count,
-output/manifest/cache paths).
+`algo data backfill-sp500 --help` for every option (years, feed, adjustment,
+rate limit, worker count, output/manifest/cache paths) — or `just
+backfill-sp500-dry-run` / `just backfill-sp500` for the `just`-wrapped forms.
 
-!!! note "Known limitation: pure ticker renames"
-    A ticker rename with no index membership change (e.g. FB → META) doesn't
-    appear as an addition/removal in Wikipedia's changes table, so history
-    under the old ticker isn't picked up automatically. Check the script's
-    manifest for symbols with zero rows if this matters for your research.
+The config-driven equivalent — useful if you want the plan/confirm/dry-run
+flow `ingest-config` already has, without the manifest — is
+`configs/alpaca_sp500_1m.yaml`:
+
+```bash
+algo data update-universe
+algo data ingest-config configs/alpaca_sp500_1m.yaml
+```
 
 ---
 

@@ -118,13 +118,17 @@ clean:
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
+# Resolve and cache the S&P 500 ever-members universe (used by symbols_file configs)
+update-universe *ARGS:
+    uv run algo data update-universe {{ARGS}}
+
 # Preview the S&P 500 1-minute Alpaca backfill plan (no download)
 backfill-sp500-dry-run:
-    uv run python scripts/pull_sp500_alpaca_1m.py --dry-run
+    uv run algo data backfill-sp500 --dry-run
 
 # Run the S&P 500 1-minute Alpaca backfill (ALPACA_API_KEY/SECRET_KEY required)
 backfill-sp500 *ARGS:
-    uv run python scripts/pull_sp500_alpaca_1m.py {{ARGS}}
+    uv run algo data backfill-sp500 {{ARGS}}
 
 # ── Documentation ────────────────────────────────────────────────────────────
 

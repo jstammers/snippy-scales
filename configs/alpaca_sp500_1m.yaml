@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# S&P 500 — 5 years of 1-minute bars from Alpaca
+# ---------------------------------------------------------------------------
+# This is the config-driven equivalent of `algo data backfill-sp500` — use
+# whichever fits: `backfill-sp500` also tracks a per-symbol CSV manifest and
+# supports `--retry-failed`, which plain `ingest-config` does not.
+#
+# 1. Generate the symbols file (fetches Wikipedia's S&P 500 membership
+#    history — every ticker that was ever a constituent in the window below,
+#    not just today's 500, so the dataset isn't survivorship-biased):
+#      algo data update-universe --years 5 --output data/universe/sp500_ever_members.txt
+#
+# 2. Run it:
+#      algo data ingest-config configs/alpaca_sp500_1m.yaml
+#      algo data ingest-config configs/alpaca_sp500_1m.yaml --dry-run
+#
+# Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in the environment — never put
+# credentials in this file. Free (Basic) tier: 200 historical API calls/min,
+# data since 2016, most recent 15 minutes withheld.
+# ---------------------------------------------------------------------------
+
+provider: "alpaca"
+schemas: ["1m"]
+
+# `start` is a fixed date, not "5 years ago" — re-run `update-universe` and
+# bump this when you want to roll the window forward.
+start: "2021-09-16"
+# end: omit -> defaults to today
+
+alpaca:
+  feed: "sip"              # all US exchanges, included in the free historical tier
+  adjustment: "all"         # avoids fake price jumps at split dates over 5y of 1m bars
+  rate_limit_per_min: 190   # stay under the free tier's 200/min cap
+  max_workers: 8            # symbols fetched concurrently (rate limiter bounds throughput)
+
+asset_classes:
+  sp500:
+    symbols_file: ../data/universe/sp500_ever_members.txt
