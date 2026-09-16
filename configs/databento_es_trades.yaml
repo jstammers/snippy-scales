@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# Databento tick-level ingestion — ES.c.0 trades (3 months)
+# ---------------------------------------------------------------------------
+# Kept separate from configs/databento.yaml because tick schemas need a much
+# narrower date range than the daily-bar universe, and a config's `schemas`
+# list applies to every symbol in it — mixing a 15-year daily-bar pull with
+# a 3-month tick pull in one file would try to fetch `trades` for every
+# other symbol too. See databento.yaml's own comment for the same reasoning
+# applied to ES.FUT parent symbology.
+#
+#   algo data ingest-config configs/databento_es_trades.yaml
+#   algo data ingest-config configs/databento_es_trades.yaml --dry-run
+#
+# `start`/`end` are pinned (not "last 3 months", which would drift wider
+# every day this file exists). Assumed window: today back 90 days as of
+# 2026-09-16, since the exact original window wasn't recorded anywhere —
+# adjust to match reality if you know the real one, and re-run the cost
+# estimate (`--dry-run`) after changing it.
+# ---------------------------------------------------------------------------
+
+instrument_type: "futures"
+
+dataset: "GLBX.MDP3"
+schemas: ["trades"]
+
+start: "2026-06-18"
+end: "2026-09-16"
+
+stype_in: "continuous"
+
+asset_classes:
+  equity_index:
+    symbols: [ES.c.0]

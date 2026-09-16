@@ -17,6 +17,7 @@ Cargo.lock
 data/raw/
 data/derived/
 data/cache/
+data/universe/
 *.parquet
 *.dbn
 
