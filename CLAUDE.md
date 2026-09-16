@@ -69,7 +69,8 @@ it.
 │   └── tests/
 ├── rust/                       ← Rust extension (algo-pyo3 → _algo_core)
 ├── docs/                       ← MkDocs documentation
-├── configs/                    ← Ingestion configs (databento.yaml, alpaca.yaml, alpaca_sp500_1m.yaml)
+├── configs/                    ← Ingestion configs (databento.yaml, databento_es_trades.yaml,
+│                                  alpaca.yaml, alpaca_sp500_1m.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
 └── pyproject.toml
 ```
