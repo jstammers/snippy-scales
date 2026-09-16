@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# Alpaca ingestion configuration
+# ---------------------------------------------------------------------------
+# Pass this file to the CLI:
+#   algo data ingest-config configs/alpaca.yaml
+#   algo data ingest-config configs/alpaca.yaml --schema 1d
+#
+# Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in the environment — never put
+# credentials in this file. Free (Basic) tier: 200 historical API calls/min,
+# data since 2016, most recent 15 minutes withheld.
+#
+# Symbols are plain equity tickers (e.g. AAPL, BRK.B) — Alpaca has no
+# continuous-contract or parent-symbology notation, and only supports bar
+# schemas (no event-level 'trades'/'mbo' schemas).
+# ---------------------------------------------------------------------------
+
+provider: "alpaca"
+
+# Bar frequency aliases only — see docs/guides/data_ingestion.md#frequency-reference.
+schemas: ["1d"]
+
+# Historical pull range
+start: "2016-01-01"
+# end: "2026-09-15"  # Omit to default to today
+
+alpaca:
+  feed: "sip"              # "sip" (all US exchanges, free historical tier) or "iex"
+  adjustment: "all"         # raw / split / dividend / all — "all" avoids fake price
+                             # jumps at split dates in multi-year history
+  rate_limit_per_min: 190   # stay under the free tier's 200/min cap
+  max_workers: 4            # symbols fetched concurrently (rate limiter bounds throughput)
+
+# ---------------------------------------------------------------------------
+# Asset classes
+# `symbols` can be listed inline, loaded from `symbols_file` (one ticker per
+# line, '#' comments allowed), or both — see scripts/pull_sp500_alpaca_1m.py
+# for a large-universe example driven entirely by symbols_file.
+# ---------------------------------------------------------------------------
+asset_classes:
+
+  mega_cap_tech:
+    symbols:
+      - AAPL
+      - MSFT
+      - GOOGL
+      - AMZN
+      - NVDA
+      - META
+
+  dow_sample:
+    symbols:
+      - JPM
+      - JNJ
+      - PG
+      - BRK.B  # dot notation — same convention Wikipedia and Alpaca both use

@@ -1,7 +1,17 @@
 # Data Ingestion
 
-This guide covers how to pull futures bar data from [Databento](https://databento.com)
-into the local Parquet store used by the backtesting and research layers.
+This guide covers how to pull bar data into the local Parquet store used by the
+backtesting and research layers. Two providers are supported, selected per
+config via `provider:` (default `"databento"`):
+
+- **[Databento](https://databento.com)** — futures/CME Globex, paid, both bar
+  and event-level (tick) schemas.
+- **[Alpaca](https://alpaca.markets)** — US equities, free (Basic) historical
+  tier, bar schemas only. See [Alpaca (Free-Tier Stock Bars)](#alpaca-free-tier-stock-bars).
+
+Both providers write into the exact same layout and column schema (see
+[Storage Layout](#storage-layout)), so [`load_bars`](#loading-data-in-python)
+works identically regardless of which one fetched a given file.
 
 ---
 
@@ -13,7 +23,12 @@ into the local Parquet store used by the backtesting and research layers.
    ```bash
    export DATABENTO_API_KEY="db-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
    ```
-3. **Install project dependencies** (includes `databento` and `pyyaml`):
+3. **For Alpaca**, sign up at <https://alpaca.markets> and set:
+   ```bash
+   export ALPACA_API_KEY="..."
+   export ALPACA_SECRET_KEY="..."
+   ```
+4. **Install project dependencies** (includes `databento`, `alpaca-py`, and `pyyaml`):
    ```bash
    uv sync
    ```
@@ -186,12 +201,14 @@ asset_classes:
 
 | Field | Description |
 |---|---|
-| `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. |
+| `provider` | `"databento"` (default) or `"alpaca"`. Alpaca configs may not list event-level schemas. |
+| `dataset` | Databento dataset code. Use `GLBX.MDP3` for CME Globex. Ignored for Alpaca. |
 | `schemas` | List of bar aliases and/or event-level schema names to ingest (see [Frequency Reference](#frequency-reference)). Each is ingested for every symbol below. |
 | `start` | Earliest date to fetch (`YYYY-MM-DD`). |
 | `end` | Latest date to fetch. Omit to default to today. |
-| `stype_in` | Databento symbology type applied to every symbol in this config (e.g. `continuous`, `parent`). |
-| `asset_classes` | Mapping of human-readable labels to `symbols` — explicit Databento identifiers (continuous, raw, or parent notation; see [Symbol Format](#symbol-format)). |
+| `stype_in` | Databento symbology type applied to every symbol in this config (e.g. `continuous`, `parent`). Ignored for Alpaca. |
+| `alpaca` | Alpaca-specific options (`feed`, `adjustment`, `rate_limit_per_min`, `max_workers`) — see [Alpaca (Free-Tier Stock Bars)](#alpaca-free-tier-stock-bars). Only meaningful when `provider: alpaca`. |
+| `asset_classes` | Mapping of human-readable labels to `symbols` (and/or `symbols_file` — a text file, one symbol per line, useful for large universes) — explicit identifiers per provider (Databento continuous/raw/parent notation, or plain Alpaca tickers; see [Symbol Format](#symbol-format)). |
 
 ### 2. Run the ingestion
 
@@ -260,6 +277,83 @@ algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
 
 The resulting file is written under `data/raw/ES.FUT/ohlcv-1d.parquet` and
 distinguishes contracts via Databento's `instrument_id` column.
+
+---
+
+## Alpaca (Free-Tier Stock Bars)
+
+Alpaca is a second bar provider, aimed at equities. Set `provider: alpaca` in
+a config (`configs/alpaca.yaml` is a starting point) and run it exactly like a
+Databento config:
+
+```bash
+algo data ingest-config configs/alpaca.yaml
+algo data ingest-config configs/alpaca.yaml --dry-run
+```
+
+Since Alpaca's historical data has no per-request charge — only a rate limit —
+`ingest-config` skips the Databento cost-estimation step entirely for an
+Alpaca config: the plan table shows "free" instead of a dollar amount, and no
+network call is made to build it.
+
+Alpaca-specific behaviour, implemented in
+`snippy_scales.data.providers.alpaca.AlpacaProvider`:
+
+- **Rate limiting.** The `alpaca-py` SDK already paginates and retries on
+  429/5xx, but only *reacts* to a 429 after it happens. A shared
+  `snippy_scales.data.ratelimit.RateLimiter` sits in front of every HTTP call
+  (including every page within one symbol's request) so a run stays under
+  `alpaca.rate_limit_per_min` (default 190, free-tier cap is 200) in the
+  first place. `alpaca.max_workers` controls how many symbols are fetched
+  concurrently — throughput is bounded by the shared rate limiter, not by
+  thread count, so raising it mainly reduces idle time between a symbol's
+  pages.
+- **Resume granularity.** Unlike Databento's day-based resume, Alpaca resumes
+  from the exact timestamp after the last stored bar. Extended-hours bars can
+  run past midnight UTC, so "the next calendar day" would silently skip the
+  rest of a session.
+- **Daily bars.** Normalised to `00:00 UTC` on the session date (Alpaca
+  stamps them at session-open in US/Eastern) so they line up with Databento's
+  convention, e.g. if a config or a query mixes both providers.
+- **Adjustment.** Default `adjustment: all` (split + dividend) avoids fake
+  price jumps at split dates across multi-year 1-minute history. Re-run with
+  `--refresh` semantics if you need to re-baseline after a new split (not yet
+  automatic — see the module docstring).
+- **No event-level schemas.** `schemas: [trades]` etc. in an Alpaca config
+  fails validation immediately; use a Databento config for tick data.
+
+### S&P 500 1-minute backfill script
+
+`scripts/pull_sp500_alpaca_1m.py` pulls N years (default 5) of 1-minute bars
+for every ticker that was an S&P 500 constituent at *any point* in that
+window — not just today's 500 — using
+`snippy_scales.data.universe.sp500_ever_members` (sourced from Wikipedia) to
+avoid survivorship bias:
+
+```bash
+# Preview: universe size, estimated request count and runtime — no download.
+uv run python scripts/pull_sp500_alpaca_1m.py --dry-run
+
+# Run it. Interruptible and resumable — re-running only fetches what's still
+# missing (per-symbol upsert semantics), and a per-symbol CSV manifest
+# (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
+uv run python scripts/pull_sp500_alpaca_1m.py
+
+# Retry only the symbols that failed last time.
+uv run python scripts/pull_sp500_alpaca_1m.py --retry-failed
+```
+
+The resolved universe is cached to `data/universe/sp500_ever_members.txt` so
+repeat runs (and `--retry-failed`) don't re-query Wikipedia and stay
+reproducible; pass `--refresh-universe` to re-resolve it. Run
+`--help` for every option (years, feed, adjustment, rate limit, worker count,
+output/manifest/cache paths).
+
+!!! note "Known limitation: pure ticker renames"
+    A ticker rename with no index membership change (e.g. FB → META) doesn't
+    appear as an addition/removal in Wikipedia's changes table, so history
+    under the old ticker isn't picked up automatically. Check the script's
+    manifest for symbols with zero rows if this matters for your research.
 
 ---
 
@@ -405,6 +499,30 @@ path = upsert_symbol(
 )
 ```
 
+Or against Alpaca directly, without a config file — `upsert_bars` is the
+provider-agnostic entry point both `upsert_symbol` and the Alpaca path use
+internally:
+
+```python
+from snippy_scales.data.ingest import upsert_bars
+from snippy_scales.data.providers.alpaca import AlpacaProvider
+
+# Reads ALPACA_API_KEY / ALPACA_SECRET_KEY from the environment.
+provider = AlpacaProvider(rate_limit_per_min=190)
+path = upsert_bars(
+    provider=provider,
+    symbol="AAPL",
+    schema="ohlcv-1m",
+    start="2024-01-01",
+    end="2024-02-01",
+)
+
+# load_bars() works identically regardless of which provider wrote the file.
+from snippy_scales.data.ingest import load_bars
+
+df = load_bars("AAPL", "ohlcv-1m")
+```
+
 ---
 
 ## API Reference
@@ -416,16 +534,47 @@ path = upsert_symbol(
         - resolve_schema
         - is_tick_schema
         - AssetClassConfig
+        - AlpacaConfig
         - IngestConfig
         - load_config
 
 ::: snippy_scales.data.ingest
     options:
       members:
+        - upsert_bars
         - upsert_symbol
         - ingest_from_config
         - estimate_cost
+        - is_range_cached
         - load_bars
+
+::: snippy_scales.data.schema
+    options:
+      members:
+        - conform_bars
+        - BAR_SCHEMA_COLUMNS
+
+::: snippy_scales.data.providers.base
+    options:
+      members:
+        - BarProvider
+
+::: snippy_scales.data.providers.alpaca
+    options:
+      members:
+        - AlpacaProvider
+
+::: snippy_scales.data.ratelimit
+    options:
+      members:
+        - RateLimiter
+
+::: snippy_scales.data.universe
+    options:
+      members:
+        - sp500_ever_members
+        - fetch_current_constituents
+        - fetch_membership_changes
 
 ::: snippy_scales.data.tick
     options:

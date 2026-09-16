@@ -28,11 +28,22 @@ Quick-start reference for AI agents and human contributors.
 │   │   │   └── tearsheet.py    ← TearsheetGenerator
 │   │   ├── research/           ← Feature engineering helpers
 │   │   ├── strategies/         ← Concrete strategy implementations
-│   │   ├── data/               ← Data ingestion (Databento)
+│   │   ├── data/               ← Data ingestion (Databento futures + Alpaca equities)
+│   │   │   ├── config.py       ← IngestConfig, AlpacaConfig, AssetClassConfig, load_config
+│   │   │   ├── ingest.py       ← upsert_bars (provider-agnostic), load_bars, ingest_from_config
+│   │   │   ├── schema.py       ← BAR_SCHEMA_COLUMNS, conform_bars — shared Parquet layout
+│   │   │   ├── providers/      ← BarProvider Protocol + DatabentoProvider, AlpacaProvider
+│   │   │   ├── ratelimit.py    ← RateLimiter (used by AlpacaProvider)
+│   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
+│   │   │   ├── backfill.py     ← helpers behind scripts/pull_sp500_alpaca_1m.py
+│   │   │   └── tick.py         ← Event-level (Databento-only) ingestion
 │   │   └── cli/                ← Typer CLI (entry point: algo)
 │   └── tests/
 ├── rust/                       ← Rust extension (algo-pyo3 → _algo_core)
+├── scripts/                    ← Standalone operational scripts (not part of the package)
+│   └── pull_sp500_alpaca_1m.py ← 5y 1m S&P-500-ever-members backfill from Alpaca
 ├── docs/                       ← MkDocs documentation
+├── configs/                    ← Ingestion configs (databento.yaml, alpaca.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
 └── pyproject.toml
 ```

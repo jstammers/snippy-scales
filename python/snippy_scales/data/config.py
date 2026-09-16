@@ -19,10 +19,8 @@ event-level schema names (``"trades"``) are valid entries.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path  # noqa: TC003 — pydantic needs this at runtime (symbols_file: Path)
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -151,25 +149,81 @@ def resolve_schema(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Providers that can supply bar data. Only Databento supports event-level
+#: (tick) schemas — a config with ``provider: alpaca`` may not list one.
+VALID_PROVIDERS = Literal["databento", "alpaca"]
+
+
 class AssetClassConfig(BaseModel):
-    """Configuration for a single asset class grouping."""
+    """Configuration for a single asset class grouping.
+
+    Symbols can be listed inline, read from a file, or both (the two lists
+    are concatenated, inline entries first, duplicates dropped). A file is
+    the practical option for large universes — e.g. several hundred S&P 500
+    tickers — that don't belong hand-typed into a YAML list.
+    """
 
     symbols: list[str] = Field(
-        ...,
+        default_factory=list,
         description=(
-            "List of Databento symbol identifiers.  Use continuous-contract "
+            "List of symbol identifiers. For Databento: continuous-contract "
             "notation (e.g. ``ES.c.0``), individual expiries (``ESZ2024``), or "
             "parent symbology (e.g. ``ES.FUT`` with ``stype_in: parent``) to "
-            "pull every individual outright contract in one request."
+            "pull every individual outright contract in one request. For "
+            "Alpaca: plain equity tickers (e.g. ``AAPL``, ``BRK.B``)."
+        ),
+    )
+    symbols_file: Path | None = Field(
+        default=None,
+        description=(
+            "Optional path to a text file of symbols, one per line ('#' "
+            "comments and blank lines ignored). Resolved relative to the "
+            "config file's directory by load_config(). Merged with `symbols`."
         ),
     )
 
+    @model_validator(mode="after")
+    def _require_some_symbol_source(self) -> AssetClassConfig:
+        """Ensure at least one of symbols/symbols_file was given."""
+        if not self.symbols and self.symbols_file is None:
+            raise ValueError("AssetClassConfig needs `symbols` and/or `symbols_file`.")
+        return self
 
-class IngestConfig(BaseModel):
-    """Top-level configuration for a Databento ingestion run.
+
+class AlpacaConfig(BaseModel):
+    """Alpaca-specific ingestion options, used when ``IngestConfig.provider == "alpaca"``.
 
     Attributes:
-        dataset: Databento dataset code (default ``"GLBX.MDP3"`` for CME Globex).
+        feed: Data feed to request. ``"sip"`` covers all US exchanges and is
+            included in the free (Basic) historical data tier; ``"iex"`` is
+            IEX-only (thinner, but sometimes preferred for consistency with a
+            live-trading IEX feed).
+        adjustment: Corporate-action adjustment Alpaca applies before
+            returning bars. ``"all"`` (split + dividend) avoids spurious
+            price jumps at split dates in multi-year 1-minute history.
+        rate_limit_per_min: Historical API calls allowed per minute. The free
+            tier allows 200; the default leaves headroom for jitter/retries.
+        max_workers: Symbols fetched concurrently. Safe to raise well above
+            the historical intuition for I/O-bound work — the shared
+            :class:`~snippy_scales.data.ratelimit.RateLimiter` is what
+            actually bounds request throughput, not thread count.
+    """
+
+    feed: Literal["iex", "sip"] = "sip"
+    adjustment: Literal["raw", "split", "dividend", "all"] = "all"
+    rate_limit_per_min: int = Field(default=190, gt=0, le=200)
+    max_workers: int = Field(default=4, gt=0)
+
+
+class IngestConfig(BaseModel):
+    """Top-level configuration for a bar/tick ingestion run.
+
+    Attributes:
+        provider: Which data source to use — ``"databento"`` (default) or
+            ``"alpaca"``. Alpaca only supports bar schemas, never tick
+            schemas.
+        dataset: Databento dataset code (default ``"GLBX.MDP3"``). Ignored
+            when ``provider == "alpaca"``.
         schemas: Bar frequency aliases and/or event-level schema names to
             ingest (e.g. ``["1d", "trades"]``).  Overridable at runtime via
             the ``--schema`` CLI flag (which runs a single schema instead of
@@ -177,14 +231,19 @@ class IngestConfig(BaseModel):
         start: Earliest date to fetch (``YYYY-MM-DD``).
         end: Latest date to fetch (``YYYY-MM-DD``).  Defaults to today when
             ``None``.
-        stype_in:
+        stype_in: Databento symbology type. Ignored for Alpaca.
+        alpaca: Alpaca-specific options. Ignored (and optional) for Databento.
         asset_classes: Mapping of arbitrary asset-class labels to their
             :class:`AssetClassConfig`.
     """
 
+    provider: VALID_PROVIDERS = Field(
+        default="databento",
+        description="Bar-data source: 'databento' or 'alpaca'.",
+    )
     dataset: str = Field(
         default="GLBX.MDP3",
-        description="Databento dataset identifier (e.g. 'GLBX.MDP3').",
+        description="Databento dataset identifier (e.g. 'GLBX.MDP3'). Ignored for Alpaca.",
     )
     schemas: list[str] = Field(
         default_factory=lambda: ["1d"],
@@ -208,8 +267,14 @@ class IngestConfig(BaseModel):
     stype_in: VALID_STYPES | None = Field(
         default=None,
         description=(
-            "Optional Databento symbology type for API calls (e.g. 'raw_symbol', 'parent')"
+            "Optional Databento symbology type for API calls (e.g. 'raw_symbol', 'parent'). "
+            "Ignored for Alpaca."
         ),
+    )
+
+    alpaca: AlpacaConfig | None = Field(
+        default=None,
+        description="Alpaca-specific options. Only meaningful when provider == 'alpaca'.",
     )
 
     asset_classes: dict[str, AssetClassConfig] = Field(
@@ -219,9 +284,14 @@ class IngestConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_schemas(self) -> IngestConfig:
-        """Ensure every entry in schemas resolves to a known Databento schema."""
+        """Ensure every schema resolves, and Alpaca configs list only bar schemas."""
         for entry in self.schemas:
-            resolve_schema(entry)  # raises ValueError if unknown
+            resolved = resolve_schema(entry)  # raises ValueError if unknown
+            if self.provider == "alpaca" and is_tick_schema(resolved):
+                raise ValueError(
+                    f"provider='alpaca' does not support event-level schema {resolved!r} "
+                    "— Alpaca is bar-data only. Use provider='databento' for tick schemas."
+                )
         return self
 
     @property
@@ -233,6 +303,11 @@ class IngestConfig(BaseModel):
     def all_symbols(self) -> list[str]:
         """Flat list of every symbol across all asset classes (order preserved)."""
         return [sym for ac in self.asset_classes.values() for sym in ac.symbols]
+
+    @property
+    def alpaca_options(self) -> AlpacaConfig:
+        """Effective Alpaca options — :attr:`alpaca` if set, otherwise defaults."""
+        return self.alpaca or AlpacaConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -262,4 +337,48 @@ def load_config(path: Path) -> IngestConfig:
         raise FileNotFoundError(f"Config file not found: {path}")
 
     raw: dict[str, Any] = yaml.safe_load(path.read_text())
-    return IngestConfig.model_validate(raw)
+    return _resolve_symbols_files(IngestConfig.model_validate(raw), base_dir=path.parent)
+
+
+def _load_symbols_file(path: Path) -> list[str]:
+    """Read one symbol per line from *path*, ignoring blanks and '#' comments."""
+    if not path.exists():
+        raise FileNotFoundError(f"symbols_file not found: {path}")
+    symbols: list[str] = []
+    for line in path.read_text().splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if stripped:
+            symbols.append(stripped)
+    return symbols
+
+
+def _resolve_symbols_files(config: IngestConfig, *, base_dir: Path) -> IngestConfig:
+    """Merge each asset class's ``symbols_file`` (if any) into its ``symbols`` list.
+
+    Relative ``symbols_file`` paths are resolved against *base_dir* (the
+    config file's own directory), so a config and its companion symbols file
+    can be moved together without editing the path. Duplicates between the
+    inline list and the file are dropped, inline entries first.
+
+    Args:
+        config: A validated config, possibly with ``symbols_file`` entries.
+        base_dir: Directory relative paths are resolved against.
+
+    Returns:
+        *config* unchanged if no asset class sets ``symbols_file``, otherwise
+        a copy with every ``symbols`` list expanded.
+    """
+    if not any(ac.symbols_file is not None for ac in config.asset_classes.values()):
+        return config
+
+    resolved_classes: dict[str, AssetClassConfig] = {}
+    for label, ac in config.asset_classes.items():
+        if ac.symbols_file is None:
+            resolved_classes[label] = ac
+            continue
+        file_path = ac.symbols_file if ac.symbols_file.is_absolute() else base_dir / ac.symbols_file
+        file_symbols = _load_symbols_file(file_path)
+        merged = list(dict.fromkeys([*ac.symbols, *file_symbols]))  # dedup, preserve order
+        resolved_classes[label] = ac.model_copy(update={"symbols": merged})
+
+    return config.model_copy(update={"asset_classes": resolved_classes})

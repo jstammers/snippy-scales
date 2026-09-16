@@ -24,6 +24,9 @@ dependencies = [
     "altair>=6.2.2",
     "ipython>=9.17.1",
     "statsmodels>=0.15.0",
+    "alpaca-py>=0.44.0",
+    "requests>=2.32.5",
+    "beautifulsoup4>=4.14.3",
 ]
 
 [project.optional-dependencies]

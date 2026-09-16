@@ -17,14 +17,16 @@ app = typer.Typer(help="Data ingestion commands.")
 console = Console()
 
 
-def _fmt_cost(cost: float) -> str:
+def _fmt_cost(cost: float, *, free_provider: bool = False) -> str:
     """Format a cost float for display in the terminal.
 
-    Returns ``"cached"`` for zero-cost (already up to date), ``"N/A"`` for
-    NaN (estimation failed), and a dollar-formatted string otherwise.
+    Returns ``"free"`` for zero-cost when *free_provider* (Alpaca, which has
+    no per-request charge at all), otherwise ``"cached"`` (already up to
+    date), ``"N/A"`` for NaN (estimation failed), or a dollar-formatted
+    string.
     """
     if cost == 0.0:
-        return "[dim]cached[/dim]"
+        return "[dim]free[/dim]" if free_provider else "[dim]cached[/dim]"
     if math.isnan(cost):
         return "[yellow]N/A[/yellow]"
     return f"[bold yellow]${cost:.4f}[/bold yellow]"
@@ -345,11 +347,16 @@ def ingest_config(
 
     out_dir = output_dir or RAW_DIR
     effective_schemas = [resolve_schema(schema)] if schema else cfg.resolved_schemas
+    is_free_provider = cfg.provider == "alpaca"
+    source_label = (
+        f"alpaca, {cfg.alpaca_options.rate_limit_per_min}/min" if is_free_provider else cfg.dataset
+    )
 
-    # --- Cost estimation ---
+    # --- Plan (cost estimation is skipped for Alpaca — it's free, only rate-limited) ---
     console.print(
-        f"Estimating costs for [bold]{len(cfg.asset_classes)}[/] asset class(es) across "
-        f"{len(effective_schemas)} schema(s) [[dim]{cfg.dataset}[/]] …"
+        f"{'Building' if is_free_provider else 'Estimating costs for'} plan for "
+        f"[bold]{len(cfg.asset_classes)}[/] asset class(es) across "
+        f"{len(effective_schemas)} schema(s) [[dim]{source_label}[/]] …"
     )
     cost_rows = estimate_costs_from_config(cfg, schema_override=schema, output_dir=out_dir)
 
@@ -361,7 +368,8 @@ def ingest_config(
     table.add_column("Cost (USD)", justify="right")
 
     for row in cost_rows:
-        table.add_row(row.asset_class, row.schema, row.symbol, _fmt_cost(row.cost_usd))
+        cost_display = _fmt_cost(row.cost_usd, free_provider=is_free_provider)
+        table.add_row(row.asset_class, row.schema, row.symbol, cost_display)
 
     console.print(table)
 
@@ -369,15 +377,17 @@ def ingest_config(
     finite_costs = [row.cost_usd for row in cost_rows if not math.isnan(row.cost_usd)]
     has_nan = any(math.isnan(row.cost_usd) for row in cost_rows)
     total = sum(finite_costs)
-    total_str = f"[bold yellow]${total:.4f}[/bold yellow]"
-    if has_nan:
+    total_str = (
+        "[dim]free[/dim]" if is_free_provider else f"[bold yellow]${total:.4f}[/bold yellow]"
+    )
+    if has_nan and not is_free_provider:
         total_str += " [yellow]+ N/A[/yellow]"
 
-    cached_count = sum(1 for row in cost_rows if row.cost_usd == 0.0)
+    cached_count = sum(1 for row in cost_rows if row.cached)
     download_count = len(cost_rows) - cached_count
 
     console.print(
-        f"\n[dim]Dataset:[/] {cfg.dataset}  "
+        f"\n[dim]Source:[/] {source_label}  "
         f"[dim]Output:[/] {out_dir}\n"
         f"[dim]Items to download:[/] {download_count}  "
         f"[dim]Already cached:[/] {cached_count}  "
