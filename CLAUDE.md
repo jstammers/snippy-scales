@@ -4,6 +4,33 @@ Quick-start reference for AI agents and human contributors.
 
 ---
 
+## ⚠️ NEVER delete anything under `data/`
+
+`data/` (`data/raw/`, `data/derived/`, `data/cache/`, `data/universe/`, and
+their contents) is **git-ignored** — nothing under it is tracked, so nothing
+under it can be recovered with `git checkout`/`git reflog`/etc. once it's
+gone. It routinely holds locally-ingested market data that cost real money
+(Databento credit) or real wall-clock time (an hours-long Alpaca backfill) to
+build, and once deleted it is gone unless the user has an independent backup.
+
+**Never run `rm -rf data/`, `rm -rf data/raw/`, `shutil.rmtree(...)` on any
+`data/` subpath, or any other recursive delete under `data/` — not even to
+"clean up" a test artifact, not even if it looks empty, not even inside
+`/tmp`-adjacent throwaway logic that got a real path by mistake.** If you
+create a scratch file under `data/` for a test or a smoke check, delete that
+**exact file**, never the directory. If a whole directory genuinely needs
+clearing, list its contents first, confirm with the user what you're about
+to remove, and only delete the specific paths you created yourself.
+
+This rule exists because an agent working in this repo once ran `rm -rf
+data/` mid-session — while another process was live-writing a real Alpaca
+backfill into the same path — and destroyed pre-existing Databento futures
+history in the process. Treat every path under `data/` as irreplaceable
+unless you personally created it in the same command that's about to delete
+it.
+
+---
+
 ## Repository layout
 
 ```
