@@ -418,8 +418,9 @@ ingestion path above, purpose-built for a large (~500+ symbol), long-running
 algo data backfill-sp500 --dry-run
 
 # Run it. Interruptible and resumable — re-running only fetches what's still
-# missing (per-symbol upsert semantics), and a per-symbol CSV manifest
-# (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
+# missing (per-symbol upsert semantics, including a range widened since the
+# last run — e.g. --years 5 then later --years 10), and a per-symbol CSV
+# manifest (data/raw/_manifests/sp500_1m.csv by default) tracks pass/fail.
 algo data backfill-sp500
 
 # Retry only the symbols that failed last time.

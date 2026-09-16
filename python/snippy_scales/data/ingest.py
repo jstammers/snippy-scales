@@ -161,6 +161,62 @@ def _effective_start_for(
     return _effective_start(existing, requested_start)
 
 
+def _earliest_covered(existing: pl.DataFrame) -> str | None:
+    """Return the earliest date already covered by *existing*, or ``None`` if empty.
+
+    The counterpart to :func:`_effective_start`'s high-water mark: used to
+    detect when a *requested_start* predates the cached data (e.g. widening
+    ``--years 5`` to ``--years 10`` on a symbol already ingested) so that gap
+    gets backfilled instead of the whole request being skipped as "already
+    up to date."
+
+    Args:
+        existing: Polars DataFrame already on disk (must contain ``ts_event``).
+
+    Returns:
+        ISO date string for the earliest covered day, or ``None`` if
+        ``ts_event`` is absent or the column is empty.
+    """
+    if "ts_event" not in existing.columns:
+        return None
+    first_date = existing.select(pl.col("ts_event").cast(pl.Date).min()).item()
+    return first_date.isoformat() if first_date is not None else None
+
+
+def _earliest_covered_ts(existing: pl.DataFrame) -> str | None:
+    """Timestamp-granularity counterpart to :func:`_earliest_covered`."""
+    if "ts_event" not in existing.columns:
+        return None
+    first_ts = existing.select(pl.col("ts_event").min()).item()
+    return first_ts.isoformat() if first_ts is not None else None
+
+
+def _earliest_covered_for(
+    resume_granularity: ResumeGranularity, existing: pl.DataFrame
+) -> str | None:
+    """Dispatch to :func:`_earliest_covered` or :func:`_earliest_covered_ts` by granularity."""
+    if resume_granularity == "timestamp":
+        return _earliest_covered_ts(existing)
+    return _earliest_covered(existing)
+
+
+def _predates_coverage(requested_start: str, earliest_covered: str) -> bool:
+    """Whether *requested_start* falls on a calendar day before *earliest_covered*.
+
+    Deliberately compares calendar dates only (``value[:10]``), not full
+    precision: for timestamp-granularity providers, *requested_start* is
+    often a bare date (e.g. ``"2024-01-01"``) while *earliest_covered* is a
+    full ISO timestamp for the first stored bar that day (e.g.
+    ``"2024-01-01T20:45:00+00:00"``). Comparing those strings directly would
+    make a same-day request look like it "predates" coverage (a shorter ISO
+    prefix always sorts before a longer string starting with it), spuriously
+    re-fetching a day that's already on disk. A genuine widened-range
+    request (e.g. ``--years 5`` to ``--years 10``) differs by calendar days,
+    so day-level comparison is sufficient to catch it.
+    """
+    return requested_start[:10] < earliest_covered[:10]
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -200,6 +256,9 @@ def is_range_cached(
     if not out_path.exists():
         return False
     existing = pl.read_parquet(out_path)
+    earliest_covered = _earliest_covered_for(resume_granularity, existing)
+    if earliest_covered is not None and _predates_coverage(start, earliest_covered):
+        return False
     fetch_start = _effective_start_for(resume_granularity, existing, start) or start
     return fetch_start >= end
 
@@ -236,6 +295,7 @@ def upsert_bars(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing: pl.DataFrame | None = None
+    head_df: pl.DataFrame | None = None
     fetch_start = start
 
     if out_path.exists():
@@ -246,11 +306,29 @@ def upsert_bars(
             # fixed dtype (or by a provider with different native dtypes)
             # still concatenates cleanly instead of raising a SchemaError.
             existing = conform_bars(existing, symbol=symbol, schema=schema)
+
+        # A high-water-mark resume only ever looks *forward* from the latest
+        # stored bar. If the requested start now predates the earliest
+        # cached bar (e.g. widening --years 5 to --years 10 on a symbol
+        # that's already ingested), that gap must be fetched separately —
+        # otherwise it's silently skipped as "already up to date."
+        earliest_covered = _earliest_covered_for(provider.resume_granularity, existing)
+        if earliest_covered is not None and _predates_coverage(start, earliest_covered):
+            logger.info(
+                "[%s] Requested start %s predates cached data (from %s) — backfilling the gap.",
+                symbol,
+                start,
+                earliest_covered,
+            )
+            head_df = provider.fetch_bars(
+                symbol=symbol, schema=schema, start=start, end=earliest_covered
+            )
+
         computed = _effective_start_for(provider.resume_granularity, existing, start)
         if computed is not None:
             fetch_start = computed
 
-        if fetch_start >= end:
+        if fetch_start >= end and head_df is None:
             logger.info(
                 "[%s] Already up to date (coverage through %s). Skipping download.",
                 symbol,
@@ -258,25 +336,23 @@ def upsert_bars(
             )
             return out_path
 
-    logger.info("[%s/%s] Fetching %s  %s → %s", provider.name, symbol, schema, fetch_start, end)
+    tail_df: pl.DataFrame | None = None
+    if existing is None or fetch_start < end:
+        logger.info("[%s/%s] Fetching %s  %s → %s", provider.name, symbol, schema, fetch_start, end)
+        tail_df = provider.fetch_bars(symbol=symbol, schema=schema, start=fetch_start, end=end)
 
-    new_df = provider.fetch_bars(symbol=symbol, schema=schema, start=fetch_start, end=end)
-
-    if existing is not None and len(existing) > 0:
-        combined = (
-            pl.concat([existing, new_df], how="diagonal")
-            .unique(subset=["ts_event"], keep="first")
-            .sort("ts_event")
-        )
-        logger.info(
-            "[%s] Appended %d new rows (total %d).",
-            symbol,
-            len(new_df),
-            len(combined),
-        )
-    else:
-        combined = new_df.sort("ts_event")
-        logger.info("[%s] Wrote %d rows (initial load).", symbol, len(combined))
+    frames = [df for df in (existing, head_df, tail_df) if df is not None]
+    combined = (
+        pl.concat(frames, how="diagonal").unique(subset=["ts_event"], keep="first").sort("ts_event")
+    )
+    n_new = sum(len(df) for df in (head_df, tail_df) if df is not None)
+    logger.info(
+        "[%s] %s %d new row(s) (total %d).",
+        symbol,
+        "Appended" if existing is not None else "Wrote",
+        n_new,
+        len(combined),
+    )
 
     combined.write_parquet(out_path)
     return out_path
@@ -582,23 +658,40 @@ def estimate_cost(
 
     out_path = _symbol_path(symbol, schema, output_dir, instrument_type)
     fetch_start = start
+    head_start: str | None = None
+    head_end: str | None = None
 
     if out_path.exists():
         existing = pl.read_parquet(out_path)
+        earliest_covered = _earliest_covered(existing)
+        if earliest_covered is not None and _predates_coverage(start, earliest_covered):
+            head_start, head_end = start, earliest_covered
         computed = _effective_start(existing, start)
         if computed is not None:
             fetch_start = computed
-        if fetch_start >= end:
+        if fetch_start >= end and head_start is None:
             return 0.0
+
     client = db.Historical()
-    cost: float = client.metadata.get_cost(
-        dataset=dataset,
-        start=fetch_start,
-        end=end,
-        symbols=[symbol],
-        schema=schema,
-        stype_in=stype_in,
-    )
+    cost = 0.0
+    if head_start is not None and head_end is not None:
+        cost += client.metadata.get_cost(
+            dataset=dataset,
+            start=head_start,
+            end=head_end,
+            symbols=[symbol],
+            schema=schema,
+            stype_in=stype_in,
+        )
+    if fetch_start < end:
+        cost += client.metadata.get_cost(
+            dataset=dataset,
+            start=fetch_start,
+            end=end,
+            symbols=[symbol],
+            schema=schema,
+            stype_in=stype_in,
+        )
     return cost
 
 

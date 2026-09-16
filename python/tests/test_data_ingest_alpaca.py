@@ -109,6 +109,47 @@ class TestUpsertBarsTimestampResume:
         assert len(provider.calls) == 1  # no second fetch
 
 
+class TestUpsertBarsWideningRange:
+    def test_earlier_start_backfills_head_gap(self, tmp_path: Path) -> None:
+        """Regression: `algo data backfill-sp500 --years 10` after an earlier
+        `--years 5` run must backfill the newly-widened earlier range for
+        symbols that already have the most recent years cached, not skip
+        them as "already up to date" (which only checked forward from the
+        latest stored bar).
+        """
+        provider = _FakeTimestampProvider()
+        # Simulate a symbol already ingested with the most recent data. The
+        # end here exactly matches the fake bar's timestamp so the tail is
+        # already fully covered — isolating the head-gap behavior below from
+        # the (separately tested) tail high-water-mark resume behavior.
+        upsert_bars(
+            provider=provider,
+            symbol="AAPL",
+            schema="ohlcv-1m",
+            start="2021-01-01",
+            end="2024-01-01T20:45:00.000001",
+            output_dir=tmp_path,
+            instrument_type="equities",
+        )
+        assert len(provider.calls) == 1
+
+        # Widen the range to request 3 years earlier than what's cached.
+        upsert_bars(
+            provider=provider,
+            symbol="AAPL",
+            schema="ohlcv-1m",
+            start="2018-01-01",
+            end="2024-01-01T20:45:00.000001",
+            output_dir=tmp_path,
+            instrument_type="equities",
+        )
+
+        assert len(provider.calls) == 2  # exactly one new (head-gap) fetch, no redundant tail fetch
+        second_call_start, second_call_end = provider.calls[1][2], provider.calls[1][3]
+        assert second_call_start == "2018-01-01"
+        assert second_call_end.startswith("2024-01-01T20:45:00")  # up to the earliest cached bar
+
+
 class TestIsRangeCached:
     def test_false_when_no_file(self, tmp_path: Path) -> None:
         assert (

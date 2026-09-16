@@ -429,6 +429,68 @@ class TestUpsertSymbol:
         # Deduplicated: 4 unique days, not 5
         assert len(df) == 4
 
+    def test_widening_start_backfills_head_gap(self, tmp_path: Path) -> None:
+        """Regression: widening --years on an already-ingested symbol (e.g. 5 → 10)
+        must backfill the newly-requested earlier range, not just look forward
+        from the latest stored bar and conclude "already up to date."
+        """
+        initial_df = _make_ohlcv_df(["2024-01-08", "2024-01-09", "2024-01-10"])
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        head_store = _make_mock_store(["2024-01-01", "2024-01-02"])
+        client_mock = MagicMock()
+        client_mock.timeseries.get_range.return_value = head_store
+
+        with _mock_databento(client_mock):
+            path = upsert_symbol(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",  # earlier than the earliest cached day (2024-01-08)
+                end="2024-01-10",  # tail already fully covered — no tail fetch needed
+                output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
+            )
+
+        df = pl.read_parquet(path)
+        assert len(df) == 5  # 2 new head days + 3 pre-existing days
+        assert df.select(pl.col("ts_event").cast(pl.Date).min()).item().isoformat() == "2024-01-01"
+        client_mock.timeseries.get_range.assert_called_once()
+        call_kwargs = client_mock.timeseries.get_range.call_args.kwargs
+        assert call_kwargs["start"] == "2024-01-01"
+        assert call_kwargs["end"] == "2024-01-08"  # exclusive, up to earliest cached day
+
+    def test_widening_start_and_new_tail_both_fetched(self, tmp_path: Path) -> None:
+        """Both a head gap and a tail gap can exist at once and must both be fetched."""
+        initial_df = _make_ohlcv_df(["2024-01-08", "2024-01-09", "2024-01-10"])
+        out_path = tmp_path / "futures" / "ES.c.0" / "ohlcv-1d.parquet"
+        out_path.parent.mkdir(parents=True)
+        initial_df.write_parquet(out_path)
+
+        head_store = _make_mock_store(["2024-01-01"])
+        tail_store = _make_mock_store(["2024-01-11"])
+        client_mock = MagicMock()
+        client_mock.timeseries.get_range.side_effect = [head_store, tail_store]
+
+        with _mock_databento(client_mock):
+            path = upsert_symbol(
+                dataset="GLBX.MDP3",
+                symbol="ES.c.0",
+                schema="ohlcv-1d",
+                start="2024-01-01",
+                end="2024-01-12",
+                output_dir=tmp_path,
+                instrument_type="futures",
+                download_method="streaming",
+            )
+
+        df = pl.read_parquet(path)
+        assert len(df) == 5  # 1 head + 3 existing + 1 tail
+        assert client_mock.timeseries.get_range.call_count == 2
+
 
 # ===========================================================================
 # ingest_from_config (mocked Databento)
