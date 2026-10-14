@@ -22,10 +22,10 @@ def notebook(name: str = typer.Argument("scratch")) -> None:
 @app.command()
 def roughness(
     symbol: str = typer.Argument(..., help="Symbol, e.g. ES.c.0"),
-    data_dir: Path = typer.Option(  # noqa: B008
-        Path("data/raw"), help="Root directory of raw Parquet data."
+    catalog_path: Path = typer.Option(  # noqa: B008
+        None, "--catalog", help="Catalog root (default: data/catalog)."
     ),
-    schema: str = typer.Option("ohlcv-1d", help="Bar schema file to read."),
+    schema: str = typer.Option("ohlcv-1d", help="Bar schema to read."),
     n_folds: int = typer.Option(5, help="Chronological folds used to assess stability."),
 ) -> None:
     """Run the roughness gate — Step 1 of the SDE falsification plan.
@@ -38,17 +38,16 @@ def roughness(
     makes the exponent unidentifiable, which is the common outcome on daily
     bars.  See ``docs/research/sde_market_dynamics.md``.
     """
-    import polars as pl
-
+    from snippy_scales.data.catalog import load_bars
     from snippy_scales.research.diagnostics import log_variance_proxy, roughness_gate
 
-    path = data_dir / symbol.replace("/", "_") / f"{schema}.parquet"
-    if not path.exists():
-        console.print(f"[red]No data at[/] {path}")
-        console.print("Ingest it first:  [cyan]algo data ingest-config configs/databento.yaml[/]")
-        raise typer.Exit(code=1)
+    try:
+        bars = load_bars(symbol, schema, catalog_path=catalog_path)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/]")
+        console.print("Sync it first:  [cyan]algo data sync configs/databento.yaml[/]")
+        raise typer.Exit(code=1) from exc
 
-    bars = pl.read_parquet(path)
     log_rv = log_variance_proxy(bars)
     returns = (
         bars["close"].pct_change().drop_nulls().to_numpy() if "close" in bars.columns else None

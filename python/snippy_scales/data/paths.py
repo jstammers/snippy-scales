@@ -1,9 +1,12 @@
-"""Shared filesystem locations for the data-ingestion package.
+"""Shared filesystem locations for the data package.
 
-Split out from :mod:`snippy_scales.data.ingest` so that module can import
-:mod:`snippy_scales.data.tick` (for the unified config-driven ingestion
-entrypoint) without an import cycle — both ``ingest.py`` and ``tick.py``
-depend on this leaf module instead of on each other for their root path.
+* :data:`CATALOG_DIR` — the NautilusTrader ``ParquetDataCatalog`` holding all
+  market data (bars, ticks, instrument definitions).
+* :data:`RAW_DIR` — the pre-catalog Parquet store. Read only by the one-off
+  migration script (``scripts/migrate_raw_to_catalog.py``); nothing writes to it.
+* :data:`UNIVERSE_DIR` — resolved stock universes (e.g. S&P 500 membership).
+* :data:`MANIFEST_DIR` — per-symbol job manifests for long backfills.
+* :data:`CACHE_DIR` — small downloaded reference files (e.g. Databento publishers).
 
 The datastore root is relocatable via the ``SNIPPY_DATA_ROOT`` env var
 (e.g. to point at an external disk) — read once at import time, defaulting
@@ -16,5 +19,8 @@ import os
 from pathlib import Path
 
 DATA_ROOT = Path(os.environ.get("SNIPPY_DATA_ROOT", "data"))
+CATALOG_DIR = DATA_ROOT / "catalog"
 RAW_DIR = DATA_ROOT / "raw"
 UNIVERSE_DIR = DATA_ROOT / "universe"
+MANIFEST_DIR = DATA_ROOT / "derived" / "manifests"
+CACHE_DIR = DATA_ROOT / "cache"

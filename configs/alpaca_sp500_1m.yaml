@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # This is the config-driven equivalent of `algo data backfill-sp500` — use
 # whichever fits: `backfill-sp500` also tracks a per-symbol CSV manifest and
-# supports `--retry-failed`, which plain `ingest-config` does not.
+# supports `--retry-failed`, which plain `algo data sync` does not.
 #
 # 1. Generate the symbols file (fetches Wikipedia's S&P 500 membership
 #    history — every ticker that was ever a constituent in the window below,
@@ -11,8 +11,8 @@
 #      algo data update-universe --years 5 --output data/universe/sp500_ever_members.txt
 #
 # 2. Run it:
-#      algo data ingest-config configs/alpaca_sp500_1m.yaml
-#      algo data ingest-config configs/alpaca_sp500_1m.yaml --dry-run
+#      algo data sync configs/alpaca_sp500_1m.yaml --dry-run
+#      algo data sync configs/alpaca_sp500_1m.yaml
 #
 # Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in the environment — never put
 # credentials in this file. Free (Basic) tier: 200 historical API calls/min,
@@ -20,7 +20,6 @@
 # ---------------------------------------------------------------------------
 
 provider: "alpaca"
-instrument_type: "equities"
 schemas: ["1m"]
 
 # `start` is a fixed date, not "5 years ago" — re-run `update-universe` and

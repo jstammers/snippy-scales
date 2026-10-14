@@ -1,7 +1,8 @@
-"""CLI commands for data ingestion and management."""
+"""CLI commands for market data: sync into the catalog, inspect, maintain."""
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -11,541 +12,288 @@ from rich.console import Console
 from rich.table import Table
 
 if TYPE_CHECKING:
-    from snippy_scales.data.config import VALID_STYPES, DownloadMethod
+    from nautilus_trader.persistence import ParquetDataCatalog
 
-app = typer.Typer(help="Data ingestion commands.")
+    from snippy_scales.data.catalog import SyncResult
+    from snippy_scales.data.config import IngestConfig
+
+app = typer.Typer(help="Market data commands (NautilusTrader catalog).")
 console = Console()
 
 
-def _fmt_cost(cost: float, *, free_provider: bool = False) -> str:
-    """Format a cost float for display in the terminal.
-
-    Returns ``"free"`` for zero-cost when *free_provider* (Alpaca, which has
-    no per-request charge at all), otherwise ``"cached"`` (already up to
-    date), ``"N/A"`` for NaN (estimation failed), or a dollar-formatted
-    string.
-    """
-    if cost == 0.0:
-        return "[dim]free[/dim]" if free_provider else "[dim]cached[/dim]"
+def _fmt_cost(cost: float) -> str:
     if math.isnan(cost):
         return "[yellow]N/A[/yellow]"
+    if cost == 0.0:
+        return "[dim]—[/dim]"
     return f"[bold yellow]${cost:.4f}[/bold yellow]"
 
 
-def _fmt_size(num_bytes: int) -> str:
-    """Format a byte count using decimal units (Databento bills per GB)."""
-    if num_bytes < 1_000_000:
-        return f"{num_bytes / 1_000:.1f} KB"
-    if num_bytes < 1_000_000_000:
-        return f"{num_bytes / 1_000_000:.1f} MB"
-    return f"{num_bytes / 1_000_000_000:.2f} GB"
+def _fmt_ns(ns: int | None) -> str:
+    if ns is None:
+        return "—"
+    return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.UTC).strftime("%Y-%m-%d %H:%M")
 
 
-def _ingest_bar(
-    *,
-    dataset: str,
-    symbol: str,
-    schema: str,
-    start: str,
-    end: str,
-    stype_in: VALID_STYPES,
-    instrument_type: str,
-    output_dir: Path,
-    yes: bool,
-    download_method: DownloadMethod,
-) -> None:
-    """Cost-estimate, confirm, and download bar data for a single symbol."""
-    from snippy_scales.data.ingest import estimate_cost, upsert_symbol  # noqa: PLC0415
-
-    console.print(f"Estimating cost for [bold]{symbol}[/] ({schema})  {start} → {end} …")
-
-    cost: float
-    try:
-        cost = estimate_cost(
-            dataset=dataset,
-            symbol=symbol,
-            schema=schema,
-            start=start,
-            end=end,
-            instrument_type=instrument_type,
-            output_dir=output_dir,
-            stype_in=stype_in,
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: cost estimation failed — {exc}[/]")
-        cost = float("nan")
-
-    if cost == 0.0:
-        console.print("[dim]Symbol is already up to date — nothing to download.[/]")
-        return
-
-    console.print(f"Estimated cost: {_fmt_cost(cost)}")
-
-    if not yes and not math.isnan(cost):
-        if not typer.confirm("Proceed with download?"):
-            raise typer.Abort()
-    elif not yes and math.isnan(cost):
-        console.print("[yellow]Cost estimate unavailable.[/]")
-        if not typer.confirm("Proceed anyway?"):
-            raise typer.Abort()
-
-    console.print(
-        f"Ingesting [bold]{symbol}[/] ({schema})  {start} → {end}  "
-        f"[[dim]{dataset}, {download_method}[/]]"
-    )
-    if download_method == "batch":
-        console.print("[dim]Submitting a Databento batch job — this may take a while...[/]")
-    path = upsert_symbol(
-        dataset=dataset,
-        symbol=symbol,
-        schema=schema,
-        start=start,
-        end=end,
-        instrument_type=instrument_type,
-        output_dir=output_dir,
-        stype_in=stype_in,
-        download_method=download_method,
-    )
-    console.print(f"[green]Saved:[/] {path}")
+def _fmt_ranges(ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return "[dim]up to date[/dim]"
+    return ", ".join(f"{_fmt_ns(lo)} → {_fmt_ns(hi)}" for lo, hi in ranges)
 
 
-def _ingest_tick(
-    *,
-    dataset: str,
-    symbol: str,
-    schema: str,
-    start: str,
-    end: str,
-    stype_in: VALID_STYPES,
-    instrument_type: str,
-    output_dir: Path,
-    yes: bool,
-    download_method: DownloadMethod,
-) -> None:
-    """Cost-estimate, confirm, and download tick data for a single symbol."""
-    from snippy_scales.data.tick import estimate_tick_cost, upsert_ticks  # noqa: PLC0415
+def _day_ns(value: str | None) -> int:
+    """``YYYY-MM-DD`` (or today when None) at 00:00 UTC, in UNIX ns."""
+    day = dt.date.fromisoformat(value) if value else dt.datetime.now(dt.UTC).date()
+    return int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp()) * 10**9
 
-    console.print(f"Estimating cost for [bold]{symbol}[/] ({schema})  {start} → {end} …")
 
-    try:
-        estimate = estimate_tick_cost(
-            dataset=dataset,
-            symbol=symbol,
-            schema=schema,
-            start=start,
-            end=end,
-            instrument_type=instrument_type,
-            output_dir=output_dir,
-            stype_in=stype_in,
-        )
-    except Exception as exc:
-        console.print(f"[bold red]Cost estimation failed:[/] {exc}")
-        raise typer.Exit(1) from exc
-
-    if not estimate.missing_days:
-        console.print(
-            f"[dim]All {estimate.cached_days} day(s) in range are already stored — "
-            "nothing to download.[/]"
-        )
-        return
-
-    table = Table(title="Tick Ingestion Plan", show_header=True, header_style="bold cyan")
+def _print_results(results: list[SyncResult]) -> None:
+    table = Table(title="Sync results", show_header=True, header_style="bold cyan")
     table.add_column("Symbol")
     table.add_column("Schema")
-    table.add_column("Range")
-    table.add_column("Days to fetch", justify="right")
-    table.add_column("Cached", justify="right")
-    table.add_column("Billable size", justify="right")
-    table.add_column("Cost (USD)", justify="right")
-    table.add_row(
-        symbol,
-        schema,
-        f"{start} → {end}",
-        str(len(estimate.missing_days)),
-        str(estimate.cached_days),
-        _fmt_size(estimate.billable_bytes),
-        _fmt_cost(estimate.cost_usd),
-    )
+    table.add_column("Written", justify="right")
+    table.add_column("Status")
+    for r in results:
+        status = "[green]ok[/green]" if r.succeeded else f"[red]{r.error}[/red]"
+        table.add_row(r.symbol, r.schema, f"{r.written:,}", status)
     console.print(table)
-
-    if not yes and not typer.confirm("\nProceed with download?"):
-        raise typer.Abort()
-
-    if download_method == "batch":
-        console.print("[dim]Submitting Databento batch job(s) — this may take a while...[/]")
-    written = upsert_ticks(
-        dataset=dataset,
-        symbol=symbol,
-        schema=schema,
-        start=start,
-        end=end,
-        instrument_type=instrument_type,
-        output_dir=output_dir,
-        stype_in=stype_in,
-        download_method=download_method,
-    )
-
-    remaining = len(estimate.missing_days) - len(written)
-    console.print(
-        f"\n[bold green]Done.[/]  {len(written)} day(s) written to "
-        f"{output_dir / instrument_type / symbol.replace('/', '_') / schema}"
-        + (f"  [dim]({remaining} empty or failed)[/]" if remaining else "")
-    )
 
 
 @app.command()
-def ingest(
-    dataset: str = typer.Argument(..., help="Databento dataset identifier"),
-    symbol: str = typer.Option(
-        ...,
-        "--symbol",
-        "-s",
-        help=(
-            "Instrument symbol. Use Databento parent symbology (e.g. 'ES.FUT' with "
-            "--stype-in parent) to pull every individual outright contract under a "
-            "futures root in one request."
-        ),
-    ),
-    start: str = typer.Option(..., help="Start date YYYY-MM-DD"),
-    end: str = typer.Option(..., help="End date YYYY-MM-DD"),
-    schema: Annotated[
-        str,
-        typer.Option(
-            "--schema",
-            help=(
-                "Bar frequency ('1d', '1h', '1m', 'daily', ...) or event-level schema "
-                "('trades', 'mbo', 'mbp-1', 'mbp-10', 'tbbo')."
-            ),
-        ),
-    ] = "1d",
-    stype_in: Literal["raw_symbol", "continuous", "parent", "instrument_id"] = typer.Option(
-        "raw_symbol", help="Databento symbology type"
-    ),
-    instrument_class: str = typer.Option(
-        ...,
-        "--instrument-class",
-        help=(
-            "Closed top-level storage classification — determines the "
-            "data/raw/<instrument-class>/ subdirectory. One of: equities, "
-            "futures, options, fx_spot, crypto."
-        ),
-    ),
-    download_method: Literal["batch", "streaming"] = typer.Option(
-        "batch",
-        "--download-method",
-        help=(
-            "Databento delivery mechanism. 'batch' (default) submits a batch job — "
-            "billed the same as streaming, but Databento keeps completed job output "
-            "downloadable free of charge for a retention window. 'streaming' calls "
-            "the Historical Streaming API directly — lower latency, no retention."
-        ),
-    ),
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", help="Root directory for raw data."),
-    ] = None,
-    yes: Annotated[
-        bool,
-        typer.Option("--yes", "-y", help="Skip the cost-confirmation prompt."),
-    ] = False,
-) -> None:
-    """Download and upsert data for a single symbol.
-
-    Routes automatically to the bar or event-level (tick) ingestion path based
-    on ``--schema``: bar aliases (``1d``, ``1h``, ...) use the upsert-by-date
-    Parquet store, event-level schemas (``trades``, ``mbo``, ...) use the
-    day-partitioned tick store.
-
-    Before downloading, the Databento metadata API is queried to estimate
-    cost. You will be asked to confirm unless ``--yes`` is passed. Existing
-    data is extended rather than re-downloaded, so symbols that are already up
-    to date incur no cost and are skipped automatically.
-
-    Examples::
-
-        algo data ingest GLBX.MDP3 -s ES.c.0 --schema 1d --start 2010-01-01 --end 2026-01-01
-        algo data ingest GLBX.MDP3 -s ES.c.0 --schema trades --start 2026-08-01 --end 2026-09-01
-        algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \\
-            --start 2020-01-01 --end 2026-01-01
-    """
-    from snippy_scales.data.config import is_tick_schema, resolve_schema  # noqa: PLC0415
-    from snippy_scales.data.ingest import RAW_DIR  # noqa: PLC0415
-
-    try:
-        resolved = resolve_schema(schema)
-    except ValueError as exc:
-        console.print(f"[bold red]Error:[/] {exc}")
-        raise typer.Exit(1) from exc
-
-    out_dir = output_dir or RAW_DIR
-
-    if is_tick_schema(resolved):
-        _ingest_tick(
-            dataset=dataset,
-            symbol=symbol,
-            schema=resolved,
-            start=start,
-            end=end,
-            stype_in=stype_in,
-            instrument_type=instrument_class,
-            output_dir=out_dir,
-            yes=yes,
-            download_method=download_method,
-        )
-    else:
-        _ingest_bar(
-            dataset=dataset,
-            symbol=symbol,
-            schema=resolved,
-            start=start,
-            end=end,
-            stype_in=stype_in,
-            instrument_type=instrument_class,
-            output_dir=out_dir,
-            yes=yes,
-            download_method=download_method,
-        )
-
-
-@app.command(name="ingest-config")
-def ingest_config(
-    config_path: Annotated[
-        Path,
-        typer.Argument(
-            help="Path to the YAML ingestion config file.",
-            exists=True,
-            dir_okay=False,
-            readable=True,
-        ),
-    ],
+def sync(
+    config: Annotated[Path, typer.Argument(help="Sync config YAML (see configs/).")],
     schema: Annotated[
         str | None,
+        typer.Option("--schema", help="Sync only this schema ('1d', '1m', 'trades', ...)."),
+    ] = None,
+    symbol: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Sync only these symbols (repeatable)."),
+    ] = None,
+    catalog_path: Annotated[
+        Path | None, typer.Option("--catalog", help="Catalog root. Default: data/catalog.")
+    ] = None,
+    instruments: Annotated[
+        bool,
         typer.Option(
-            "--schema",
+            "--instruments/--no-instruments",
             help=(
-                "Restrict to a single schema instead of the config file's full "
-                "`schemas` list.  Accepts bar aliases ('1d', '1h', ...) or "
-                "event-level schema names ('trades', 'mbo', ...)."
+                "Also sync Databento instrument definitions. "
+                "(Alpaca always writes Equity instruments.)"
             ),
         ),
-    ] = None,
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", help="Root directory for raw data."),
-    ] = None,
-    dry_run: Annotated[
+    ] = True,
+    instruments_only: Annotated[
         bool,
         typer.Option(
-            "--dry-run",
-            help="Show the ingestion plan and cost estimate without downloading.",
+            "--instruments-only", help="Sync Databento instrument definitions only, no data."
         ),
     ] = False,
-    yes: Annotated[
-        bool,
-        typer.Option("--yes", "-y", help="Skip the cost-confirmation prompt."),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what is missing (and its cost); fetch nothing.")
     ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
-    """Batch-ingest every symbol across every schema defined in a YAML config file.
+    """Bring the catalog up to date for every symbol and schema in CONFIG.
 
-    Every entry in ``schemas`` is run for every symbol, routed automatically
-    to the bar or event-level (tick) store based on whether it names a bar
-    frequency or an event-level schema. Use Databento parent symbology (e.g.
-    ``ES.FUT`` with ``stype_in: parent``) as a symbol to pull every
-    individual outright contract under a futures root in one request.
-
-    Uses upsert semantics: only data not already on disk is fetched, so
-    repeated runs are cheap. Before any download the Databento metadata API
-    is queried once per item to estimate per-item and total costs. You will
-    be asked to confirm the total spend unless ``--yes`` is passed.
+    Only data missing from the catalog is requested: anything before the first
+    or after the last stored record within the configured date range.
 
     Examples::
 
-        algo data ingest-config configs/databento.yaml
-        algo data ingest-config configs/databento.yaml --schema 1h
-        algo data ingest-config configs/databento.yaml --yes
-        algo data ingest-config configs/databento.yaml --dry-run
+        algo data sync configs/databento.yaml --dry-run
+        algo data sync configs/databento.yaml --schema 1h
+        algo data sync configs/alpaca.yaml -s AAPL -s MSFT
+        algo data sync configs/databento.yaml --instruments-only
     """
+    from snippy_scales.data import catalog as cat  # noqa: PLC0415
     from snippy_scales.data.config import load_config, resolve_schema  # noqa: PLC0415
-    from snippy_scales.data.ingest import (  # noqa: PLC0415
-        RAW_DIR,
-        estimate_costs_from_config,
-        ingest_from_config,
-    )
 
-    try:
-        cfg = load_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[bold red]Error loading config:[/] {exc}")
-        raise typer.Exit(1) from exc
+    cfg = load_config(config)
+    schemas = [resolve_schema(schema)] if schema else cfg.resolved_schemas
+    symbols = list(symbol) if symbol else cfg.all_symbols
+    start, end = _day_ns(cfg.start), _day_ns(cfg.end)
+    catalog = cat.open_catalog(catalog_path)
 
-    if schema is not None:
-        try:
-            resolve_schema(schema)
-        except ValueError as exc:
-            console.print(f"[bold red]Error:[/] {exc}")
-            raise typer.Exit(1) from exc
+    if instruments_only:
+        if cfg.provider != "databento":
+            console.print("[red]--instruments-only applies to Databento configs only.[/]")
+            raise typer.Exit(1)
+        from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
 
-    out_dir = output_dir or RAW_DIR
-    effective_schemas = [resolve_schema(schema)] if schema else cfg.resolved_schemas
-    is_free_provider = cfg.provider == "alpaca"
-    source_label = (
-        f"alpaca, {cfg.alpaca_options.rate_limit_per_min}/min"
-        if is_free_provider
-        else f"{cfg.dataset}, {cfg.download_method}"
-    )
+        syncer = DatabentoSync(catalog, dataset=cfg.dataset, venue=cfg.effective_venue)
+        count = syncer.sync_instruments(symbols, start, end)
+        console.print(f"[green]Instrument definitions processed: {count}[/]")
+        return
 
-    # --- Plan (cost estimation is skipped for Alpaca — it's free, only rate-limited) ---
-    console.print(
-        f"{'Building' if is_free_provider else 'Estimating costs for'} plan for "
-        f"[bold]{len(cfg.asset_classes)}[/] asset class(es) across "
-        f"{len(effective_schemas)} schema(s) [[dim]{source_label}[/]] …"
-    )
-    cost_rows = estimate_costs_from_config(cfg, schema_override=schema, output_dir=out_dir)
+    if cfg.provider == "alpaca":
+        _sync_alpaca(cfg, catalog, symbols, schemas, start, end, dry_run, yes)
+    else:
+        _sync_databento(cfg, catalog, symbols, schemas, start, end, instruments, dry_run, yes)
 
-    # --- Build plan table with per-item costs ---
-    table = Table(title="Ingestion Plan", show_header=True, header_style="bold cyan")
-    table.add_column("Asset Class")
-    table.add_column("Schema")
+
+def _sync_databento(
+    cfg: IngestConfig,
+    catalog: ParquetDataCatalog,
+    symbols: list[str],
+    schemas: list[str],
+    start: int,
+    end: int,
+    instruments: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    from snippy_scales.data.catalog import SyncResult  # noqa: PLC0415
+    from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
+
+    syncer = DatabentoSync(catalog, dataset=cfg.dataset, venue=cfg.effective_venue)
+
+    table = Table(title=f"Databento sync plan ({cfg.dataset})", header_style="bold cyan")
     table.add_column("Symbol")
+    table.add_column("Schema")
+    table.add_column("Missing")
     table.add_column("Cost (USD)", justify="right")
-
-    for row in cost_rows:
-        cost_display = _fmt_cost(row.cost_usd, free_provider=is_free_provider)
-        table.add_row(row.asset_class, row.schema, row.symbol, cost_display)
-
+    total = 0.0
+    todo: list[tuple[str, str]] = []
+    for sym in symbols:
+        for sch in schemas:
+            ranges = syncer.plan(sym, sch, start, end)
+            cost = 0.0
+            if ranges:
+                todo.append((sym, sch))
+                try:
+                    cost = syncer.estimate_cost(sym, sch, start, end, stype_in=cfg.stype_in)
+                except Exception as exc:  # noqa: BLE001 — cost is advisory
+                    console.print(f"[yellow]Cost estimate failed for {sym} {sch}: {exc}[/]")
+                    cost = float("nan")
+            total += cost
+            table.add_row(sym, sch, _fmt_ranges(ranges), _fmt_cost(cost))
     console.print(table)
-
-    # --- Totals ---
-    finite_costs = [row.cost_usd for row in cost_rows if not math.isnan(row.cost_usd)]
-    has_nan = any(math.isnan(row.cost_usd) for row in cost_rows)
-    total = sum(finite_costs)
-    total_str = (
-        "[dim]free[/dim]" if is_free_provider else f"[bold yellow]${total:.4f}[/bold yellow]"
-    )
-    if has_nan and not is_free_provider:
-        total_str += " [yellow]+ N/A[/yellow]"
-
-    cached_count = sum(1 for row in cost_rows if row.cached)
-    download_count = len(cost_rows) - cached_count
-
-    console.print(
-        f"\n[dim]Source:[/] {source_label}  "
-        f"[dim]Output:[/] {out_dir}\n"
-        f"[dim]Items to download:[/] {download_count}  "
-        f"[dim]Already cached:[/] {cached_count}  "
-        f"[dim]Total estimated cost:[/] {total_str}"
-    )
+    console.print(f"Estimated total: {_fmt_cost(total)}")
 
     if dry_run:
-        console.print("\n[yellow]Dry-run mode — no data downloaded.[/]")
+        console.print("[yellow]Dry run — nothing fetched.[/]")
         return
-
-    # Skip download if everything is already cached
-    if download_count == 0:
-        console.print("\n[dim]Everything is already up to date — nothing to download.[/]")
+    if not todo and not instruments:
+        console.print("[green]Catalog is up to date.[/]")
         return
-
-    # --- Confirmation ---
-    if not yes and not typer.confirm("\nProceed with download?"):
+    if todo and not yes and not typer.confirm("Proceed?"):
         raise typer.Abort()
 
-    if not is_free_provider and cfg.download_method == "batch":
-        console.print("[dim]Submitting Databento batch job(s) — this may take a while...[/]")
+    if instruments:
+        count = syncer.sync_instruments(symbols, start, end)
+        console.print(f"[dim]Instrument definitions processed: {count}[/]")
+    results = []
+    for sym, sch in todo:
+        try:
+            results.append(SyncResult(sym, sch, written=syncer.sync(sym, sch, start, end)))
+        except Exception as exc:  # noqa: BLE001 — reported per series
+            results.append(SyncResult(sym, sch, error=f"{type(exc).__name__}: {exc}"))
+    _print_results(results)
 
-    result_rows = ingest_from_config(cfg, schema_override=schema, output_dir=out_dir)
 
-    # --- Summary ---
-    succeeded = sum(1 for row in result_rows if row.succeeded)
-    failed = len(result_rows) - succeeded
+def _sync_alpaca(
+    cfg: IngestConfig,
+    catalog: ParquetDataCatalog,
+    symbols: list[str],
+    schemas: list[str],
+    start: int,
+    end: int,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    from nautilus_trader.model import NautilusDataType  # noqa: PLC0415
+
+    from snippy_scales.data import catalog as cat  # noqa: PLC0415
+    from snippy_scales.data.alpaca import AlpacaLoader  # noqa: PLC0415
+
+    venue = cfg.effective_venue
+    pending = 0
+    for sch in schemas:
+        for sym in symbols:
+            ranges = cat.missing_ranges(
+                catalog,
+                NautilusDataType.Bar,
+                cat.bar_type(sym, venue, sch),
+                start,
+                end,
+                interval_ns=cat.bar_interval_ns(sch),
+            )
+            pending += bool(ranges)
     console.print(
-        f"\n[bold green]Done.[/]  "
-        f"{succeeded} item(s) succeeded" + (f", [bold red]{failed} failed[/]" if failed else ".")
+        f"Alpaca: {pending} of {len(symbols) * len(schemas)} symbol/schema series need data "
+        f"({_fmt_ns(start)} → {_fmt_ns(end)})."
     )
+    if dry_run:
+        console.print("[yellow]Dry run — nothing fetched.[/]")
+        return
+    if pending == 0:
+        console.print("[green]Catalog is up to date.[/]")
+        return
+    if not yes and not typer.confirm("Proceed?"):
+        raise typer.Abort()
+
+    opts = cfg.alpaca_options
+    loader = AlpacaLoader(
+        feed=opts.feed,
+        adjustment=opts.adjustment,
+        rate_limit_per_min=opts.rate_limit_per_min,
+        max_workers=opts.max_workers,
+        venue=venue,
+    )
+    results = []
+    for sch in schemas:
+        results.extend(loader.sync(catalog, symbols, sch, start, end))
+    _print_results(results)
 
 
 @app.command()
 def coverage(
-    symbol: Annotated[str, typer.Option("--symbol", "-s", help="Instrument symbol")],
-    schema: Annotated[
-        str, typer.Option("--schema", help="Event-level schema: trades, mbo, ...")
-    ] = "trades",
-    instrument_class: Annotated[
-        str | None,
-        typer.Option(
-            "--instrument-class",
-            help=(
-                "Closed top-level storage classification the symbol was ingested "
-                "under. Omit to auto-resolve — errors if the symbol exists under "
-                "more than one classification."
-            ),
-        ),
-    ] = None,
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", help="Root directory for raw data."),
+    catalog_path: Annotated[
+        Path | None, typer.Option("--catalog", help="Catalog root. Default: data/catalog.")
     ] = None,
 ) -> None:
-    """Report which days of tick data are stored locally, and any gaps.
+    """List every bar series in the catalog with its first and last bar close."""
+    from nautilus_trader.model import NautilusDataType  # noqa: PLC0415
 
-    Useful for verifying an ingestion run completed and for confirming that a
-    repeat download would be a no-op.
-    """
-    import datetime  # noqa: PLC0415
+    from snippy_scales.data import catalog as cat  # noqa: PLC0415
 
-    from snippy_scales.data.config import resolve_schema  # noqa: PLC0415
-    from snippy_scales.data.ingest import RAW_DIR  # noqa: PLC0415
-    from snippy_scales.data.tick import contiguous_ranges, covered_days  # noqa: PLC0415
-
-    try:
-        resolved = resolve_schema(schema)
-    except ValueError as exc:
-        console.print(f"[bold red]Error:[/] {exc}")
-        raise typer.Exit(1) from exc
-
-    out_dir = output_dir or RAW_DIR
-
-    if instrument_class is None:
-        safe_symbol = symbol.replace("/", "_")
-        matches = [p for p in out_dir.glob(f"*/{safe_symbol}/{resolved}") if p.is_dir()]
-        if len(matches) > 1:
-            classes = ", ".join(m.parent.parent.name for m in matches)
-            console.print(
-                f"[bold red]Error:[/] {symbol!r} ({resolved}) exists under more than "
-                f"one instrument class ({classes}) — pass --instrument-class to disambiguate."
+    catalog = cat.open_catalog(catalog_path)
+    table = Table(title="Catalog bar coverage", header_style="bold cyan")
+    for col in ("Symbol", "Venue", "Schema", "First close", "Last close"):
+        table.add_column(col)
+    rows = 0
+    for sch in cat.BAR_SPECS:
+        for sym, venue in cat.list_bar_series(sch, catalog_path):
+            bt = cat.bar_type(sym, venue, sch)
+            table.add_row(
+                sym,
+                venue,
+                sch,
+                _fmt_ns(catalog.query_first_timestamp(NautilusDataType.Bar, bt)),
+                _fmt_ns(catalog.query_last_timestamp(NautilusDataType.Bar, bt)),
             )
-            raise typer.Exit(1)
-        instrument_class = matches[0].parent.parent.name if matches else "unclassified"
+            rows += 1
+    if rows:
+        console.print(table)
+    else:
+        console.print("[yellow]No bar data in the catalog yet.[/]")
+    console.print(f"Instruments: {len(catalog.instruments())}")
+    data_types = ", ".join(str(t).rsplit(".", 1)[-1] for t in catalog.list_data_types())
+    console.print(f"Data types: {data_types or '—'}")
 
-    days = sorted(covered_days(symbol, resolved, out_dir, instrument_type=instrument_class))
 
-    if not days:
-        console.print(f"[yellow]No {resolved} data stored for {symbol}.[/]")
-        return
+@app.command()
+def consolidate(
+    catalog_path: Annotated[
+        Path | None, typer.Option("--catalog", help="Catalog root. Default: data/catalog.")
+    ] = None,
+) -> None:
+    """Merge the many small files left by incremental syncs into larger ones."""
+    from snippy_scales.data import catalog as cat  # noqa: PLC0415
 
-    first, last = days[0], days[-1]
-    covered = set(days)
-    gaps = [
-        first + datetime.timedelta(days=offset)
-        for offset in range((last - first).days + 1)
-        if first + datetime.timedelta(days=offset) not in covered
-    ]
-
-    console.print(
-        f"[bold]{symbol}[/] ({resolved})\n"
-        f"  [dim]Covered days:[/] {len(days)}\n"
-        f"  [dim]Range:[/] {first} → {last}"
-    )
-
-    if not gaps:
-        console.print("  [green]No gaps.[/]")
-        return
-
-    console.print(f"  [yellow]Gaps:[/] {len(gaps)} day(s)")
-    for gap_start, gap_end in contiguous_ranges(gaps):
-        span = (gap_end - gap_start).days
-        console.print(
-            f"    {gap_start} → {gap_end - datetime.timedelta(days=1)}  [dim]({span} day(s))[/]"
-        )
+    cat.open_catalog(catalog_path).consolidate_catalog()
+    console.print("[green]Catalog consolidated.[/]")
 
 
 @app.command(name="update-universe")
@@ -559,26 +307,22 @@ def update_universe(
         Path | None, typer.Option(help="Where to write the resolved ticker list.")
     ] = None,
 ) -> None:
-    """Resolve and cache a stock universe as a `symbols_file` for an ingest config.
+    """Resolve and cache a stock universe as a `symbols_file` for a sync config.
 
     Currently only `sp500` is supported: every ticker that was an S&P 500
     constituent at any point in `[end - years, end]`, sourced from Wikipedia
-    (see `snippy_scales.data.universe`) — not just today's 500 names, so a
-    config that reads the resulting file isn't survivorship-biased.
-
-    The output is a plain text file, one symbol per line, suitable for an
-    `asset_classes.<label>.symbols_file` entry in a YAML ingest config (see
-    `configs/alpaca_sp500_1m.yaml`).
+    (see `snippy_scales.data.universe`), so a config that reads the file isn't
+    survivorship-biased.
 
     Examples::
 
         algo data update-universe
         algo data update-universe --years 10 --output data/universe/sp500_10y.txt
     """
-    from snippy_scales.data.backfill import (
-        DEFAULT_SYMBOLS_CACHE,  # noqa: PLC0415
-        resolve_backfill_window,  # noqa: PLC0415
-        save_symbols_cache,  # noqa: PLC0415
+    from snippy_scales.data.backfill import (  # noqa: PLC0415
+        DEFAULT_SYMBOLS_CACHE,
+        resolve_backfill_window,
+        save_symbols_cache,
     )
     from snippy_scales.data.universe import sp500_ever_members  # noqa: PLC0415
 
@@ -599,21 +343,15 @@ def update_universe(
 def backfill_sp500(
     schema: Annotated[
         str,
-        typer.Option(
-            "--schema",
-            help=(
-                "Bar frequency to backfill: '1m' (default), '1h', '1d'/'daily', or 'eod'. "
-                "Alpaca does not support event-level (tick) schemas or '1s'."
-            ),
-        ),
+        typer.Option("--schema", help="Bar frequency: '1m' (default), '1h' or '1d'/'daily'."),
     ] = "1m",
     years: Annotated[int, typer.Option(help="How many years back from --end to backfill.")] = 5,
     end: Annotated[str | None, typer.Option(help="End date YYYY-MM-DD. Defaults to today.")] = None,
-    output_dir: Annotated[
-        Path | None, typer.Option(help="Root directory for raw Parquet files.")
+    catalog_path: Annotated[
+        Path | None, typer.Option("--catalog", help="Catalog root. Default: data/catalog.")
     ] = None,
     manifest_path: Annotated[
-        Path | None, typer.Option(help="CSV manifest of per-symbol ingestion results.")
+        Path | None, typer.Option(help="CSV manifest of per-symbol results.")
     ] = None,
     symbols_cache: Annotated[
         Path | None,
@@ -653,34 +391,25 @@ def backfill_sp500(
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
-    """Backfill bar data from Alpaca for every stock ever in the S&P 500.
+    """Backfill Alpaca bars into the catalog for every stock ever in the S&P 500.
 
     Pulls `--years` (default 5) of `--schema` (default `1m`) bars for every
-    ticker that was an S&P 500 constituent at any point in that window — not
-    just today's 500 names — via `algo data update-universe`'s underlying
-    resolver, so the dataset isn't survivorship-biased. Respects the Alpaca
-    free-tier rate limit (shared across all symbols/threads) and resumes
-    automatically if interrupted: re-running the same command only fetches
-    what's still missing, including a range that's been widened (e.g.
-    `--years 5` then later `--years 10`) since a symbol was first backfilled.
-    Requires `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` in the environment.
+    ticker that was a constituent at any point in that window, so the dataset
+    isn't survivorship-biased. Respects the Alpaca rate limit across all
+    threads and resumes automatically: re-running only fetches what the catalog
+    is missing, including a widened range. Requires `ALPACA_API_KEY` /
+    `ALPACA_SECRET_KEY`.
 
     Examples::
 
-        # Preview the plan (universe size, estimated requests/runtime) — no download.
         algo data backfill-sp500 --dry-run
-
-        # Run it (prompts for confirmation; ~3h for the full universe on the free tier).
-        algo data backfill-sp500
-
-        # Backfill daily bars instead (a much smaller/faster pull).
         algo data backfill-sp500 --schema 1d
-
-        # Re-run, only retrying symbols that failed last time (same --schema's manifest).
         algo data backfill-sp500 --retry-failed
     """
+    from snippy_scales.data import catalog as cat  # noqa: PLC0415
+    from snippy_scales.data.alpaca import SUPPORTED_BAR_SCHEMAS, AlpacaLoader  # noqa: PLC0415
     from snippy_scales.data.backfill import (  # noqa: PLC0415
-        DEFAULT_OUTPUT_DIR,
+        DEFAULT_CATALOG_DIR,
         DEFAULT_SYMBOLS_CACHE,
         default_manifest_path,
         estimate_backfill_plan,
@@ -690,14 +419,7 @@ def backfill_sp500(
         resolve_backfill_window,
         save_symbols_cache,
     )
-    from snippy_scales.data.config import (  # noqa: PLC0415
-        AlpacaConfig,
-        AssetClassConfig,
-        IngestConfig,
-        resolve_schema,
-    )
-    from snippy_scales.data.ingest import ingest_from_config  # noqa: PLC0415
-    from snippy_scales.data.providers.alpaca import SUPPORTED_BAR_SCHEMAS  # noqa: PLC0415
+    from snippy_scales.data.config import resolve_schema  # noqa: PLC0415
     from snippy_scales.data.universe import sp500_ever_members  # noqa: PLC0415
 
     try:
@@ -712,13 +434,11 @@ def backfill_sp500(
         )
         raise typer.Exit(1)
 
-    out_dir = output_dir if output_dir is not None else DEFAULT_OUTPUT_DIR
+    root = catalog_path if catalog_path is not None else DEFAULT_CATALOG_DIR
     manifest = manifest_path if manifest_path is not None else default_manifest_path(schema)
     cache_path = symbols_cache if symbols_cache is not None else DEFAULT_SYMBOLS_CACHE
-
     start_date, end_date = resolve_backfill_window(years, end)
 
-    # --- Resolve the universe ---
     if retry_failed:
         manifest_rows = read_manifest(manifest)
         if not manifest_rows:
@@ -746,7 +466,6 @@ def backfill_sp500(
             save_symbols_cache(cache_path, symbols)
             console.print(f"[green]Resolved {len(symbols)} ticker(s)[/] — cached to {cache_path}")
 
-    # --- Plan ---
     estimate = estimate_backfill_plan(
         num_symbols=len(symbols),
         start=start_date,
@@ -762,38 +481,34 @@ def backfill_sp500(
     table.add_row("Rate limit", f"{rate_limit_per_min}/min  ({max_workers} concurrent symbols)")
     table.add_row("Est. requests (upper bound)", f"{estimate['total_requests']:,.0f}")
     table.add_row("Est. runtime (upper bound)", f"{estimate['estimated_minutes'] / 60:.1f}h")
-    table.add_row("Output", str(out_dir))
+    table.add_row("Catalog", str(root))
     table.add_row("Manifest", str(manifest))
     console.print(table)
     console.print(
-        "[dim]Estimate assumes every symbol needs the full range — already-downloaded "
-        "data is skipped automatically (upsert semantics), so a resumed run is faster.[/]"
+        "[dim]Estimate assumes every symbol needs the full range — data already in the "
+        "catalog is skipped, so a resumed run is faster.[/]"
     )
 
     if dry_run:
         console.print("\n[yellow]Dry-run mode — no data downloaded.[/]")
         return
-
     if not yes and not typer.confirm("\nProceed with download?"):
         raise typer.Abort()
 
-    cfg = IngestConfig(
-        provider="alpaca",
-        instrument_type="equities",
-        schemas=[resolved_schema],
-        start=start_date.isoformat(),
-        end=end_date.isoformat(),
-        alpaca=AlpacaConfig(
-            feed=feed,
-            adjustment=adjustment,
-            rate_limit_per_min=rate_limit_per_min,
-            max_workers=max_workers,
-        ),
-        asset_classes={"sp500": AssetClassConfig(symbols=symbols)},
+    loader = AlpacaLoader(
+        feed=feed,
+        adjustment=adjustment,
+        rate_limit_per_min=rate_limit_per_min,
+        max_workers=max_workers,
     )
-
     console.print(f"\n[bold]Starting backfill of {len(symbols)} symbol(s) …[/]")
-    rows = ingest_from_config(cfg, output_dir=out_dir)
+    rows = loader.sync(
+        cat.open_catalog(root),
+        symbols,
+        resolved_schema,
+        _day_ns(start_date.isoformat()),
+        _day_ns(end_date.isoformat()),
+    )
     merged_manifest = merge_manifest(manifest, rows)
 
     succeeded = sum(1 for row in rows if row.succeeded)
@@ -807,117 +522,3 @@ def backfill_sp500(
         console.print(
             "[yellow]Re-run with[/] [bold]--retry-failed[/] [yellow]to retry just the failures.[/]"
         )
-
-
-@app.command(name="check-layout")
-def check_layout(
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", help="Root directory for raw data."),
-    ] = None,
-) -> None:
-    """Report symbols that exist under more than one instrument classification.
-
-    Every symbol is meant to be unique within its top-level
-    ``instrument_type`` directory (e.g. ``equities``, ``futures``) — the
-    ``asset_classes`` grouping in a YAML config is a separate, free-form
-    display label and may legitimately repeat a symbol across configs.
-    Finding the same symbol under two different ``instrument_type``
-    directories signals a real misconfiguration. Exits with status 1 if any
-    are found.
-    """
-    from snippy_scales.data.ingest import RAW_DIR, find_cross_class_duplicates  # noqa: PLC0415
-
-    out_dir = output_dir or RAW_DIR
-    duplicates = find_cross_class_duplicates(out_dir)
-
-    if not duplicates:
-        console.print(f"[green]No cross-class duplicates found under {out_dir}.[/]")
-        return
-
-    table = Table(title="Cross-Class Duplicates", show_header=True, header_style="bold red")
-    table.add_column("Symbol")
-    table.add_column("Instrument classes")
-    for symbol, classes in sorted(duplicates.items()):
-        table.add_row(symbol, ", ".join(classes))
-    console.print(table)
-    raise typer.Exit(1)
-
-
-@app.command(name="migrate-layout")
-def migrate_layout(
-    instrument_class: Annotated[
-        str,
-        typer.Option(
-            "--instrument-class",
-            help=(
-                "Closed top-level storage classification every currently-flat "
-                "symbol directory should move under."
-            ),
-        ),
-    ],
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", help="Root directory for raw data."),
-    ] = None,
-    yes: Annotated[
-        bool,
-        typer.Option("--yes", "-y", help="Skip the confirmation prompt and move files for real."),
-    ] = False,
-) -> None:
-    """Move symbol directories from the old flat layout under an instrument class.
-
-    Old layout: ``<output-dir>/<symbol>/...``
-    New layout: ``<output-dir>/<instrument-class>/<symbol>/...``
-
-    Dry-run by default — always review the printed plan before passing
-    ``--yes``. Each symbol directory is moved with a single, atomic
-    ``Path.rename()`` (never a copy-then-delete, never a recursive delete of
-    anything). Refuses outright, before moving anything, if the destination
-    for any symbol already exists and is non-empty.
-    """
-    from snippy_scales.data.ingest import RAW_DIR  # noqa: PLC0415
-
-    out_dir = output_dir or RAW_DIR
-
-    if not out_dir.exists():
-        console.print(f"[yellow]{out_dir} does not exist — nothing to migrate.[/]")
-        return
-
-    # Known instrument_type directories are left alone; only directories that
-    # look like flat "<symbol>/<schema>.parquet-or-tick-store" entries are
-    # treated as migration candidates — i.e. anything not already itself an
-    # instrument_type bucket.
-    known_classes = {"equities", "futures", "options", "fx_spot", "crypto"}
-    candidates = sorted(p for p in out_dir.iterdir() if p.is_dir() and p.name not in known_classes)
-
-    if not candidates:
-        console.print(f"[dim]Nothing to migrate under {out_dir} — already fully classified.[/]")
-        return
-
-    dest_root = out_dir / instrument_class
-    moves = [(p, dest_root / p.name) for p in candidates]
-
-    conflicts = [dest for _, dest in moves if dest.exists() and any(dest.iterdir())]
-    if conflicts:
-        console.print("[bold red]Refusing to migrate — destination already exists:[/]")
-        for dest in conflicts:
-            console.print(f"  {dest}")
-        raise typer.Exit(1)
-
-    table = Table(title="Layout Migration Plan", show_header=True, header_style="bold cyan")
-    table.add_column("From")
-    table.add_column("To")
-    for src, dest in moves:
-        table.add_row(str(src), str(dest))
-    console.print(table)
-    console.print(f"\n[dim]{len(moves)} symbol director(y/ies) → {dest_root}[/]")
-
-    if not yes:
-        console.print("\n[yellow]Dry-run mode — pass --yes to move these directories for real.[/]")
-        return
-
-    dest_root.mkdir(parents=True, exist_ok=True)
-    for src, dest in moves:
-        src.rename(dest)
-    console.print(f"\n[bold green]Done.[/]  Moved {len(moves)} symbol director(y/ies).")
