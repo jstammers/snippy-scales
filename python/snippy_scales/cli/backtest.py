@@ -19,5 +19,5 @@ def run(
 ) -> None:
     """Run a backtest for a named strategy."""
     console.print(f"[cyan]Running backtest:[/] {strategy}  cash={initial_cash:,.0f}")
-    # TODO: load strategy, call Rust engine via _algo_core
-    console.print("[yellow]Not yet implemented — wire strategy → Rust engine.[/]")
+    # TODO: wire to the NautilusTrader engine (see docs/architecture/nautilus_migration.md).
+    console.print("[yellow]Not yet implemented — use `algo eval run` for now.[/]")

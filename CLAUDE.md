@@ -6,8 +6,8 @@ Quick-start reference for AI agents and human contributors.
 
 ## ⚠️ NEVER delete anything under `data/`
 
-`data/` (`data/raw/`, `data/derived/`, `data/cache/`, `data/universe/`, and
-their contents) is **git-ignored** — nothing under it is tracked, so nothing
+`data/` (`data/raw/`, `data/catalog/`, `data/derived/`, `data/cache/`,
+`data/universe/`, and their contents) is **git-ignored** — nothing under it is tracked, so nothing
 under it can be recovered with `git checkout`/`git reflog`/etc. once it's
 gone. It routinely holds locally-ingested market data that cost real money
 (Databento credit) or real wall-clock time (an hours-long Alpaca backfill) to
@@ -68,7 +68,6 @@ it.
 │   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
 │   │       └── data.py         ← ingest, ingest-config, coverage, update-universe, backfill-sp500
 │   └── tests/
-├── rust/                       ← Rust extension (algo-pyo3 → _algo_core)
 ├── docs/                       ← MkDocs documentation
 ├── configs/                    ← Ingestion configs (databento.yaml, databento_es_trades.yaml,
 │                                  alpaca.yaml, alpaca_sp500_1m.yaml)
@@ -98,8 +97,7 @@ All commands use `just` (a Makefile replacement). Run `just` with no args to lis
 
 ```bash
 # Setup
-just setup          # uv sync + maturin develop + prek install
-just dev            # rebuild Rust extension (run after any Rust change)
+just setup          # uv sync --all-extras + prek install
 
 # Python
 just test-py        # uv run pytest
@@ -109,7 +107,7 @@ just type-check     # uv run ty check
 
 # Combined
 just check-py       # lint + fmt + type-check + test (Python only)
-just check          # everything (format, lint, type-check, test, Rust)
+just check          # everything (format, lint, type-check, test)
 
 # Docs
 just docs-serve     # mkdocs serve (live preview)
@@ -122,7 +120,6 @@ uv run pytest                    # tests
 uv run ruff check . --fix        # lint with auto-fix
 uv run ruff format .             # format
 uv run ty check                  # type-check
-uv run maturin develop           # rebuild Rust extension
 ```
 
 ### Git hooks — MANDATORY
