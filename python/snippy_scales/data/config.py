@@ -1,6 +1,6 @@
-"""Configuration models for Databento data ingestion.
+"""Configuration models for syncing market data into the catalog.
 
-The ingestion pipeline is driven by a YAML config file.  Example::
+``algo data sync`` is driven by a YAML config file.  Example::
 
     dataset: "GLBX.MDP3"
     schemas: ["1d"]
@@ -30,8 +30,9 @@ from pydantic import BaseModel, Field, model_validator
 # ---------------------------------------------------------------------------
 
 #: Supported user-facing frequency aliases and the Databento schema they map to.
-#: Databento natively supports 1s, 1m, 1h, 1d, and eod bar schemas.
-#: Sub-minute or arbitrary intervals (e.g. 5m) must be resampled after download.
+#: Databento natively supports 1s, 1m, 1h and 1d bar schemas (``ohlcv-eod`` has
+#: no distinct Nautilus bar type, so it isn't supported). Other intervals (e.g.
+#: 5m) are aggregated from these.
 _FREQUENCY_TO_SCHEMA: dict[str, str] = {
     # seconds
     "1s": "ohlcv-1s",
@@ -48,8 +49,6 @@ _FREQUENCY_TO_SCHEMA: dict[str, str] = {
     "1d": "ohlcv-1d",
     "d": "ohlcv-1d",
     "daily": "ohlcv-1d",
-    # end-of-day
-    "eod": "ohlcv-eod",
 }
 
 _VALID_SCHEMAS: frozenset[str] = frozenset(_FREQUENCY_TO_SCHEMA.values())
@@ -92,11 +91,13 @@ def frequency_to_schema(frequency: str) -> str:
 # Tick (event-level) schemas
 # ---------------------------------------------------------------------------
 
-#: Databento event-level schemas.  Unlike the OHLCV schemas these are not
+#: Databento event-level schemas. Unlike the OHLCV schemas these are not
 #: aggregated into fixed-width bars, so a single trading day can contain
-#: hundreds of millions of rows.  They are stored day-partitioned by
-#: :mod:`snippy_scales.data.tick` rather than as one file per symbol.
-TICK_SCHEMAS: frozenset[str] = frozenset({"trades", "mbo", "mbp-1", "mbp-10", "tbbo"})
+#: hundreds of millions of rows; :mod:`snippy_scales.data.databento` fetches
+#: them one day per request. Must match ``databento.TICK_SPECS``.
+TICK_SCHEMAS: frozenset[str] = frozenset(
+    {"trades", "tbbo", "mbp-1", "bbo-1s", "bbo-1m", "mbo", "mbp-10"}
+)
 
 
 def is_tick_schema(schema: str) -> bool:
@@ -149,28 +150,12 @@ def resolve_schema(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-#: Providers that can supply bar data. Only Databento supports event-level
-#: (tick) schemas — a config with ``provider: alpaca`` may not list one.
+#: Providers that can supply data. Only Databento supports event-level (tick)
+#: schemas and 1-second bars.
 VALID_PROVIDERS = Literal["databento", "alpaca"]
 
-#: Databento delivery mechanism. ``"batch"`` (default) submits a batch job
-#: and downloads it once complete — billed the same per byte as streaming,
-#: but Databento keeps completed job output downloadable free of charge for
-#: a retention window, so an accidental local-data loss doesn't have to be
-#: repaid. ``"streaming"`` calls the Historical Streaming API directly —
-#: lower latency, but every call is billed with no server-side retention.
-#: Ignored for ``provider == "alpaca"`` (Alpaca has no batch equivalent).
-DownloadMethod = Literal["batch", "streaming"]
-
-#: Closed set of top-level storage classifications. This determines the
-#: ``data/raw/<instrument_type>/`` subdirectory a symbol is stored under —
-#: it is deliberately separate from ``asset_classes`` (below), which is a
-#: free-form display/grouping label chosen per config file and must never
-#: be used as a storage key (two configs could otherwise use different
-#: labels for the same symbol and silently double-store it). Every symbol
-#: must be unique within its ``instrument_type`` — see
-#: :func:`~snippy_scales.data.ingest.find_cross_class_duplicates`.
-InstrumentType = Literal["equities", "futures", "options", "fx_spot", "crypto"]
+#: Bar schemas Alpaca can serve.
+ALPACA_SCHEMAS: frozenset[str] = frozenset({"ohlcv-1m", "ohlcv-1h", "ohlcv-1d"})
 
 
 class AssetClassConfig(BaseModel):
@@ -224,7 +209,7 @@ class AlpacaConfig(BaseModel):
             tier allows 200; the default leaves headroom for jitter/retries.
         max_workers: Symbols fetched concurrently. Safe to raise well above
             the historical intuition for I/O-bound work — the shared
-            :class:`~snippy_scales.data.ratelimit.RateLimiter` is what
+            :class:`~snippy_scales.data.alpaca.RateLimiter` is what
             actually bounds request throughput, not thread count.
     """
 
@@ -235,49 +220,32 @@ class AlpacaConfig(BaseModel):
 
 
 class IngestConfig(BaseModel):
-    """Top-level configuration for a bar/tick ingestion run.
+    """Top-level configuration for an ``algo data sync`` run.
 
     Attributes:
-        provider: Which data source to use — ``"databento"`` (default) or
-            ``"alpaca"``. Alpaca only supports bar schemas, never tick
-            schemas.
-        instrument_type: Closed top-level storage classification (e.g.
-            ``"equities"``, ``"futures"``) — determines the
-            ``data/raw/<instrument_type>/`` subdirectory every symbol in
-            this config is stored under. File-level (like ``provider``)
-            because one config always covers one instrument type in
-            practice; split into another file if that ever changes. Not to
-            be confused with ``asset_classes``, which stays a free-form
-            display/grouping label.
-        dataset: Databento dataset code (default ``"GLBX.MDP3"``). Ignored
-            when ``provider == "alpaca"``.
-        schemas: Bar frequency aliases and/or event-level schema names to
-            ingest (e.g. ``["1d", "trades"]``).  Overridable at runtime via
-            the ``--schema`` CLI flag (which runs a single schema instead of
-            the full list).
+        provider: ``"databento"`` (default) or ``"alpaca"``. Alpaca supports
+            only 1m/1h/1d bars.
+        venue: Venue for instrument IDs in the catalog. Defaults to the
+            dataset prefix for Databento (``GLBX.MDP3`` -> ``GLBX``) and
+            ``ALPACA`` for Alpaca.
+        dataset: Databento dataset code. Ignored for Alpaca.
+        schemas: Bar frequency aliases and/or event-level schema names
+            (e.g. ``["1d", "trades"]``). Narrowed at runtime via ``--schema``.
         start: Earliest date to fetch (``YYYY-MM-DD``).
-        end: Latest date to fetch (``YYYY-MM-DD``).  Defaults to today when
-            ``None``.
-        stype_in: Databento symbology type. Ignored for Alpaca.
-        download_method: Databento delivery mechanism — ``"batch"`` (default)
-            or ``"streaming"``. Ignored for Alpaca.
-        alpaca: Alpaca-specific options. Ignored (and optional) for Databento.
-        asset_classes: Mapping of arbitrary asset-class labels to their
-            :class:`AssetClassConfig`.
+        end: Latest date to fetch (exclusive, ``YYYY-MM-DD``). Defaults to today.
+        stype_in: Databento symbology type, used for cost estimates. Inferred
+            from each symbol's form when omitted. Ignored for Alpaca.
+        alpaca: Alpaca-specific options. Ignored for Databento.
+        asset_classes: Mapping of free-form labels to their symbols.
     """
 
     provider: VALID_PROVIDERS = Field(
         default="databento",
         description="Bar-data source: 'databento' or 'alpaca'.",
     )
-    instrument_type: InstrumentType = Field(
-        ...,
-        description=(
-            "Closed top-level storage classification (e.g. 'equities', "
-            "'futures') — determines the data/raw/<instrument_type>/ "
-            "subdirectory. Separate from asset_classes, which is a "
-            "free-form display/grouping label only."
-        ),
+    venue: str | None = Field(
+        default=None,
+        description="Venue for catalog instrument IDs. Defaults per provider.",
     )
     dataset: str = Field(
         default="GLBX.MDP3",
@@ -287,8 +255,8 @@ class IngestConfig(BaseModel):
         default_factory=lambda: ["1d"],
         description=(
             "Bar frequency aliases (e.g. '1d', '1h', '1m') and/or event-level "
-            "schema names (e.g. 'trades', 'mbo') to ingest.  Can be narrowed to "
-            "a single schema at runtime via --schema."
+            "schema names (e.g. 'trades', 'mbo').  Can be narrowed to a single "
+            "schema at runtime via --schema."
         ),
     )
     start: str = Field(
@@ -297,33 +265,16 @@ class IngestConfig(BaseModel):
     )
     end: str | None = Field(
         default=None,
-        description=(
-            "End date for data pull in ISO format (YYYY-MM-DD).  Defaults to today when omitted."
-        ),
+        description="End date (exclusive) in ISO format (YYYY-MM-DD). Defaults to today.",
     )
-
     stype_in: VALID_STYPES | None = Field(
         default=None,
-        description=(
-            "Optional Databento symbology type for API calls (e.g. 'raw_symbol', 'parent'). "
-            "Ignored for Alpaca."
-        ),
+        description="Databento symbology type for cost estimates. Ignored for Alpaca.",
     )
-
-    download_method: DownloadMethod = Field(
-        default="batch",
-        description=(
-            "Databento delivery mechanism: 'batch' (default, free re-download within "
-            "Databento's retention window) or 'streaming' (lower latency, no retention). "
-            "Ignored for Alpaca."
-        ),
-    )
-
     alpaca: AlpacaConfig | None = Field(
         default=None,
         description="Alpaca-specific options. Only meaningful when provider == 'alpaca'.",
     )
-
     asset_classes: dict[str, AssetClassConfig] = Field(
         default_factory=dict,
         description="Mapping of asset-class label → AssetClassConfig.",
@@ -331,13 +282,13 @@ class IngestConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_schemas(self) -> IngestConfig:
-        """Ensure every schema resolves, and Alpaca configs list only bar schemas."""
+        """Ensure every schema resolves, and Alpaca configs list only supported bars."""
         for entry in self.schemas:
             resolved = resolve_schema(entry)  # raises ValueError if unknown
-            if self.provider == "alpaca" and is_tick_schema(resolved):
+            if self.provider == "alpaca" and resolved not in ALPACA_SCHEMAS:
                 raise ValueError(
-                    f"provider='alpaca' does not support event-level schema {resolved!r} "
-                    "— Alpaca is bar-data only. Use provider='databento' for tick schemas."
+                    f"provider='alpaca' does not support schema {resolved!r} — Alpaca "
+                    f"supports {sorted(ALPACA_SCHEMAS)}. Use provider='databento'."
                 )
         return self
 
@@ -348,13 +299,22 @@ class IngestConfig(BaseModel):
 
     @property
     def all_symbols(self) -> list[str]:
-        """Flat list of every symbol across all asset classes (order preserved)."""
-        return [sym for ac in self.asset_classes.values() for sym in ac.symbols]
+        """Flat list of every symbol across all asset classes (order preserved, deduplicated)."""
+        return list(dict.fromkeys(sym for ac in self.asset_classes.values() for sym in ac.symbols))
 
     @property
     def alpaca_options(self) -> AlpacaConfig:
         """Effective Alpaca options — :attr:`alpaca` if set, otherwise defaults."""
         return self.alpaca or AlpacaConfig()
+
+    @property
+    def effective_venue(self) -> str:
+        """:attr:`venue`, or the provider default."""
+        if self.venue:
+            return self.venue
+        if self.provider == "alpaca":
+            return "ALPACA"
+        return self.dataset.split(".", 1)[0]
 
 
 # ---------------------------------------------------------------------------

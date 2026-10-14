@@ -40,6 +40,22 @@ def _make_bars(n: int = 400, seed: int = 0, base_ns: int = _BASE_NS) -> pl.DataF
     )
 
 
+def _write_catalog(root: Path, symbol: str, bars: pl.DataFrame, schema: str = "ohlcv-1d") -> None:
+    """Store *bars* in a catalog at *root* the way ``algo data sync`` would."""
+    from snippy_scales.data import catalog as cat
+
+    catalog = cat.open_catalog(root)
+    cat.write_bars(
+        catalog,
+        cat.frame_to_bars(
+            bars,
+            bar_type=cat.bar_type(symbol, "GLBX", schema),
+            price_precision=cat.infer_price_precision(bars),
+            interval_ns=cat.bar_interval_ns(schema),
+        ),
+    )
+
+
 def _make_fake_result(symbols: list[str] | None = None) -> Any:
     """Minimal EvaluationResult usable as a mock return value."""
     from snippy_scales.backtesting.domain import BacktestMetrics
@@ -166,15 +182,13 @@ _runner = CliRunner()
 
 class TestRunAllCommand:
     def test_no_data_exits_nonzero(self, tmp_path: Path) -> None:
-        result = _runner.invoke(app, ["run-all", "--data-dir", str(tmp_path)])
+        result = _runner.invoke(app, ["run-all", "--catalog", str(tmp_path)])
         assert result.exit_code == 1
         assert "No" in result.output
 
     def test_runs_single_asset_strategies_per_symbol(self, tmp_path: Path) -> None:
         """Single symbol: single-asset strategies run; multi-asset is skipped."""
-        sym_dir = tmp_path / "futures" / "ES.c.0"
-        sym_dir.mkdir(parents=True)
-        _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
+        _write_catalog(tmp_path, "ES.c.0", _make_bars(500))
 
         fake_result = _make_fake_result(["ES.c.0"])
 
@@ -184,7 +198,7 @@ class TestRunAllCommand:
             instance.evaluate_multi_asset.return_value = fake_result
 
             result = _runner.invoke(
-                app, ["run-all", "--data-dir", str(tmp_path), "--benchmark", "none"]
+                app, ["run-all", "--catalog", str(tmp_path), "--benchmark", "none"]
             )
 
         # Should succeed
@@ -197,9 +211,7 @@ class TestRunAllCommand:
     def test_runs_multi_asset_strategy_with_multiple_symbols(self, tmp_path: Path) -> None:
         """Two symbols: all strategies including multi-asset run."""
         for sym in ["ES.c.0", "NQ.c.0"]:
-            sym_dir = tmp_path / "futures" / sym
-            sym_dir.mkdir(parents=True)
-            _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
+            _write_catalog(tmp_path, sym, _make_bars(500))
 
         fake_single = _make_fake_result(["ES.c.0"])
         fake_multi = _make_fake_result(["ES.c.0", "NQ.c.0"])
@@ -210,7 +222,7 @@ class TestRunAllCommand:
             instance.evaluate_multi_asset.return_value = fake_multi
 
             result = _runner.invoke(
-                app, ["run-all", "--data-dir", str(tmp_path), "--benchmark", "none"]
+                app, ["run-all", "--catalog", str(tmp_path), "--benchmark", "none"]
             )
 
         assert result.exit_code == 0, result.output
@@ -221,9 +233,7 @@ class TestRunAllCommand:
 
     def test_error_in_one_strategy_does_not_abort(self, tmp_path: Path) -> None:
         """An error in one strategy is caught; remaining strategies still run."""
-        sym_dir = tmp_path / "futures" / "ES.c.0"
-        sym_dir.mkdir(parents=True)
-        _make_bars(500).write_parquet(sym_dir / "ohlcv-1d.parquet")
+        _write_catalog(tmp_path, "ES.c.0", _make_bars(500))
 
         fake_result = _make_fake_result(["ES.c.0"])
 
@@ -242,21 +252,19 @@ class TestRunAllCommand:
             instance.evaluate_multi_asset.return_value = fake_result
 
             result = _runner.invoke(
-                app, ["run-all", "--data-dir", str(tmp_path), "--benchmark", "none"]
+                app, ["run-all", "--catalog", str(tmp_path), "--benchmark", "none"]
             )
 
         assert result.exit_code == 0, result.output
         assert "error" in result.output.lower()
 
     def test_respects_schema_option(self, tmp_path: Path) -> None:
-        """--schema filters which parquet files are discovered."""
-        sym_dir = tmp_path / "futures" / "ES.c.0"
-        sym_dir.mkdir(parents=True)
-        # Write ohlcv-1h.parquet but NOT ohlcv-1d.parquet
-        _make_bars(400).write_parquet(sym_dir / "ohlcv-1h.parquet")
+        """--schema filters which bar series are discovered."""
+        # Write 1-hour bars but NOT daily bars.
+        _write_catalog(tmp_path, "ES.c.0", _make_bars(400), schema="ohlcv-1h")
 
         # Default schema is ohlcv-1d → no files found
-        result = _runner.invoke(app, ["run-all", "--data-dir", str(tmp_path)])
+        result = _runner.invoke(app, ["run-all", "--catalog", str(tmp_path)])
         assert result.exit_code == 1
 
         fake_result = _make_fake_result(["ES.c.0"])
@@ -269,7 +277,7 @@ class TestRunAllCommand:
                 app,
                 [
                     "run-all",
-                    "--data-dir",
+                    "--catalog",
                     str(tmp_path),
                     "--schema",
                     "ohlcv-1h",

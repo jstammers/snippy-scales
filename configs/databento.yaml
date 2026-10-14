@@ -1,9 +1,10 @@
 # ---------------------------------------------------------------------------
-# Databento ingestion configuration
+# Databento sync configuration
 # ---------------------------------------------------------------------------
 # Pass this file to the CLI:
-#   algo data ingest-config configs/databento.yaml
-#   algo data ingest-config configs/databento.yaml --schema 1h
+#   algo data sync configs/databento.yaml --dry-run    # what's missing + cost
+#   algo data sync configs/databento.yaml
+#   algo data sync configs/databento.yaml --schema 1h
 #
 # Symbols use Databento continuous-contract notation:
 #   <ROOT>.c.0  → front-month continuous
@@ -11,34 +12,25 @@
 # Individual expiries can also be used (e.g. ESZ2024).
 # ---------------------------------------------------------------------------
 
-# Closed top-level storage classification — determines the
-# data/raw/<instrument_type>/ subdirectory. Every symbol below is a futures
-# contract (equity index, rate, fx, or commodity futures), so this whole
-# file is "futures" — separate from the asset_classes labels below, which
-# are just a display/grouping label, not a storage key.
-instrument_type: "futures"
-
-# Databento dataset — CME Globex multi-asset feed
+# Databento dataset — CME Globex multi-asset feed. Catalog instrument IDs use
+# the venue GLBX (e.g. ES.c.0.GLBX); override with `venue:` if needed.
 dataset: "GLBX.MDP3"
 
-# Schemas to ingest — bar aliases (1d / daily / 1h / 1m / 1min / 1s / eod) and/or
-# event-level schema names (trades / mbo / mbp-1 / mbp-10 / tbbo). Every entry is
-# ingested for every symbol below. Narrow to one at runtime via --schema.
+# Schemas to sync — bar aliases (1d / daily / 1h / 1m / 1min / 1s) and/or
+# event-level schema names (trades / tbbo / mbp-1 / bbo-1s / bbo-1m / mbo /
+# mbp-10). Every entry is synced for every symbol below. Narrow to one at
+# runtime via --schema.
 schemas: ["1d"]
 
 # Historical pull range
 start: "2010-06-06"
 # end: "2024-12-31"  # Omit to default to today
 
-# stype_in applies to every symbol in this config. To also pull every
-# individual outright contract under a root (e.g. for verifying a continuous
-# contract's rolls), use Databento parent symbology — a symbol like "ES.FUT"
-# with stype_in: parent returns every contract active in the date range in
-# one request. Since stype_in is set once per config, do that as a separate
-# config/asset-class run rather than mixing it with the continuous symbols
-# below:
-#   algo data ingest GLBX.MDP3 -s ES.FUT --schema 1d --stype-in parent \
-#     --start 2010-06-06 --end 2024-12-31
+# stype_in is used for cost estimates; when omitted it is inferred from each
+# symbol's form (ES.c.0 -> continuous, ES.FUT -> parent, ESZ4 -> raw_symbol).
+# To pull every outright contract under a root (e.g. for real-contract
+# backtests with rolls), add parent symbols such as "ES.FUT" in a separate
+# config.
 stype_in: "continuous"
 # ---------------------------------------------------------------------------
 # Asset classes

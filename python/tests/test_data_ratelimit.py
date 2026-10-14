@@ -1,4 +1,4 @@
-"""Unit tests for snippy_scales.data.ratelimit.RateLimiter.
+"""Unit tests for snippy_scales.data.alpaca.RateLimiter.
 
 Uses an injected fake clock/sleep so no test actually sleeps in wall-clock
 time — sleeps just advance the fake clock instantly.
@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from snippy_scales.data.ratelimit import RateLimiter
+from snippy_scales.data.alpaca import RateLimiter
 
 
 class _FakeClock:

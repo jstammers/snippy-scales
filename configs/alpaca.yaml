@@ -1,26 +1,21 @@
 # ---------------------------------------------------------------------------
-# Alpaca ingestion configuration
+# Alpaca sync configuration
 # ---------------------------------------------------------------------------
 # Pass this file to the CLI:
-#   algo data ingest-config configs/alpaca.yaml
-#   algo data ingest-config configs/alpaca.yaml --schema 1d
+#   algo data sync configs/alpaca.yaml --dry-run
+#   algo data sync configs/alpaca.yaml
+#   algo data sync configs/alpaca.yaml --schema 1d
 #
 # Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in the environment — never put
 # credentials in this file. Free (Basic) tier: 200 historical API calls/min,
 # data since 2016, most recent 15 minutes withheld.
 #
 # Symbols are plain equity tickers (e.g. AAPL, BRK.B) — Alpaca has no
-# continuous-contract or parent-symbology notation, and only supports bar
-# schemas (no event-level 'trades'/'mbo' schemas).
+# continuous-contract or parent-symbology notation, and only supports 1m, 1h
+# and 1d bars. Catalog instrument IDs use the venue ALPACA (e.g. AAPL.ALPACA).
 # ---------------------------------------------------------------------------
 
 provider: "alpaca"
-
-# Closed top-level storage classification — determines the
-# data/raw/<instrument_type>/ subdirectory. Separate from the asset_classes
-# labels below (mega_cap_tech, dow_sample, ...), which are a free-form
-# display/grouping label only, not a storage key.
-instrument_type: "equities"
 
 # Bar frequency aliases only — see docs/guides/data_ingestion.md#frequency-reference.
 schemas: ["1d"]

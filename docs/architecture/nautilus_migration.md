@@ -1,6 +1,6 @@
 # Migration Plan: NautilusTrader
 
-**Status:** in progress (revision 2) — phase 0 done · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
+**Status:** in progress (revision 2) — phases 0 and 1 done · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
 (pinned exactly), moving to `2.0.x` stable when released
 
 ## Goal
@@ -222,44 +222,49 @@ immediately and in parallel.
 
 `configs/instruments.yaml` moved to phase 1, where it is first used.
 
-### Phase 1: Catalog is the datastore; Nautilus downloads
+### Phase 1: Catalog is the datastore; Nautilus downloads — **done**
 
-**Sync job** (`algo data sync configs/databento.yaml [--dry-run]`):
+What landed:
 
-- For each instrument in the config: `last = catalog.query_last_timestamp(...)`. Fetch from
-  `last` with `DatabentoHistoricalClient.get_range_bars(..., timestamp_on_close=True)` (bars) or
-  `get_range_trades/quotes` in **one-day chunks** (ticks). Write, then `consolidate_data`.
-- Instruments via `get_range_instruments` (Databento `definition`), written before data.
-- `--dry-run` prints the Databento cost from `databento.Historical().metadata.get_cost(...)`
-  (~20 lines; kept deliberately as a guard against expensive typos).
-- Days with no data (holidays) are cheap empty requests. No empty-marker bookkeeping.
-- A one-off multi-GB tick backfill uses the Databento **portal** batch download plus
-  `DatabentoDataLoader` → catalog. No Batch API code in the repo.
+- `data/catalog.py`: naming (`bar_type`, `instrument_id`), `load_bars` (same columns as
+  before plus `ts_init`; `start`/`end` filter on the bar close), `frame_to_bars` (exact
+  decimal prices, `ts_init` = open + interval), incremental `write_bars` (writes only before
+  the first / after the last stored bar), `missing_ranges`, instrument helpers including
+  `continuous_instrument` (synthetic `ES.c.0.GLBX` cloned from the latest outright).
+- `data/databento.py`: `DatabentoSync` on Nautilus's `DatabentoHistoricalClient`
+  (`get_range_bars(..., timestamp_on_close=True)`, `get_range_trades/quotes/...` one day per
+  request, `get_range_instruments`). Cost via `databento.Historical().metadata.get_cost` for
+  exactly the missing ranges. The client is built lazily, so `--dry-run` planning needs no key.
+- `data/alpaca.py`: the single Alpaca loader (fetch with `alpaca-py`, shared rate limiter,
+  concurrent fetches with serialised catalog writes, `Equity` instruments at venue `ALPACA`,
+  4-decimal prices because adjusted history is off the tick grid).
+- CLI: `algo data sync | coverage | consolidate | update-universe | backfill-sp500`;
+  `sync --instruments-only` fetches definitions without data. `algo eval run-all` and
+  `algo research roughness` read the catalog.
+- `scripts/migrate_raw_to_catalog.py`: read-only on `data/raw/`; bars with inferred precision,
+  ticks rebuilt from the DBN archive, per-series verification (row count + close checksum).
+  It is idempotent, so it doesn't refuse a non-empty catalog.
+- Deleted: `providers/`, `batch.py`, `ingest.py`, `schema.py`, `tick.py`, `ratelimit.py` (moved
+  into `alpaca.py`), CLI `ingest`, `ingest-config`, `check-layout`, `migrate-layout`, and their
+  tests.
 
-**`load_bars(symbol, schema, start=None, end=None) -> pl.DataFrame`**: same signature and columns
-as today, reading via `query_data_arrow_bytes(..., display=True)`, so research and strategies
-don't change.
+Deviations from the plan:
 
-**Migrating existing `data/raw/`** (one-off script in `scripts/`, not in the package; removed
-after use):
+- No `configs/instruments.yaml`: futures definitions come from Databento (`definition`
+  schema), equities from `equity_instrument`. Per-contract commissions move to phase 2.
+- Equity venue is `ALPACA` (where the data came from), not an IB venue; mapping to the
+  execution venue belongs in phase 5's `instruments.py`.
+- `ohlcv-eod` is no longer supported (no distinct Nautilus bar type); use `1d`.
+- Tick migration supports `trades` from DBN files only; days without DBN are reported.
 
-- **Read-only on `data/raw/`; never deletes anything.** Writes only to `data/catalog/`, and
-  refuses a non-empty target unless resuming. Deleting `data/raw/` stays a manual decision after
-  verification and a backup, per CLAUDE.md.
-- Tick data: `_dbn/*.dbn.zst` → `DatabentoDataLoader` → catalog (lossless; no re-purchase).
-- Databento bars: run `sync --dry-run` first. If re-downloading is cheap (daily bars for 20
-  futures usually are), re-download through Nautilus so precision and timestamps come from the
-  official path. Otherwise convert from Parquet: quantise to tick, `ts_init` = open + interval.
-- Alpaca minute bars: convert from Parquet (free data, but hours to re-download).
-- Verify: per (symbol, schema), row count, first/last timestamp and checksum of
-  `round(close / tick)` against `data/raw/`.
+**Not yet verified end to end:** the Databento path was tested against a fake async client
+with the real method signatures. No API key or network access to `hist.databento.com` was
+available, so the first real `algo data sync configs/databento.yaml --dry-run` and a small
+sync should be checked by hand. In particular, check that continuous symbols resolve in
+`get_range_bars` and `get_range_instruments`.
 
-**Then delete:** `providers/databento.py`, `batch.py`, `ingest.py`, `schema.py`, `tick.py`,
-`backfill.py` (unless Alpaca stays), CLI `ingest`, `ingest-config`, `coverage`, `check-layout`,
-`migrate-layout`.
-
-**Exit:** verification clean on your real data, and `algo eval run-all` gives the same results
-on catalog data as on `data/raw/`.
+**Exit (for you to run on real data):** `migrate_raw_to_catalog.py --verify-only` clean;
+`algo eval run-all` gives the same results as before the migration.
 
 ### Phase 2: `SignalStrategy` and `run_backtest`; delete `backtesting/`
 

@@ -1,10 +1,8 @@
 """Reusable helpers for large, resumable multi-symbol backfills.
 
-Factored out of ``scripts/pull_sp500_alpaca_1m.py`` so the estimation,
-symbols-cache, and manifest logic is unit-testable without importing a
-standalone script (which isn't part of the installed package). The script
-itself stays a thin Typer wrapper around these functions plus
-:func:`~snippy_scales.data.ingest.ingest_from_config`.
+Used by ``algo data backfill-sp500``: request/runtime estimation, the cached
+universe file, and a per-symbol CSV manifest so failed symbols can be retried.
+The download itself is :meth:`snippy_scales.data.alpaca.AlpacaLoader.sync`.
 """
 
 from __future__ import annotations
@@ -14,12 +12,12 @@ import datetime as dt
 import math
 from typing import TYPE_CHECKING
 
-from snippy_scales.data.paths import RAW_DIR, UNIVERSE_DIR
+from snippy_scales.data.paths import CATALOG_DIR, MANIFEST_DIR, UNIVERSE_DIR
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from snippy_scales.data.ingest import IngestRow
+    from snippy_scales.data.catalog import SyncResult
 
 #: Rough bars/trading-day per bar schema, used only for the printed
 #: time/volume estimate — actual counts vary (half days, extended-hours
@@ -29,7 +27,6 @@ _BARS_PER_TRADING_DAY_BY_SCHEMA: dict[str, float] = {
     "ohlcv-1m": 410,  # ~390 regular-session minutes + a margin
     "ohlcv-1h": 8,  # ~6.5 regular-session hours + a margin
     "ohlcv-1d": 1,
-    "ohlcv-eod": 1,
 }
 ESTIMATED_BARS_PER_TRADING_DAY = _BARS_PER_TRADING_DAY_BY_SCHEMA["ohlcv-1m"]
 TRADING_DAYS_PER_CALENDAR_YEAR = 252
@@ -38,7 +35,7 @@ MAX_BARS_PER_REQUEST = 10_000
 #: Shared default paths for `algo data backfill-sp500` / `algo data update-universe`.
 #: Derived from :mod:`snippy_scales.data.paths` so they move together with
 #: ``SNIPPY_DATA_ROOT`` rather than hardcoding ``"data"`` a second time.
-DEFAULT_OUTPUT_DIR = RAW_DIR
+DEFAULT_CATALOG_DIR = CATALOG_DIR
 DEFAULT_SYMBOLS_CACHE = UNIVERSE_DIR / "sp500_ever_members.txt"
 
 
@@ -53,12 +50,12 @@ def default_manifest_path(schema_alias: str) -> Path:
         schema_alias: The `--schema` value as passed on the CLI (e.g. `"1m"`, `"1d"`).
 
     Returns:
-        Path like ``data/raw/_manifests/sp500_<schema_alias>.csv``.
+        Path like ``data/derived/manifests/sp500_<schema_alias>.csv``.
     """
-    return RAW_DIR / "_manifests" / f"sp500_{schema_alias}.csv"
+    return MANIFEST_DIR / f"sp500_{schema_alias}.csv"
 
 
-_MANIFEST_FIELDNAMES = ["symbol", "asset_class", "schema", "succeeded", "detail", "updated_at"]
+_MANIFEST_FIELDNAMES = ["symbol", "schema", "succeeded", "written", "detail", "updated_at"]
 
 
 def resolve_backfill_window(years: int, end: str | dt.date | None) -> tuple[dt.date, dt.date]:
@@ -171,7 +168,7 @@ def read_manifest(path: Path) -> dict[str, dict[str, str]]:
         return {row["symbol"]: row for row in csv.DictReader(f)}
 
 
-def merge_manifest(path: Path, new_rows: list[IngestRow]) -> dict[str, dict[str, str]]:
+def merge_manifest(path: Path, new_rows: list[SyncResult]) -> dict[str, dict[str, str]]:
     """Merge freshly-ingested rows into any existing manifest and write it back.
 
     Existing rows for symbols not touched by this run (e.g. a
@@ -179,9 +176,8 @@ def merge_manifest(path: Path, new_rows: list[IngestRow]) -> dict[str, dict[str,
 
     Args:
         path: Manifest CSV path. Parent directories are created if missing.
-        new_rows: Results from this run, one per ``(asset class, schema,
-            symbol)`` triple, as returned by
-            :func:`~snippy_scales.data.ingest.ingest_from_config`.
+        new_rows: Results from this run, one per symbol, as returned by
+            :meth:`~snippy_scales.data.alpaca.AlpacaLoader.sync`.
 
     Returns:
         The full merged manifest as ``{symbol: row_dict}``.
@@ -191,10 +187,10 @@ def merge_manifest(path: Path, new_rows: list[IngestRow]) -> dict[str, dict[str,
     for row in new_rows:
         existing[row.symbol] = {
             "symbol": row.symbol,
-            "asset_class": row.asset_class,
             "schema": row.schema,
             "succeeded": str(row.succeeded),
-            "detail": row.detail,
+            "written": str(row.written),
+            "detail": row.error or "",
             "updated_at": now,
         }
 

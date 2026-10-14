@@ -102,7 +102,7 @@ def run(
     ),  # noqa: E501
 ) -> None:
     """Run walk-forward evaluation for a strategy with its default parameters."""
-    from snippy_scales.data.ingest import load_bars
+    from snippy_scales.data.catalog import load_bars
     from snippy_scales.evaluation import EvaluationRunner
 
     strategy_class = _resolve_strategy(strategy)
@@ -122,8 +122,7 @@ def run(
         bars = load_bars(symbol, schema)
     except FileNotFoundError as exc:
         console.print(
-            f"[red]No data found for {symbol}/{schema}.[/]  "
-            "Run [cyan]algo data ingest-config[/] first."
+            f"[red]No data found for {symbol}/{schema}.[/]  Run [cyan]algo data sync[/] first."
         )
         raise typer.Exit(1) from exc
 
@@ -173,7 +172,7 @@ def sweep(
     ),  # noqa: E501
 ) -> None:
     """Run a parameter sweep with walk-forward evaluation."""
-    from snippy_scales.data.ingest import load_bars
+    from snippy_scales.data.catalog import load_bars
     from snippy_scales.evaluation import (
         EvaluationRunner,
         ParameterGrid,
@@ -203,8 +202,7 @@ def sweep(
         bars = load_bars(symbol, schema)
     except FileNotFoundError as exc:
         console.print(
-            f"[red]No data found for {symbol}/{schema}.[/]  "
-            "Run [cyan]algo data ingest-config[/] first."
+            f"[red]No data found for {symbol}/{schema}.[/]  Run [cyan]algo data sync[/] first."
         )
         raise typer.Exit(1) from exc
 
@@ -263,8 +261,8 @@ def sweep(
 @app.command(name="run-all")
 def run_all(
     schema: str = typer.Option("ohlcv-1d", "--schema", help="Bar schema (e.g. ohlcv-1d)"),
-    data_dir: Path = typer.Option(  # noqa: B008
-        None, "--data-dir", help="Raw data directory (default: data/raw)"
+    catalog_path: Path = typer.Option(  # noqa: B008
+        None, "--catalog", help="Catalog root (default: data/catalog)"
     ),
     splits: int = typer.Option(5, "--splits", "-n", help="Number of walk-forward folds"),
     test_size: float = typer.Option(0.2, "--test-size", help="Test fraction per fold"),
@@ -283,37 +281,31 @@ def run_all(
         help="Benchmark ticker for tearsheet. Pass 'none' to disable.",
     ),
 ) -> None:
-    """Evaluate every strategy against every available symbol in data/raw."""
-    from snippy_scales.data.ingest import RAW_DIR, load_bars
+    """Evaluate every strategy against every symbol with SCHEMA bars in the catalog."""
+    from snippy_scales.data.catalog import list_bar_series, load_bars
     from snippy_scales.evaluation import EvaluationRunner
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
 
-    raw_dir = data_dir if data_dir is not None else RAW_DIR
-
-    # 1. Discover symbols that have data for the requested schema
-    # (data/raw/<instrument_type>/<symbol>/<schema>.parquet)
-    parquet_files = sorted(raw_dir.glob(f"*/*/{schema}.parquet"))
-    if not parquet_files:
+    # 1. Discover symbols that have bars for the requested schema
+    series = list_bar_series(schema, catalog_path)
+    if not series:
         console.print(
-            f"[red]No {schema!r} data found under {raw_dir}.[/]  "
-            "Run [cyan]algo data ingest-config[/] first."
+            f"[red]No {schema!r} bars found in the catalog.[/]  Run [cyan]algo data sync[/] first."
         )
         raise typer.Exit(1)
 
-    symbols = [(p.parent.parent.name, p.parent.name) for p in parquet_files]
     console.print(
-        f"[cyan]Discovered {len(symbols)} symbol(s):[/] "
-        f"{', '.join(symbol for _, symbol in symbols)}"
+        f"[cyan]Discovered {len(series)} symbol(s):[/] {', '.join(symbol for symbol, _ in series)}"
     )
 
     # 2. Load bars for every symbol
     bars_map: dict[str, Any] = {}
-    for instrument_type, symbol in symbols:
-        try:
-            bars_map[symbol] = load_bars(symbol, schema, raw_dir, instrument_type=instrument_type)
-            console.print(f"  [green]loaded[/] {symbol}  ({len(bars_map[symbol]):,} bars)")
-        except FileNotFoundError:
-            console.print(f"  [yellow]skip[/] {symbol}: file unreadable")
+    for symbol, venue in series:
+        if symbol in bars_map:
+            console.print(f"  [yellow]skip[/] {symbol}.{venue}: symbol already loaded")
+            continue
+        bars_map[symbol] = load_bars(symbol, schema, venue=venue, catalog_path=catalog_path)
+        console.print(f"  [green]loaded[/] {symbol}  ({len(bars_map[symbol]):,} bars)")
 
     if not bars_map:
         console.print("[red]No symbols loaded. Aborting.[/]")
