@@ -6,12 +6,8 @@ on:
   pull_request:
     branches: [main, develop]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  # ── Python lint + type-check (fast, no Rust needed) ─────────────────────────
+  # ── Python lint + type-check ─────────────────────────────────────────────────
   python-lint:
     name: Python — ruff + ty
     runs-on: ubuntu-latest
@@ -39,36 +35,7 @@ jobs:
       - name: ty type check
         run: just type-check
 
-  # ── Rust lint + test (runs in parallel with python-lint) ─────────────────────
-  rust:
-    name: Rust — clippy + test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
-      - name: Install just
-        uses: extractions/setup-just@v2
-
-      - name: rustfmt check
-        run: just fmt-rs-check
-
-      - name: clippy
-        run: just lint-rs
-
-      - name: Test
-        run: just test-rs
-
-  # ── Python tests (waits for lint to pass before spending on Rust build) ──────
+  # ── Python tests (waits for lint to pass) ────────────────────────────────────
   python-test:
     name: Python — pytest
     runs-on: ubuntu-latest
@@ -79,22 +46,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
       - name: Install just
         uses: extractions/setup-just@v2
 
-      - name: Install Python deps (includes maturin)
+      - name: Install Python deps
         run: uv sync --all-extras
-
-      - name: Build Rust extension (dev)
-        run: just dev
 
       - name: Run pytest
         run: just test-py-cov-ci
@@ -108,34 +64,11 @@ jobs:
 
   # ── Build Python wheel (release build validation) ────────────────────────────
   build-wheel:
-    name: Build — maturin wheel
+    name: Build — wheel
     runs-on: ubuntu-latest
-    needs: [python-lint, rust]
+    needs: python-lint
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
       - uses: astral-sh/setup-uv@v7
-
-      - run: uv sync
       - name: Build wheel
-        run: uv run maturin build --release
-
-  # ── Benchmarks (informational, main-branch pushes only) ──────────────────────
-  rust-bench:
-    name: Rust — benchmarks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-      - name: Install just
-        uses: extractions/setup-just@v2
-
-      - name: Run criterion benchmarks
-        run: just bench -- --output-format=bencher | tee bench_output.txt
+        run: uv build

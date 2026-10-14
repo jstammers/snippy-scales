@@ -1,7 +1,7 @@
 [project]
 name = "snippy-scales"
 version = "0.1.0"
-description = "Modular Python-Rust algorithmic trading platform"
+description = "Algorithmic trading research platform built on NautilusTrader"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -15,10 +15,12 @@ dependencies = [
     "scikit-learn>=1.4",
     "databento>=0.35",
     "pyyaml>=6",
-    "maturin>=1.5",
     "pydantic>=2.7",
     "loguru>=0.7",
     "raptorbt>=0.8.0",
+    # Exact pin: v2 is a release candidate with breaking changes between RCs.
+    # The catalog contract tests (test_nautilus_contract.py) guard upgrades.
+    "nautilus_trader==2.0.0rc6",
     "quantstats>=0.0.62",
     "duckdb>=1.0",
     "scoringrules>=0.11",
@@ -43,15 +45,11 @@ dev = [
 algo = "snippy_scales.cli.main:app"
 
 [build-system]
-requires = ["maturin>=1.5,<2"]
-build-backend = "maturin"
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
-[tool.maturin]
-# algo-pyo3 exposes the Rust core to Python
-manifest-path = "rust/algo-pyo3/Cargo.toml"
-module-name = "snippy_scales._algo_core"
-python-source = "python"
-features = ["pyo3/extension-module"]
+[tool.hatch.build.targets.wheel]
+packages = ["python/snippy_scales"]
 
 [tool.uv]
 dev-dependencies = [

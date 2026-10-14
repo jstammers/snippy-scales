@@ -1,5 +1,5 @@
 site_name: SnippyScales
-site_description: Modular Python–Rust quantitative trading platform
+site_description: Quantitative trading research platform built on NautilusTrader
 repo_url: https://github.com/yourorg/snippy-scales
 docs_dir: docs
 
@@ -32,7 +32,6 @@ nav:
   - Architecture:
       - Overview: architecture/overview.md
       - Event-Driven Engine: architecture/backtest_engine.md
-      - Python–Rust Bridge: architecture/pyo3_bridge.md
       - NautilusTrader Migration: architecture/nautilus_migration.md
   - Guides:
       - Quickstart: guides/quickstart.md
@@ -43,4 +42,3 @@ nav:
       - raptorbt Defects: research/raptorbt_defects.md
   - API Reference:
       - Python: api/python/index.md
-      - Rust: api/rust/algo_core/index.html
