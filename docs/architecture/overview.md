@@ -1,15 +1,18 @@
 # Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Python Layer                         │
-│  Research  │  CLI (Typer)  │  Strategy Logic  │  Data   │
-└──────────────────────┬──────────────────────────────────┘
-                       │ PyO3 / maturin
-┌──────────────────────▼──────────────────────────────────┐
-│                      Rust Layer                          │
-│  algo-core: Backtest Engine │ Execution │ Portfolio      │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      snippy_scales                        │
+│  research/  │  strategies/  │  evaluation/  │  cli/       │
+└───────────────────────┬──────────────────────────────────┘
+                        │ target positions, bars
+┌───────────────────────▼──────────────────────────────────┐
+│                     NautilusTrader                        │
+│  ParquetDataCatalog │ BacktestEngine │ LiveNode + adapters │
+└──────────────────────────────────────────────────────────┘
 ```
 
-The Python layer handles research velocity; the Rust layer provides determinism, speed, and memory safety for the backtest and execution critical path.
+Our code handles research velocity: features, signals and evaluation.
+NautilusTrader (Rust core, Python API) provides the data catalog, the
+event-driven backtest engine and live execution. The migration is in progress —
+see [the migration plan](nautilus_migration.md) for what has moved so far.

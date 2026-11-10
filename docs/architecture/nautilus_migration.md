@@ -1,6 +1,6 @@
 # Migration Plan: NautilusTrader
 
-**Status:** proposed (revision 2) · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
+**Status:** in progress (revision 2) — phase 0 done · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
 (pinned exactly), moving to `2.0.x` stable when released
 
 ## Goal
@@ -209,18 +209,18 @@ never touches orders.
 Each phase ends with a green `just check-py`. Phase 0's Rust removal and phase 1 can start
 immediately and in parallel.
 
-### Phase 0: Foundations
+### Phase 0: Foundations — **done**
 
-- `data/catalog/` added to `.gitignore` (**done**). Add `data/derived/experiments/` usage for
-  Optuna artifacts (already ignored via `data/derived/`).
-- Delete `rust/`, switch the build backend from maturin to `hatchling`/`uv_build`, and remove
-  `just dev`, the Rust CI jobs and `docs/architecture/pyo3_bridge.md`.
-- Add `nautilus_trader==2.0.0rc6` and `optuna` as dependencies. Remove `raptorbt` and `quantstats`
-  in phases 2 and 3.
-- `configs/instruments.yaml`: per symbol, `venue`, `price_increment`, `multiplier`, `lot_size`,
-  commission per contract, IB contract fields.
-- Catalog contract tests (`tests/test_catalog_contract.py`) pinning the verified facts: on-disk
-  schema, overlap raises, `ts_init` = bar close. They fail loudly if an upgrade changes behaviour.
+- `data/catalog/` added to `.gitignore`, and the CLAUDE.md "never delete `data/`" rule covers it.
+- `rust/` deleted. The build backend is `hatchling` (pure Python wheel). `just dev`, the Rust
+  CI/release/docs steps, the Rust prek hooks and `docs/architecture/pyo3_bridge.md` are gone.
+- `nautilus_trader==2.0.0rc6` added as a core dependency. `raptorbt` and `quantstats` are
+  removed in phases 2 and 3; `optuna` becomes core in phase 3.
+- Catalog contract tests (`python/tests/test_nautilus_contract.py`) pin the verified facts:
+  on-disk schema, overlap raises, disjoint appends, `query_last_timestamp` = last `ts_init`,
+  float64 display queries, `BarDataWrangler` decimal input, instrument round trip.
+
+`configs/instruments.yaml` moved to phase 1, where it is first used.
 
 ### Phase 1: Catalog is the datastore; Nautilus downloads
 

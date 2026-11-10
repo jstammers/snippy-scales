@@ -8,21 +8,16 @@ default:
 
 # Install all dependencies and set up the project
 setup:
-    uv sync
-    uv run maturin develop
+    uv sync --all-extras
     prek install
 
 # Install Python dependencies only
 sync:
     uv sync
 
-# Build Rust extension in development mode
-dev:
-    uv run maturin develop
-
-# Build Rust extension in release mode
+# Build the sdist and wheel into dist/
 build:
-    uv run maturin build --release
+    uv build
 
 # ── Python ───────────────────────────────────────────────────────────────────
 
@@ -61,41 +56,16 @@ test-py-cov-ci:
 # Lint, format, type-check, and test Python code
 check-py: lint-py fmt-py type-check test-py
 
-# ── Rust ─────────────────────────────────────────────────────────────────────
-
-# Format Rust code
-fmt-rs:
-    cargo fmt --manifest-path rust/Cargo.toml --all
-
-# Check Rust formatting without making changes
-fmt-rs-check:
-    cargo fmt --manifest-path rust/Cargo.toml --all -- --check
-
-# Run Rust linter (clippy)
-lint-rs:
-    cargo clippy --manifest-path rust/Cargo.toml --workspace -- -D warnings
-
-# Run Rust tests
-test-rs:
-    cargo test --manifest-path rust/Cargo.toml --workspace
-
-# Run Rust benchmarks
-bench:
-    cargo bench --manifest-path rust/Cargo.toml --workspace
-
-# Format, lint, and test Rust code
-check-rs: fmt-rs lint-rs test-rs
-
 # ── Combined ─────────────────────────────────────────────────────────────────
 
-# Format both Python and Rust code
-fmt: fmt-py fmt-rs
+# Format all code
+fmt: fmt-py
 
-# Lint both Python and Rust code
-lint: lint-py lint-rs
+# Lint all code
+lint: lint-py
 
-# Run all tests (Python and Rust)
-test: test-py test-rs
+# Run all tests
+test: test-py
 
 # Run all CI checks locally (prek hooks)
 check-all:
@@ -106,7 +76,6 @@ check: fmt type-check lint test
 
 # Clean build artifacts
 clean:
-    cargo clean --manifest-path rust/Cargo.toml
     rm -rf .pytest_cache
     rm -rf .ruff_cache
     rm -rf htmlcov
@@ -138,9 +107,6 @@ docs-serve:
 
 # Build documentation site
 docs-build:
-    cargo doc --manifest-path rust/Cargo.toml --workspace --no-deps
-    rm -rf docs/api/rust
-    cp -r rust/target/doc docs/api/rust
     uv run mkdocs build --strict
 
 # ── Changelog & Release ──────────────────────────────────────────────────────

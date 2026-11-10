@@ -2,10 +2,9 @@
 
 ## Prerequisites
 
-- Rust (stable, ≥ 1.78) — [rustup.rs](https://rustup.rs)
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- [just](https://github.com/casey/just) — `cargo install just` or your package manager
+- [just](https://github.com/casey/just) — `uv tool install rust-just` or your package manager
 
 ## Setup
 
@@ -13,14 +12,13 @@
 git clone https://github.com/jstammers/snippy-scales
 cd snippy-scales
 
-# Install tooling (Python deps, build Rust extension, activate git hooks)
+# Install Python deps and activate git hooks
 just setup
 ```
 
 That command is equivalent to:
 ```bash
-uv sync                           # install Python dependencies
-just dev                          # build Rust extension in dev mode
+uv sync --all-extras              # install Python dependencies
 prek install                      # activate git hooks
 ```
 
@@ -53,22 +51,17 @@ Most of your work will use these commands:
 just check
 
 # Or individual commands
-just fmt                 # format Python and Rust
-just lint                # lint Python and Rust
-just type-check          # Python type checking
-just test                # all tests (Python + Rust)
+just fmt                 # format
+just lint                # lint
+just type-check          # type checking
+just test                # all tests
 
 # Specific to Python
 just test-py             # just Python tests
 just test-py-cov         # Python tests with coverage (HTML report)
 
-# Specific to Rust
-just test-rs             # just Rust tests
-just bench               # run benchmarks
-
-# Rebuild after Rust changes
-just dev                 # build Rust extension in dev mode
-just build               # build release wheel
+# Build the sdist and wheel
+just build
 ```
 
 ## Running Backtests
@@ -101,7 +94,7 @@ Quick version:
 # Build and serve docs locally (http://localhost:8000)
 just docs-serve
 
-# Rebuild docs (MkDocs + Rust API docs)
+# Rebuild docs
 just docs-build
 
 # Preview unreleased changes in changelog
@@ -124,46 +117,13 @@ This runs all checks that will be executed when you commit.
 just clean
 ```
 
-### Rebuild Rust extension
-
-```bash
-just dev              # development (fast compile, debug symbols)
-just build            # release (slow compile, optimized binary)
-```
-
 ## Troubleshooting
 
-### "maturin develop" fails
+### `uv sync` refuses to install `nautilus_trader`
 
-Make sure Rust is installed:
-```bash
-rustup update
-rustc --version
-```
-
-Then rebuild:
-```bash
-just dev
-```
-
-### "cargo fmt" fails with "Failed to find targets"
-
-Use `--all` to format all workspace members:
-```bash
-just fmt-rs
-```
-
-Or manually:
-```bash
-cargo fmt --all --manifest-path rust/Cargo.toml
-```
-
-### Python imports fail after changing Rust code
-
-Restart the kernel and rebuild the extension:
-```bash
-just dev
-```
+The project pins a NautilusTrader release candidate (`2.0.0rc6`). An exact
+pre-release pin is allowed by uv's default resolution; if you have
+`UV_PRERELEASE=disallow` set, unset it.
 
 ## Next Steps
 
@@ -171,7 +131,6 @@ just dev
 2. Read [Backtesting Engine](../architecture/backtest_engine.md) to learn how to run backtests
 3. Read [Adding a Strategy](adding_strategy.md) to implement your first strategy
 4. Read [API Reference](../api/python/index.md) for Python API docs
-5. Read [Rust API Docs](../api/rust) for Rust API docs
 
 ## Getting Help
 

@@ -1,27 +1,27 @@
 # SnippyScales
 
-A modular Python–Rust quantitative trading research and execution platform.
+A quantitative trading research platform. Research and signal generation are
+ours; data storage, backtest execution and live trading are moving to
+[NautilusTrader](https://github.com/nautechsystems/nautilus_trader) — see the
+[migration plan](docs/architecture/nautilus_migration.md).
 
 ## Architecture
 
 ```
-python/          # Research, ML, orchestration, CLI
-rust/
-  algo-core/     # Pure Rust: backtesting engine, execution, market types
-  algo-pyo3/     # PyO3 bindings — exposes Rust to Python via maturin
+python/          # Research, strategies, evaluation, CLI
 docs/            # Architecture decisions, API reference, guides
-data/            # Local data (gitignored; raw + derived)
+configs/         # Data ingestion configs
+data/            # Local data (gitignored)
 ```
 
 ## Layers
 
-| Layer | Language | Responsibility |
+| Layer | Provided by | Responsibility |
 |---|---|---|
-| Research | Python | Feature engineering, ML, prototyping |
-| Strategy Logic | Python → Rust (gradual) | Signal generation |
-| Backtesting Engine | Rust (`algo-core`) | Event-driven, fast, realistic |
-| Execution Engine | Rust (`algo-core`) | Order routing, risk checks |
-| Python Bindings | Rust (`algo-pyo3`) | PyO3/maturin bridge |
+| Research | `snippy_scales.research` | Feature engineering, ML, prototyping |
+| Strategy Logic | `snippy_scales.strategies` | Signal generation (target positions) |
+| Evaluation | `snippy_scales.evaluation` | Walk-forward, parameter search, overfitting statistics |
+| Data, Backtesting, Execution | NautilusTrader (migration in progress) | Catalog, event-driven engine, live trading |
 | CLI + Orchestration | Python (Typer) | Project control |
 
 ## Quickstart
@@ -31,11 +31,11 @@ data/            # Local data (gitignored; raw + derived)
 curl -LsSf https://astral.sh/uv/install.sh | sh                           # uv
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh  # prek
-cargo install git-cliff                                                     # changelog
-cargo install just                                                          # task runner
+uv tool install git-cliff                                                   # changelog
+uv tool install rust-just                                                   # task runner
 
 # 2. Set up the repo
-just setup                # install deps, build Rust extension, activate git hooks
+just setup                # install deps and activate git hooks
 
 # 3. Use the CLI
 just algo --help          # or: uv run algo --help
@@ -47,8 +47,8 @@ just algo --help          # or: uv run algo --help
 # Quick commands
 just                      # list all available commands
 just check                # run all checks (format, lint, type-check, test)
-just test                 # run all tests (Python + Rust)
-just fmt                  # format all code (Python + Rust)
+just test                 # run all tests
+just fmt                  # format all code
 
 # Python-specific
 just lint-py              # ruff check with auto-fix
@@ -56,12 +56,6 @@ just fmt-py               # ruff format
 just type-check           # ty check
 just test-py              # pytest
 just test-py-cov          # pytest with coverage report
-
-# Rust-specific
-just fmt-rs               # cargo fmt
-just lint-rs              # cargo clippy
-just test-rs              # cargo test
-just bench                # cargo bench
 
 # Other
 just check-all            # run all pre-commit hooks (prek)

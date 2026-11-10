@@ -9,9 +9,9 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# Rust
-target/
-Cargo.lock
+# Leftovers from the removed Rust extension in existing checkouts
+rust/
+python/**/*.so
 
 # Data (never commit raw market data)
 data/raw/
@@ -29,9 +29,7 @@ data/catalog/
 !.env.example
 
 .claude
-python/**/*.so
 site/
-docs/api/rust/**/*.html
 data/*.db
 .code-graph/
 notebooks/

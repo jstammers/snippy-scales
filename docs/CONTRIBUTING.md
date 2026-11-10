@@ -3,24 +3,20 @@
 ## Setup
 
 ```bash
-# 1. Install Rust (stable)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# 2. Install uv
+# 1. Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. Install prek (Rust-native git hook manager)
+# 2. Install prek (git hook manager)
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
 
-# 4. Install git-cliff (changelog generator)
-cargo install git-cliff
+# 3. Install git-cliff (changelog generator)
+uv tool install git-cliff
 
-# 5. Clone and set up the repo
+# 4. Clone and set up the repo
 git clone https://github.com/yourorg/snippy-scales
 cd snippy-scales
-uv sync
-uv run maturin develop   # build Rust extension in dev mode
+uv sync --all-extras
 prek install             # activate git hooks from prek.toml
 ```
 
@@ -48,7 +44,7 @@ This project enforces **Conventional Commits**. Every commit message must follow
 | `docs` | Documentation only | — |
 | `style` | Formatting, whitespace (skipped in changelog) | — |
 | `test` | Adding or fixing tests | — |
-| `build` | Build system, maturin, Cargo | — |
+| `build` | Build system, dependencies | — |
 | `ci` | GitHub Actions, prek hooks | — |
 | `chore` | Maintenance (skipped in changelog) | — |
 
@@ -81,7 +77,7 @@ docs(cli): document data ingest flags
 git commit -m "feat(strategies): add carry-based futures strategy"
 git commit -m "fix(portfolio): handle zero-quantity close correctly"
 git commit -m "perf(backtest): parallelise event loop with rayon"
-git commit -m "ci: cache Rust build artifacts in CI"
+git commit -m "ci: cache uv dependencies in CI"
 
 # Bad — will be rejected by the commit-msg hook
 git commit -m "added stuff"
@@ -147,17 +143,6 @@ uv run ty check
 
 # Run Python tests
 uv run pytest -x -q
-
-# Lint + test Rust
-cargo fmt --manifest-path rust/Cargo.toml
-cargo clippy --manifest-path rust/Cargo.toml --workspace -- -D warnings
-cargo test --manifest-path rust/Cargo.toml --workspace
-
-# Rebuild Rust extension after changes
-uv run maturin develop
-
-# Run benchmarks
-cargo bench --manifest-path rust/Cargo.toml --workspace
 ```
 
 ## Branch Strategy
