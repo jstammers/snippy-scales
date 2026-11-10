@@ -18,6 +18,7 @@ data/raw/
 data/derived/
 data/cache/
 data/universe/
+data/catalog/
 *.parquet
 *.dbn
 

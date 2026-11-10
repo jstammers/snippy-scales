@@ -33,6 +33,7 @@ nav:
       - Overview: architecture/overview.md
       - Event-Driven Engine: architecture/backtest_engine.md
       - Python–Rust Bridge: architecture/pyo3_bridge.md
+      - NautilusTrader Migration: architecture/nautilus_migration.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - Adding a Strategy: guides/adding_strategy.md
