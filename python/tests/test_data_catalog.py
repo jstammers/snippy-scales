@@ -145,6 +145,64 @@ class TestWriteBars:
         with pytest.raises(ValueError, match="one bar type"):
             cat.write_bars(catalog, mixed)
 
+    def _bars_at(self, start: dt.date, n: int, precision: int, base: float) -> list:
+        return cat.frame_to_bars(
+            _daily_frame(start, n, base=base),
+            bar_type=cat.bar_type("ES.c.0", "GLBX", "ohlcv-1d"),
+            price_precision=precision,
+            interval_ns=_DAY,
+        )
+
+    def test_appends_conform_to_stored_precision(
+        self, catalog: ParquetDataCatalog, tmp_path: Path
+    ) -> None:
+        bt = cat.bar_type("ES.c.0", "GLBX", "ohlcv-1d")
+        cat.write_bars(catalog, self._bars_at(dt.date(2024, 1, 10), 3, 2, 4500.25))
+        # Same values carried at 4 decimals, before and after the stored range.
+        assert cat.write_bars(catalog, self._bars_at(dt.date(2024, 1, 13), 2, 4, 4510.5)) == 2
+        assert cat.write_bars(catalog, self._bars_at(dt.date(2024, 1, 8), 2, 4, 4490.75)) == 2
+        assert cat.stored_precision(catalog, bt) == (2, 0)
+        catalog.consolidate_catalog()  # fails if any file differs in precision
+        df = cat.load_bars("ES.c.0", "ohlcv-1d", catalog_path=tmp_path / "catalog")
+        assert df.height == 7
+        assert df["close"].to_list()[-1] == 4511.75
+
+    def test_lossy_precision_is_refused(self, catalog: ParquetDataCatalog) -> None:
+        cat.write_bars(catalog, self._bars_at(dt.date(2024, 1, 10), 3, 2, 4500.25))
+        with pytest.raises(cat.PrecisionMismatchError, match="more than 2 decimals"):
+            cat.write_bars(catalog, self._bars_at(dt.date(2024, 1, 13), 1, 4, 4510.1234))
+
+    def test_stored_precision_empty_series(self, catalog: ParquetDataCatalog) -> None:
+        assert cat.stored_precision(catalog, cat.bar_type("ES.c.0", "GLBX", "ohlcv-1d")) is None
+
+
+class TestMissingRanges:
+    def _catalog_with(self, catalog: ParquetDataCatalog, start: dt.date) -> str:
+        cat.write_bars(catalog, _es_bars(start, 5))
+        return cat.bar_type("ES.c.0", "GLBX", "ohlcv-1d")
+
+    def _ns(self, day: dt.date) -> int:
+        return int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp()) * 10**9
+
+    def test_short_head_gap_is_non_trading_time(self, catalog: ParquetDataCatalog) -> None:
+        from nautilus_trader.model import NautilusDataType
+
+        bt = self._catalog_with(catalog, dt.date(2024, 1, 8))  # stored from Monday
+        start, end = self._ns(dt.date(2024, 1, 7)), self._ns(dt.date(2024, 1, 13))  # Sunday
+        ranges = cat.missing_ranges(catalog, NautilusDataType.Bar, bt, start, end, interval_ns=_DAY)
+        assert ranges == []
+
+    def test_long_head_gap_and_tail_reported(self, catalog: ParquetDataCatalog) -> None:
+        from nautilus_trader.model import NautilusDataType
+
+        bt = self._catalog_with(catalog, dt.date(2024, 1, 15))
+        start, end = self._ns(dt.date(2024, 1, 1)), self._ns(dt.date(2024, 1, 25))
+        ranges = cat.missing_ranges(catalog, NautilusDataType.Bar, bt, start, end, interval_ns=_DAY)
+        assert ranges == [
+            (start, self._ns(dt.date(2024, 1, 15))),
+            (self._ns(dt.date(2024, 1, 20)), end),
+        ]
+
 
 class TestLoadBars:
     def test_shape_and_values(self, catalog: ParquetDataCatalog, tmp_path: Path) -> None:

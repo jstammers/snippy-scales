@@ -16,6 +16,18 @@ Storage conventions:
   prices (adjusted history is off the 0.01 tick grid).
 * Alpaca stamps bars at the open; daily bars are normalised to 00:00 UTC on the
   session date. ``ts_init`` is set to the bar close (open + bar length).
+
+Adjusted prices
+---------------
+With ``adjustment`` other than ``raw``, Alpaca re-bases the *whole* history
+whenever a split or dividend occurs. Bars stored before that event are then on
+a different basis from bars fetched after it, and appending would put a false
+jump at the seam. So every incremental fetch overlaps the stored series by one
+bar and compares it: if the stored and fresh closes disagree, the symbol fails
+with :class:`AdjustmentDriftError` and nothing is appended. Setting
+``rebuild_adjusted=True`` instead re-downloads the full series and replaces the
+stored one — the old bars are removed only after the new download is in hand
+and covers at least the stored range.
 """
 
 from __future__ import annotations
@@ -51,6 +63,13 @@ PRICE_PRECISION = 4
 #: Free-tier historical data withholds the most recent 15 minutes.
 _RECENT_DATA_EMBARGO = dt.timedelta(minutes=16)
 
+#: Earliest date Alpaca's historical stock data covers.
+HISTORY_START = dt.date(2016, 1, 1)
+
+#: A session's bars are final once its UTC day and the extended-hours session
+#: (until 01:00 UTC in winter) have ended, plus the free-tier embargo.
+_SESSION_COMPLETE_LAG = dt.timedelta(hours=1) + _RECENT_DATA_EMBARGO
+
 #: Bar schema -> alpaca-py TimeFrame(amount, unit) args. No 1-second bars on Alpaca.
 _TIMEFRAME_BY_SCHEMA: dict[str, tuple[int, str]] = {
     "ohlcv-1m": (1, "Minute"),
@@ -71,8 +90,52 @@ _EMPTY_SCHEMA = {
 }
 
 
+def weekday_sessions(first: dt.date, last: dt.date) -> list[dt.date]:
+    """Mon–Fri dates in ``[first, last]`` — an offline stand-in for the NYSE calendar."""
+    days = (first + dt.timedelta(days=i) for i in range((last - first).days + 1))
+    return [d for d in days if d.weekday() < 5]  # noqa: PLR2004
+
+
+def resolve_window(
+    start: int | None,
+    end: int | None,
+    sessions: Callable[[dt.date, dt.date], list[dt.date]],
+    *,
+    now: dt.datetime | None = None,
+) -> tuple[int, int]:
+    """The ``[start, end)`` to sync, in UNIX ns at 00:00 UTC.
+
+    Starts on the first session on or after *start* (default and floor:
+    :data:`HISTORY_START`) and ends the day after the last **completed** session,
+    never later than *end*. A session is complete once
+    :data:`_SESSION_COMPLETE_LAG` past the end of its UTC day. Returns an empty
+    window (start == end) when no completed session falls inside.
+
+    Args:
+        start: Requested start (UNIX ns), or None.
+        end: Requested exclusive end (UNIX ns), or None.
+        sessions: ``(first, last) -> session dates`` in that inclusive range.
+        now: Current time (injectable for tests).
+    """
+    first = max(
+        _ns_to_datetime(start).date() if start is not None else HISTORY_START, HISTORY_START
+    )
+    cutoff = ((now or dt.datetime.now(dt.UTC)) - _SESSION_COMPLETE_LAG).date()
+    if end is not None:
+        cutoff = min(cutoff, _ns_to_datetime(end).date())
+    last = cutoff - dt.timedelta(days=1)
+    days = sessions(first, last) if first <= last else []
+    if not days:
+        return _date_ns(first), _date_ns(first)
+    return _date_ns(days[0]), _date_ns(days[-1] + dt.timedelta(days=1))
+
+
 class AlpacaCredentialsError(RuntimeError):
     """Raised when Alpaca API credentials are not available."""
+
+
+class AdjustmentDriftError(RuntimeError):
+    """Stored adjusted bars no longer match Alpaca's current adjustment basis."""
 
 
 class RateLimiter:
@@ -146,6 +209,11 @@ def _ns_to_datetime(ns: int) -> dt.datetime:
     return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.UTC)
 
 
+def _date_ns(day: dt.date) -> int:
+    """00:00 UTC on *day*, in UNIX ns."""
+    return int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp()) * 10**9
+
+
 @dataclass
 class AlpacaLoader:
     """Fetch Alpaca stock bars and keep them up to date in the catalog.
@@ -162,6 +230,8 @@ class AlpacaLoader:
         retry_wait_seconds: Wait between SDK retries.
         api_key: Falls back to ``ALPACA_API_KEY``.
         secret_key: Falls back to ``ALPACA_SECRET_KEY``.
+        rebuild_adjusted: On adjustment drift, re-download and replace the
+            series instead of failing the symbol (see module docstring).
 
     Raises:
         AlpacaCredentialsError: If no key/secret is available.
@@ -176,6 +246,10 @@ class AlpacaLoader:
     retry_wait_seconds: int = 5
     api_key: str | None = None
     secret_key: str | None = None
+    rebuild_adjusted: bool = False
+    #: ``(first, last) -> NYSE session dates`` in that inclusive range. Defaults
+    #: to Alpaca's market calendar (free); injectable for tests.
+    calendar: Callable[[dt.date, dt.date], list[dt.date]] | None = None
     _write_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -194,6 +268,27 @@ class AlpacaLoader:
             retry_attempts=self.retry_attempts,
             retry_wait_seconds=self.retry_wait_seconds,
         )
+
+    # -- window ----------------------------------------------------------
+
+    def _sessions(self, first: dt.date, last: dt.date) -> list[dt.date]:
+        if self.calendar is not None:
+            return self.calendar(first, last)
+        from alpaca.trading.client import TradingClient  # noqa: PLC0415
+        from alpaca.trading.requests import GetCalendarRequest  # noqa: PLC0415
+
+        key = self.api_key or os.environ["ALPACA_API_KEY"]
+        secret = self.secret_key or os.environ["ALPACA_SECRET_KEY"]
+        days = TradingClient(key, secret, paper=True).get_calendar(
+            GetCalendarRequest(start=first, end=last)
+        )
+        return [d.date for d in days]  # type: ignore[union-attr]
+
+    def resolve_window(
+        self, start: int | None, end: int | None, *, now: dt.datetime | None = None
+    ) -> tuple[int, int]:
+        """:func:`resolve_window` using Alpaca's market calendar."""
+        return resolve_window(start, end, self._sessions, now=now)
 
     # -- fetching ---------------------------------------------------------
 
@@ -263,22 +358,89 @@ class AlpacaLoader:
     def sync_symbol(
         self, catalog: ParquetDataCatalog, symbol: str, schema: str, start: int, end: int
     ) -> int:
-        """Fetch and store the bars missing for *symbol* in ``[start, end)`` (UNIX ns)."""
+        """Fetch and store the bars missing for *symbol* in ``[start, end)`` (UNIX ns).
+
+        Raises:
+            AdjustmentDriftError: If the stored series is on a stale adjustment
+                basis and ``rebuild_adjusted`` is False.
+        """
         bt = cat.bar_type(symbol, self.venue, schema)
         interval = cat.bar_interval_ns(schema)
         with self._write_lock:
             ranges = cat.missing_ranges(
                 catalog, NautilusDataType.Bar, bt, start, end, interval_ns=interval
             )
-        written = 0
+            first = catalog.query_first_timestamp(NautilusDataType.Bar, bt)
+            last = catalog.query_last_timestamp(NautilusDataType.Bar, bt)
+        check_seams = self.adjustment != "raw" and first is not None and last is not None
+
+        frames = []
         for lo, hi in ranges:
+            seam = None
+            if check_seams:
+                # Overlap the stored series by one bar so its basis can be compared.
+                is_head = hi + interval <= first  # type: ignore[operator]
+                seam = first if is_head else last
+                lo, hi = (lo, hi + interval) if is_head else (lo - interval, hi)
             frame = self.fetch_bars(symbol, schema, _ns_to_datetime(lo), _ns_to_datetime(hi))
+            if seam is not None and self._has_drifted(catalog, bt, frame, seam, interval):
+                if not self.rebuild_adjusted:
+                    raise AdjustmentDriftError(
+                        f"{symbol} {schema}: stored bars are on an older adjustment basis "
+                        "(a split or dividend since the last sync). Nothing appended; "
+                        "re-run with --rebuild-adjusted to re-download the full series."
+                    )
+                return self._rebuild(catalog, symbol, schema, start, end)
+            frames.append(frame)
+
+        written = 0
+        for frame in frames:
             bars = cat.frame_to_bars(
                 frame, bar_type=bt, price_precision=PRICE_PRECISION, interval_ns=interval
             )
             with self._write_lock:
                 written += cat.write_bars(catalog, bars)
         return written
+
+    @staticmethod
+    def _has_drifted(
+        catalog: ParquetDataCatalog, bt: str, frame: pl.DataFrame, seam: int, interval: int
+    ) -> bool:
+        """Whether the fresh bar closing at *seam* disagrees with the stored one."""
+        with_open = frame.filter(pl.col("ts_event").dt.epoch("ns") == seam - interval)
+        stored = cat.stored_bar(catalog, bt, seam)
+        if with_open.height == 0 or stored is None:
+            logger.warning("%s: no overlapping bar at the seam; adjustment basis unchecked", bt)
+            return False
+        tolerance = 1.5 * 10.0**-PRICE_PRECISION
+        return abs(with_open["close"][0] - stored.close.as_double()) > tolerance
+
+    def _rebuild(
+        self, catalog: ParquetDataCatalog, symbol: str, schema: str, start: int, end: int
+    ) -> int:
+        """Re-download the whole series and replace the stored one."""
+        bt = cat.bar_type(symbol, self.venue, schema)
+        interval = cat.bar_interval_ns(schema)
+        with self._write_lock:
+            first = catalog.query_first_timestamp(NautilusDataType.Bar, bt)
+            last = catalog.query_last_timestamp(NautilusDataType.Bar, bt)
+        assert first is not None and last is not None  # noqa: S101 — only called on drift
+        lo = min(start, first - interval)
+        frame = self.fetch_bars(symbol, schema, _ns_to_datetime(lo), _ns_to_datetime(end))
+        bars = cat.frame_to_bars(
+            frame, bar_type=bt, price_precision=PRICE_PRECISION, interval_ns=interval
+        )
+        # Never drop stored history the fresh download doesn't cover.
+        if not bars or bars[0].ts_init > first or bars[-1].ts_init < last:
+            raise AdjustmentDriftError(
+                f"{symbol} {schema}: rebuild download does not cover the stored range; "
+                "stored series left untouched."
+            )
+        with self._write_lock:
+            catalog.delete_data_range(NautilusDataType.Bar, bt, first, last)
+            catalog.write_bars(bars)
+        logger.info("%s: rebuilt %d bars on the current adjustment basis", bt, len(bars))
+        return len(bars)
 
     def sync(
         self,

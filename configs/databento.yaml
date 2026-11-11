@@ -23,8 +23,8 @@ dataset: "GLBX.MDP3"
 schemas: ["1d"]
 
 # Historical pull range
-start: "2010-06-06"
-# end: "2024-12-31"  # Omit to default to today
+start: "2010-06-06"  # optional: omit to start at the dataset's first day
+# end: "2024-12-31"  # exclusive; default and cap: day after the last completed day
 
 # stype_in is used for cost estimates; when omitted it is inferred from each
 # symbol's form (ES.c.0 -> continuous, ES.FUT -> parent, ESZ4 -> raw_symbol).

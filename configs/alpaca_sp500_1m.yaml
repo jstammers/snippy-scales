@@ -25,7 +25,7 @@ schemas: ["1m"]
 # `start` is a fixed date, not "5 years ago" — re-run `update-universe` and
 # bump this when you want to roll the window forward.
 start: "2018-01-01"
-# end: omit -> defaults to today
+# end: omit -> day after the last completed session
 
 alpaca:
   feed: "sip"              # all US exchanges, included in the free historical tier

@@ -45,6 +45,35 @@ the same command fetches nothing; widening `start` fetches only the new head.
 Interior gaps are not detected — to refill one, delete that range with
 `ParquetDataCatalog.delete_data_range` and sync again.
 
+### Sync window
+
+Every sync runs over a window resolved from the provider, printed first:
+
+```
+Window: first trading day 2010-06-06 → last completed day 2026-11-10
+```
+
+- **Start** is the first trading day on or after the config's `start`. Omit
+  `start` to begin at the provider's earliest data (Databento: the dataset's
+  first day; Alpaca: 2016-01-01). Alpaca snaps to the NYSE calendar (Alpaca's
+  free market-calendar endpoint). Databento drops, per symbol, any missing
+  range that its free `metadata.get_record_count` says is empty — weekends,
+  holidays, the years before a late listing (e.g. RTY) — so nothing is
+  re-requested run after run. Head gaps of up to 5 days are dropped without
+  asking.
+- **End** is the day after the last **completed** day, and also the cap on
+  any `end` you set. Databento: the newest day the schema's data covers.
+  Alpaca: the last NYSE session whose extended hours and 15-minute embargo
+  have passed. Today's bars are fetched tomorrow.
+
+A series' first sync is not pruned, so a mistyped symbol fails loudly. If a
+record-count call fails, the range is fetched as before.
+
+New bars are written at the precision the series is already stored at, so
+every file of a series matches (`consolidate` refuses mixed precisions). A bar
+that would need rounding to fit is rejected with `PrecisionMismatchError`
+rather than silently rounded.
+
 Databento syncs also store instrument definitions (tick size, multiplier,
 expiry). Each continuous symbol (`ES.c.0`) gets a synthetic instrument
 `ES.c.0.GLBX` copied from its most recent outright, so backtests on the
@@ -79,6 +108,20 @@ asset_classes:              # free-form labels
 `--dry-run` prints Databento's cost for exactly the ranges that would be
 fetched (`metadata.get_cost`), without downloading. Already-stored data costs
 nothing. Planning works without an API key; only the cost column needs one.
+
+The newest day is always sent (and priced) as a request of its own:
+Databento bills a multi-day request that includes the newest day far above the
+sum of its days. Measured on daily NQ bars, 2026-11-09 → 11-11 as one request
+cost $0.40; as two one-day requests, $0.00002. Hourly and minute bars show the
+same effect at a smaller multiple.
+
+Instrument definitions are fetched only for IDs the catalog doesn't hold yet,
+and for a continuous symbol only over the last 7 days of the window (it needs
+just the latest definition), so re-runs cost nothing.
+
+Bars are decoded at the stored series' precision, else the stored instrument
+definition's. A brand-new continuous series therefore needs its definitions
+first: keep `--instruments` on (the default) or run `--instruments-only`.
 
 ---
 
@@ -127,6 +170,13 @@ the DBN files with `nautilus_trader.adapters.databento.DatabentoDataLoader`
   `rate_limit_per_min`.
 - `adjustment: all` (default) avoids fake jumps at split dates. Adjusted
   prices are off the 0.01 tick grid, so prices are stored with 4 decimals.
+- Adjusted history is re-based by Alpaca at every split or dividend, so bars
+  stored earlier no longer line up with bars fetched now. Each incremental
+  fetch overlaps the stored series by one bar; if that bar's close changed,
+  the symbol fails with `AdjustmentDriftError` and nothing is appended.
+  `--rebuild-adjusted` (on `sync` and `backfill-sp500`) instead re-downloads
+  the whole series and replaces it — the stored bars are removed only after
+  the new download is in hand and covers at least the stored range.
 - Daily bars are stamped 00:00 UTC on the session date.
 - Each symbol gets an `Equity` instrument at venue `ALPACA`.
 
@@ -159,6 +209,10 @@ algo data backfill-sp500
 algo data backfill-sp500 --schema 1d
 algo data backfill-sp500 --retry-failed
 ```
+
+`--retry-failed` falls back to a pre-catalog manifest at
+`data/raw/_manifests/sp500_<schema>.csv` (read only) when none exists at the
+new location.
 
 ---
 
@@ -244,8 +298,11 @@ uv run python scripts/migrate_raw_to_catalog.py --verify-only
 algo data sync configs/databento.yaml --instruments-only   # futures definitions
 ```
 
-The script only reads `data/raw/`. Bars are copied with inferred precision;
-tick data is rebuilt from the archived DBN files; the verification step
+The script only reads `data/raw/`. Bars are stored at the precision later
+syncs will write: equities at the Alpaca 4 decimals (adjusted prices with
+more are rounded, by at most 0.00005), futures at the stored instrument
+definition's precision if one exists, else the precision inferred from the
+data. Tick data is rebuilt from the archived DBN files; the verification step
 compares row counts and a close-price checksum per series. Deleting
 `data/raw/` afterwards is a manual decision — keep it until you have checked
 the catalog and have a backup.

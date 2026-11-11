@@ -3,8 +3,12 @@
 Reads ``data/raw/<instrument_type>/<symbol>/...`` (the layout written before the
 NautilusTrader migration) and writes it into ``data/catalog/``:
 
-* Bar files ``<schema>.parquet`` -> catalog bars. Price precision is inferred
-  from the data; ``ts_event`` was the bar open, so ``ts_init`` = open + bar length.
+* Bar files ``<schema>.parquet`` -> catalog bars. ``ts_event`` was the bar open,
+  so ``ts_init`` = open + bar length. Price precision must match what later
+  syncs write (mixed precisions break ``consolidate``): equities use the Alpaca
+  instrument precision (4 decimals; adjusted prices beyond that are rounded, an
+  error of at most 0.00005), futures use the stored instrument definition's
+  precision when one exists, else the precision inferred from the data.
 * Tick days are rebuilt from the lossless ``<schema>/_dbn/*.dbn.zst`` archive with
   ``DatabentoDataLoader`` (trades only). Days without a DBN file are reported.
 * ``equities`` symbols also get an ``Equity`` instrument. Futures definitions come
@@ -28,13 +32,18 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
 from nautilus_trader.model import InstrumentId, NautilusDataType
 
 from snippy_scales.data import catalog as cat
+from snippy_scales.data.alpaca import PRICE_PRECISION as EQUITY_PRICE_PRECISION
 from snippy_scales.data.paths import CATALOG_DIR, RAW_DIR
+
+if TYPE_CHECKING:
+    from nautilus_trader.persistence import ParquetDataCatalog
 
 #: Default venue per legacy ``instrument_type`` directory.
 DEFAULT_VENUES = {"futures": "GLBX", "equities": "ALPACA"}
@@ -85,11 +94,25 @@ def _checksum(close: np.ndarray, precision: int) -> int:
     return int(np.round(close * 10**precision).astype(np.int64).sum())
 
 
+def migration_precision(
+    instrument_type: str, df: pl.DataFrame, instrument_precisions: dict[str, int], iid: str
+) -> int:
+    """Price precision to store a legacy series at (see module docstring)."""
+    if instrument_type == "equities":
+        return EQUITY_PRICE_PRECISION
+    return instrument_precisions.get(iid, cat.infer_price_precision(df))
+
+
+def _instrument_precisions(catalog: ParquetDataCatalog) -> dict[str, int]:
+    return {str(i.id): i.price_precision for i in catalog.instruments()}
+
+
 def migrate_bars(
     raw_dir: Path, catalog_root: Path, venues: dict[str, str], *, dry_run: bool = False
 ) -> list[tuple[str, str, str, int]]:
     """Copy every bar file into the catalog. Returns ``(symbol, venue, schema, written)``."""
     catalog = cat.open_catalog(catalog_root) if not dry_run else None
+    precisions = _instrument_precisions(catalog) if catalog is not None else {}
     done = []
     for instrument_type, symbol, schema, path in find_bar_files(raw_dir):
         venue = venues.get(instrument_type)
@@ -103,10 +126,11 @@ def migrate_bars(
             )
             continue
         assert catalog is not None  # noqa: S101
+        iid = cat.instrument_id(symbol, venue)
         bars = cat.frame_to_bars(
             df,
             bar_type=cat.bar_type(symbol, venue, schema),
-            price_precision=cat.infer_price_precision(df),
+            price_precision=migration_precision(instrument_type, df, precisions, iid),
             interval_ns=cat.bar_interval_ns(schema),
         )
         written = cat.write_bars(catalog, bars)
@@ -165,14 +189,19 @@ def migrate_ticks(
 
 
 def verify_bars(raw_dir: Path, catalog_root: Path, venues: dict[str, str]) -> list[BarCheck]:
-    """Compare row counts and a close-price checksum between raw files and the catalog."""
+    """Compare row counts and a close-price checksum between raw files and the catalog.
+
+    The checksum rounds both sides to the precision the series is stored at.
+    """
+    catalog = cat.open_catalog(catalog_root)
     checks = []
     for instrument_type, symbol, schema, path in find_bar_files(raw_dir):
         venue = venues.get(instrument_type)
         if venue is None:
             continue
         raw = _read_raw_bars(path)
-        precision = cat.infer_price_precision(raw)
+        stored_prec = cat.stored_precision(catalog, cat.bar_type(symbol, venue, schema))
+        precision = stored_prec[0] if stored_prec else cat.infer_price_precision(raw)
         start = raw["ts_event"].min()
         end = raw["ts_event"].max()
         try:

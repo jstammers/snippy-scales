@@ -12,7 +12,7 @@ import datetime as dt
 import math
 from typing import TYPE_CHECKING
 
-from snippy_scales.data.paths import CATALOG_DIR, MANIFEST_DIR, UNIVERSE_DIR
+from snippy_scales.data.paths import CATALOG_DIR, MANIFEST_DIR, RAW_DIR, UNIVERSE_DIR
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,6 +53,14 @@ def default_manifest_path(schema_alias: str) -> Path:
         Path like ``data/derived/manifests/sp500_<schema_alias>.csv``.
     """
     return MANIFEST_DIR / f"sp500_{schema_alias}.csv"
+
+
+def legacy_manifest_path(schema_alias: str) -> Path:
+    """Where pre-catalog runs wrote the manifest: ``data/raw/_manifests/sp500_<alias>.csv``.
+
+    Only read (by ``--retry-failed`` when no new-location manifest exists); never written.
+    """
+    return RAW_DIR / "_manifests" / f"sp500_{schema_alias}.csv"
 
 
 _MANIFEST_FIELDNAMES = ["symbol", "schema", "succeeded", "written", "detail", "updated_at"]

@@ -21,8 +21,8 @@ provider: "alpaca"
 schemas: ["1d"]
 
 # Historical pull range
-start: "2016-01-01"
-# end: "2026-09-15"  # Omit to default to today
+start: "2016-01-01"  # optional: snapped to the first NYSE session; default 2016-01-01
+# end: "2026-09-15"  # exclusive; default and cap: day after the last completed session
 
 alpaca:
   feed: "sip"              # "sip" (all US exchanges, free historical tier) or "iex"

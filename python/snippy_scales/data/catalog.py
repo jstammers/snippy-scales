@@ -25,6 +25,13 @@ The catalog rejects overlapping writes, so :func:`write_bars` is incremental: it
 writes only bars before the first or after the last stored ``ts_init`` and skips
 anything inside existing coverage. Filling an interior gap needs
 ``catalog.delete_data_range`` over the span, then a rewrite.
+
+Precision
+---------
+Every file of a bar series must carry the same price/size precision, or
+``consolidate_catalog`` refuses to merge them. :func:`write_bars` therefore
+conforms new bars to the precision already stored for the series, and raises
+:class:`PrecisionMismatchError` instead of silently rounding.
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ from nautilus_trader.model import (
     InstrumentId,
     NautilusDataType,
     Price,
+    Quantity,
     Symbol,
 )
 from nautilus_trader.persistence import BarDataWrangler, ParquetDataCatalog
@@ -79,6 +87,17 @@ BAR_COLUMNS: tuple[str, ...] = (
 _DECIMAL = pa.decimal128(38, 16)
 #: Highest price precision :func:`infer_price_precision` will report.
 _MAX_INFERRED_PRECISION = 9
+
+_DAY_NS = 86_400_000_000_000
+
+#: A gap between the requested start and the first stored bar shorter than this
+#: is treated as non-trading time (weekend, holiday, overnight), not missing
+#: data. Without it a config starting on a Sunday re-requests that Sunday forever.
+HEAD_GAP_TOLERANCE_NS = 5 * _DAY_NS
+
+
+class PrecisionMismatchError(ValueError):
+    """New bars can't be stored at the series' precision without rounding."""
 
 
 @dataclass(frozen=True)
@@ -338,6 +357,7 @@ def missing_ranges(
     end: int,
     *,
     interval_ns: int = 0,
+    head_tolerance_ns: int = HEAD_GAP_TOLERANCE_NS,
 ) -> list[tuple[int, int]]:
     """Half-open ``[from, to)`` ns ranges of ``[start, end)`` still to fetch.
 
@@ -347,6 +367,12 @@ def missing_ranges(
     stored bar's open and the tail range starts at the last stored bar's close.
     For ticks (``interval_ns=0``) the tail starts one nanosecond after the last.
 
+    A head gap no longer than *head_tolerance_ns* is not reported: a requested
+    start that falls on a weekend or holiday leaves such a gap permanently, and
+    there is nothing to fetch in it. (The flip side: moving ``start`` back by
+    fewer than that many days does not trigger a fetch.) The tail is always
+    reported.
+
     Args:
         catalog: Catalog to inspect.
         data_type: Stored family (e.g. ``NautilusDataType.Bar``).
@@ -354,6 +380,7 @@ def missing_ranges(
         start: Requested inclusive start, UNIX ns.
         end: Requested exclusive end, UNIX ns.
         interval_ns: Bar length, or 0 for tick data.
+        head_tolerance_ns: Largest head gap treated as non-trading time.
     """
     first = catalog.query_first_timestamp(data_type, identifier)
     last = catalog.query_last_timestamp(data_type, identifier)
@@ -361,7 +388,7 @@ def missing_ranges(
         return [(start, end)] if start < end else []
     ranges = []
     head_end = first - interval_ns
-    if start < head_end:
+    if head_end - start > head_tolerance_ns:
         ranges.append((start, min(head_end, end)))
     tail_start = last if interval_ns else last + 1
     if max(tail_start, start) < end:
@@ -374,12 +401,87 @@ def chunk_range(start: int, end: int, step_ns: int) -> list[tuple[int, int]]:
     return [(lo, min(lo + step_ns, end)) for lo in range(start, end, step_ns)]
 
 
+def stored_precision(catalog: ParquetDataCatalog, bar_type: str) -> tuple[int, int] | None:
+    """``(price_precision, size_precision)`` of the newest stored file of *bar_type*.
+
+    Returns None when the series has no data yet.
+    """
+    last = catalog.query_last_timestamp(NautilusDataType.Bar, bar_type)
+    if last is None:
+        return None
+    payload = catalog.query_data_arrow_bytes(
+        NautilusDataType.Bar, [bar_type], start=last, end=last, display=False
+    )
+    meta = pa.ipc.open_stream(payload).schema.metadata or {}
+    try:
+        return int(meta[b"price_precision"]), int(meta[b"size_precision"])
+    except KeyError:
+        return None
+
+
+def stored_bar(catalog: ParquetDataCatalog, bar_type: str, ts_init: int) -> Bar | None:
+    """The stored bar of *bar_type* closing exactly at *ts_init*, if any."""
+    bars = catalog.query_bars([bar_type], start=ts_init, end=ts_init)
+    return next((b for b in bars if b.ts_init == ts_init), None)
+
+
+def _lossless(exact: Decimal, precision: int, what: str) -> Decimal:
+    """*exact* quantized to *precision* decimals; raises if that changes its value."""
+    rounded = exact.quantize(Decimal(1).scaleb(-precision))
+    if rounded != exact:
+        raise PrecisionMismatchError(
+            f"{what} {exact} needs more than {precision} decimals, the precision already "
+            "stored for this series. Refusing to round it."
+        )
+    return rounded
+
+
+def _price(value: Price, precision: int, what: str) -> Price:
+    if value.precision == precision:
+        return value
+    return Price.from_decimal_dp(_lossless(value.as_decimal(), precision, what), precision)
+
+
+def _quantity(value: Quantity, precision: int, what: str) -> Quantity:
+    if value.precision == precision:
+        return value
+    return Quantity.from_decimal_dp(_lossless(value.as_decimal(), precision, what), precision)
+
+
+def conform_bars(bars: Sequence[Bar], price_precision: int, size_precision: int) -> list[Bar]:
+    """Re-express *bars* at the given precisions, losslessly.
+
+    Raises:
+        PrecisionMismatchError: If a value would have to be rounded.
+    """
+    out = []
+    for b in bars:
+        if b.open.precision == price_precision and b.volume.precision == size_precision:
+            out.append(b)
+            continue
+        what = f"{b.bar_type} price"
+        out.append(
+            Bar(
+                b.bar_type,
+                _price(b.open, price_precision, what),
+                _price(b.high, price_precision, what),
+                _price(b.low, price_precision, what),
+                _price(b.close, price_precision, what),
+                _quantity(b.volume, size_precision, f"{b.bar_type} volume"),
+                b.ts_event,
+                b.ts_init,
+            )
+        )
+    return out
+
+
 def write_bars(catalog: ParquetDataCatalog, bars: Sequence[Bar]) -> int:
     """Write the part of *bars* not already covered by the catalog.
 
     Bars strictly before the first stored ``ts_init`` and strictly after the last
     one are written (as separate files, so each write is disjoint). Bars inside
-    the stored range are skipped.
+    the stored range are skipped. New bars are conformed to the series' stored
+    precision (see :func:`conform_bars`) so every file of a series matches.
 
     Args:
         catalog: Target catalog.
@@ -387,6 +489,9 @@ def write_bars(catalog: ParquetDataCatalog, bars: Sequence[Bar]) -> int:
 
     Returns:
         Number of bars written.
+
+    Raises:
+        PrecisionMismatchError: If the bars carry more decimals than the series.
     """
     if not bars:
         return 0
@@ -401,6 +506,9 @@ def write_bars(catalog: ParquetDataCatalog, bars: Sequence[Bar]) -> int:
     if first is None or last is None:
         chunks = [ordered]
     else:
+        precision = stored_precision(catalog, bt)
+        if precision is not None:
+            ordered = conform_bars(ordered, *precision)
         chunks = [
             [b for b in ordered if b.ts_init < first],
             [b for b in ordered if b.ts_init > last],

@@ -231,8 +231,11 @@ class IngestConfig(BaseModel):
         dataset: Databento dataset code. Ignored for Alpaca.
         schemas: Bar frequency aliases and/or event-level schema names
             (e.g. ``["1d", "trades"]``). Narrowed at runtime via ``--schema``.
-        start: Earliest date to fetch (``YYYY-MM-DD``).
-        end: Latest date to fetch (exclusive, ``YYYY-MM-DD``). Defaults to today.
+        start: Earliest date to fetch (``YYYY-MM-DD``). The sync starts on the
+            first trading day on or after it; omit it to start at the
+            provider's earliest data (Databento dataset start; Alpaca 2016-01-01).
+        end: Exclusive end date (``YYYY-MM-DD``). The sync never goes past the
+            last completed trading day, which is also the default.
         stype_in: Databento symbology type, used for cost estimates. Inferred
             from each symbol's form when omitted. Ignored for Alpaca.
         alpaca: Alpaca-specific options. Ignored for Databento.
@@ -259,13 +262,19 @@ class IngestConfig(BaseModel):
             "schema at runtime via --schema."
         ),
     )
-    start: str = Field(
-        ...,
-        description="Start date for data pull in ISO format (YYYY-MM-DD).",
+    start: str | None = Field(
+        default=None,
+        description=(
+            "Start date (YYYY-MM-DD). Snapped forward to the first trading day; "
+            "defaults to the provider's earliest data."
+        ),
     )
     end: str | None = Field(
         default=None,
-        description="End date (exclusive) in ISO format (YYYY-MM-DD). Defaults to today.",
+        description=(
+            "End date (exclusive, YYYY-MM-DD). Capped at the day after the last "
+            "completed trading day, which is also the default."
+        ),
     )
     stype_in: VALID_STYPES | None = Field(
         default=None,

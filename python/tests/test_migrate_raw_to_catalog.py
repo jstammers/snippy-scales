@@ -102,6 +102,27 @@ def test_migrates_verifies_and_leaves_raw_untouched(
     assert instruments == ["AAPL.ALPACA"]
 
 
+def test_precision_matches_later_syncs(mig: ModuleType, tmp_path: Path) -> None:
+    """Equities are stored at the Alpaca precision so later appends share it."""
+    root = tmp_path / "raw"
+    spy = root / "equities" / "SPY"
+    spy.mkdir(parents=True)
+    df = _raw_bars(3, dt.datetime(2024, 1, 2), dt.timedelta(days=1), 470.0)
+    # Adjusted prices with more decimals than the instrument carries.
+    df = df.with_columns(pl.Series("close", [470.123456, 471.5, 472.25]))
+    df.write_parquet(spy / "ohlcv-1d.parquet")
+    catalog_root = tmp_path / "catalog"
+
+    assert mig.main(["--raw", str(root), "--catalog", str(catalog_root)]) == 0
+
+    catalog = cat.open_catalog(catalog_root)
+    assert cat.stored_precision(catalog, "SPY.ALPACA-1-DAY-LAST-EXTERNAL") == (4, 0)
+    (instrument,) = catalog.instruments()
+    assert instrument.price_precision == 4
+    closes = cat.load_bars("SPY", "ohlcv-1d", catalog_path=catalog_root)["close"].to_list()
+    assert closes == [470.1235, 471.5, 472.25]
+
+
 def test_rerun_is_idempotent(mig: ModuleType, raw: Path, tmp_path: Path) -> None:
     catalog_root = tmp_path / "catalog"
     mig.migrate_bars(raw, catalog_root, mig.DEFAULT_VENUES)

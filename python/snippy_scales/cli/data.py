@@ -14,8 +14,10 @@ from rich.table import Table
 if TYPE_CHECKING:
     from nautilus_trader.persistence import ParquetDataCatalog
 
+    from snippy_scales.data.alpaca import AlpacaLoader
     from snippy_scales.data.catalog import SyncResult
     from snippy_scales.data.config import IngestConfig
+    from snippy_scales.data.databento import DatabentoSync
 
 app = typer.Typer(help="Market data commands (NautilusTrader catalog).")
 console = Console()
@@ -45,6 +47,18 @@ def _day_ns(value: str | None) -> int:
     """``YYYY-MM-DD`` (or today when None) at 00:00 UTC, in UNIX ns."""
     day = dt.date.fromisoformat(value) if value else dt.datetime.now(dt.UTC).date()
     return int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC).timestamp()) * 10**9
+
+
+def _opt_day_ns(value: str | None) -> int | None:
+    return _day_ns(value) if value else None
+
+
+def _print_window(start: int, end: int) -> None:
+    last = _fmt_ns(end - 86_400_000_000_000)[:10] if end > start else "—"
+    console.print(
+        f"Window: first trading day {_fmt_ns(start)[:10]} → last completed day {last} "
+        f"[dim](end exclusive {_fmt_ns(end)})[/dim]"
+    )
 
 
 def _print_results(results: list[SyncResult]) -> None:
@@ -92,6 +106,16 @@ def sync(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what is missing (and its cost); fetch nothing.")
     ] = False,
+    rebuild_adjusted: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild-adjusted",
+            help=(
+                "Alpaca only: when a split/dividend has re-based adjusted prices, re-download "
+                "and replace the whole series instead of failing the symbol."
+            ),
+        ),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Bring the catalog up to date for every symbol and schema in CONFIG.
@@ -112,29 +136,60 @@ def sync(
     cfg = load_config(config)
     schemas = [resolve_schema(schema)] if schema else cfg.resolved_schemas
     symbols = list(symbol) if symbol else cfg.all_symbols
-    start, end = _day_ns(cfg.start), _day_ns(cfg.end)
+    raw_start, raw_end = _opt_day_ns(cfg.start), _opt_day_ns(cfg.end)
     catalog = cat.open_catalog(catalog_path)
 
-    if instruments_only:
-        if cfg.provider != "databento":
-            console.print("[red]--instruments-only applies to Databento configs only.[/]")
-            raise typer.Exit(1)
-        from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
-
-        syncer = DatabentoSync(catalog, dataset=cfg.dataset, venue=cfg.effective_venue)
-        count = syncer.sync_instruments(symbols, start, end)
-        console.print(f"[green]Instrument definitions processed: {count}[/]")
-        return
+    if instruments_only and cfg.provider != "databento":
+        console.print("[red]--instruments-only applies to Databento configs only.[/]")
+        raise typer.Exit(1)
 
     if cfg.provider == "alpaca":
-        _sync_alpaca(cfg, catalog, symbols, schemas, start, end, dry_run, yes)
-    else:
-        _sync_databento(cfg, catalog, symbols, schemas, start, end, instruments, dry_run, yes)
+        from snippy_scales.data import alpaca  # noqa: PLC0415
+
+        opts = cfg.alpaca_options
+        loader: AlpacaLoader | None
+        try:
+            loader = alpaca.AlpacaLoader(
+                feed=opts.feed,
+                adjustment=opts.adjustment,
+                rate_limit_per_min=opts.rate_limit_per_min,
+                max_workers=opts.max_workers,
+                venue=cfg.effective_venue,
+                rebuild_adjusted=rebuild_adjusted,
+            )
+        except alpaca.AlpacaCredentialsError as exc:
+            if not dry_run:
+                console.print(f"[red]{exc}[/]")
+                raise typer.Exit(1) from None
+            loader = None
+        if loader is not None:
+            start, end = loader.resolve_window(raw_start, raw_end)
+        else:
+            console.print("[dim]No Alpaca credentials: planning with a Mon–Fri calendar.[/]")
+            start, end = alpaca.resolve_window(raw_start, raw_end, alpaca.weekday_sessions)
+        _print_window(start, end)
+        _sync_alpaca(
+            loader, cfg.effective_venue, catalog, symbols, schemas, start, end, dry_run, yes
+        )
+        return
+
+    from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
+
+    syncer = DatabentoSync(
+        catalog, dataset=cfg.dataset, venue=cfg.effective_venue, stype_in=cfg.stype_in
+    )
+    start, end = syncer.resolve_window(raw_start, raw_end)
+    _print_window(start, end)
+    if instruments_only:
+        count = syncer.sync_instruments(symbols, start, end)
+        console.print(f"[green]New instrument definitions: {count}[/]")
+        return
+    _sync_databento(syncer, cfg, symbols, schemas, start, end, instruments, dry_run, yes)
 
 
 def _sync_databento(
+    syncer: DatabentoSync,
     cfg: IngestConfig,
-    catalog: ParquetDataCatalog,
     symbols: list[str],
     schemas: list[str],
     start: int,
@@ -144,9 +199,6 @@ def _sync_databento(
     yes: bool,
 ) -> None:
     from snippy_scales.data.catalog import SyncResult  # noqa: PLC0415
-    from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
-
-    syncer = DatabentoSync(catalog, dataset=cfg.dataset, venue=cfg.effective_venue)
 
     table = Table(title=f"Databento sync plan ({cfg.dataset})", header_style="bold cyan")
     table.add_column("Symbol")
@@ -182,7 +234,7 @@ def _sync_databento(
 
     if instruments:
         count = syncer.sync_instruments(symbols, start, end)
-        console.print(f"[dim]Instrument definitions processed: {count}[/]")
+        console.print(f"[dim]New instrument definitions: {count}[/]")
     results = []
     for sym, sch in todo:
         try:
@@ -193,7 +245,8 @@ def _sync_databento(
 
 
 def _sync_alpaca(
-    cfg: IngestConfig,
+    loader: AlpacaLoader | None,
+    venue: str,
     catalog: ParquetDataCatalog,
     symbols: list[str],
     schemas: list[str],
@@ -205,9 +258,7 @@ def _sync_alpaca(
     from nautilus_trader.model import NautilusDataType  # noqa: PLC0415
 
     from snippy_scales.data import catalog as cat  # noqa: PLC0415
-    from snippy_scales.data.alpaca import AlpacaLoader  # noqa: PLC0415
 
-    venue = cfg.effective_venue
     pending = 0
     for sch in schemas:
         for sym in symbols:
@@ -233,14 +284,7 @@ def _sync_alpaca(
     if not yes and not typer.confirm("Proceed?"):
         raise typer.Abort()
 
-    opts = cfg.alpaca_options
-    loader = AlpacaLoader(
-        feed=opts.feed,
-        adjustment=opts.adjustment,
-        rate_limit_per_min=opts.rate_limit_per_min,
-        max_workers=opts.max_workers,
-        venue=venue,
-    )
+    assert loader is not None  # noqa: S101 — only None on a credential-less dry run
     results = []
     for sch in schemas:
         results.extend(loader.sync(catalog, symbols, sch, start, end))
@@ -289,11 +333,41 @@ def consolidate(
         Path | None, typer.Option("--catalog", help="Catalog root. Default: data/catalog.")
     ] = None,
 ) -> None:
-    """Merge the many small files left by incremental syncs into larger ones."""
+    """Merge the many small files left by incremental syncs into larger ones.
+
+    If the whole-catalog pass fails (e.g. one series has files at mixed
+    precisions), every bar series is retried on its own so one bad series
+    doesn't block the rest, and the failures are listed.
+    """
+    from nautilus_trader.model import NautilusDataType  # noqa: PLC0415
+
     from snippy_scales.data import catalog as cat  # noqa: PLC0415
 
-    cat.open_catalog(catalog_path).consolidate_catalog()
-    console.print("[green]Catalog consolidated.[/]")
+    catalog = cat.open_catalog(catalog_path)
+    try:
+        catalog.consolidate_catalog()
+    except Exception as exc:  # noqa: BLE001 — fall back to per-series below
+        console.print(
+            f"[yellow]Whole-catalog consolidation failed ({exc}); retrying per series.[/]"
+        )
+    else:
+        console.print("[green]Catalog consolidated.[/]")
+        return
+
+    failed: list[tuple[str, str]] = []
+    for sch in cat.BAR_SPECS:
+        for sym, venue in cat.list_bar_series(sch, catalog_path):
+            bt = cat.bar_type(sym, venue, sch)
+            try:
+                catalog.consolidate_data(NautilusDataType.Bar, bt)
+            except Exception as exc:  # noqa: BLE001 — reported below
+                failed.append((bt, str(exc)))
+    for bt, err in failed:
+        console.print(f"[red]{bt}[/]: {err}")
+    if failed:
+        console.print(f"[red]{len(failed)} bar series could not be consolidated.[/]")
+        raise typer.Exit(1)
+    console.print("[green]All bar series consolidated.[/]")
 
 
 @app.command(name="update-universe")
@@ -376,6 +450,13 @@ def backfill_sp500(
         Literal["raw", "split", "dividend", "all"],
         typer.Option(help="Corporate-action adjustment."),
     ] = "all",
+    rebuild_adjusted: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild-adjusted",
+            help="Re-download and replace series whose adjusted prices were re-based.",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -413,6 +494,7 @@ def backfill_sp500(
         DEFAULT_SYMBOLS_CACHE,
         default_manifest_path,
         estimate_backfill_plan,
+        legacy_manifest_path,
         load_symbols_cache,
         merge_manifest,
         read_manifest,
@@ -441,6 +523,12 @@ def backfill_sp500(
 
     if retry_failed:
         manifest_rows = read_manifest(manifest)
+        legacy = legacy_manifest_path(schema)
+        if not manifest_rows and manifest_path is None and legacy.exists():
+            # Manifests used to live under data/raw/_manifests/; read it once from
+            # there (read-only). The merged result is written to the new location.
+            console.print(f"[dim]Reading pre-catalog manifest {legacy}[/]")
+            manifest_rows = read_manifest(legacy)
         if not manifest_rows:
             console.print(f"[bold red]No manifest found at {manifest} — nothing to retry.[/]")
             raise typer.Exit(1)
@@ -500,15 +588,14 @@ def backfill_sp500(
         adjustment=adjustment,
         rate_limit_per_min=rate_limit_per_min,
         max_workers=max_workers,
+        rebuild_adjusted=rebuild_adjusted,
     )
+    start_ns, end_ns = loader.resolve_window(
+        _day_ns(start_date.isoformat()), _day_ns(end_date.isoformat())
+    )
+    _print_window(start_ns, end_ns)
     console.print(f"\n[bold]Starting backfill of {len(symbols)} symbol(s) …[/]")
-    rows = loader.sync(
-        cat.open_catalog(root),
-        symbols,
-        resolved_schema,
-        _day_ns(start_date.isoformat()),
-        _day_ns(end_date.isoformat()),
-    )
+    rows = loader.sync(cat.open_catalog(root), symbols, resolved_schema, start_ns, end_ns)
     merged_manifest = merge_manifest(manifest, rows)
 
     succeeded = sum(1 for row in rows if row.succeeded)
