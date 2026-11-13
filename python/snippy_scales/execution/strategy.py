@@ -65,17 +65,70 @@ def _ts_ns(frame: pl.DataFrame) -> np.ndarray:
     return ts.to_numpy().astype(np.int64)
 
 
-def _align(frames: Mapping[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
-    """Restrict every frame to the bar closes they all share, sorted by ``ts_init``."""
-    common = None
-    for frame in frames.values():
-        ts = frame.select("ts_init")
-        common = ts if common is None else common.join(ts, on="ts_init", how="inner")
-    assert common is not None  # noqa: S101 — callers pass at least one frame
-    return {
-        symbol: frame.join(common, on="ts_init", how="semi").sort("ts_init")
-        for symbol, frame in frames.items()
-    }
+def _align(
+    frames: Mapping[str, pl.DataFrame],
+) -> tuple[dict[str, pl.DataFrame], dict[str, np.ndarray]]:
+    """Align every frame on the **union** of bar closes, sorted by ``ts_init``.
+
+    A symbol's rows between its first and last bar that it has no bar for are
+    forward-filled (``volume`` 0); rows before its first bar or after its last
+    are null. A universe whose members list and delist at different times (an
+    S&P 500 "ever members" universe) therefore keeps every date, and a strategy
+    never sees a price from before a listing or after a delisting.
+
+    Returns:
+        ``(aligned frames, symbol -> bool mask of the rows that are real bars)``.
+    """
+    calendar = (
+        pl.concat([f.select(pl.col("ts_init")) for f in frames.values()]).unique().sort("ts_init")
+    )
+    aligned: dict[str, pl.DataFrame] = {}
+    real: dict[str, np.ndarray] = {}
+    for symbol, frame in frames.items():
+        frame = frame.sort("ts_init")
+        values = [c for c in frame.columns if c != "ts_init"]
+        joined = calendar.join(
+            frame.with_columns(pl.lit(True).alias("__bar")), on="ts_init", how="left"
+        )
+        has_bar = joined["__bar"].fill_null(False)  # noqa: FBT003
+        if frame.height:
+            first, last = frame["ts_init"][0], frame["ts_init"][-1]
+            alive = pl.col("ts_init").is_between(first, last)
+            fills = [
+                pl.when(alive)
+                .then(pl.lit(0.0) if c == "volume" else pl.col(c).forward_fill())
+                .otherwise(None)
+                .alias(c)
+                for c in values
+            ]
+            # Real bars keep their own values (volume included); gaps are filled.
+            joined = joined.with_columns(
+                pl.when(pl.col("__bar")).then(pl.col(c)).otherwise(f).alias(c)
+                for c, f in zip(values, fills, strict=True)
+            )
+        aligned[symbol] = joined.select(frame.columns)
+        real[symbol] = has_bar.to_numpy()
+    return aligned, real
+
+
+def _exit_delisted(
+    frames: Mapping[str, pl.DataFrame], targets: dict[str, dict[int, float]]
+) -> None:
+    """Flatten a symbol on its last bar when its data ends before the universe's.
+
+    A symbol whose bars stop early (delisted, merged, dropped from the data
+    source) would otherwise keep its position, marked at a stale price, for the
+    rest of the run. It is closed at its last close instead.
+    """
+    if len(frames) < 2:  # noqa: PLR2004
+        return
+    ends = {s: int(_ts_ns(f).max()) for s, f in frames.items() if f.height}
+    if not ends:
+        return
+    horizon = max(ends.values())
+    for symbol, end in ends.items():
+        if end < horizon and end in targets[symbol]:
+            targets[symbol][end] = 0.0
 
 
 def _clean(values: pl.Series, n: int, symbol: str) -> np.ndarray:
@@ -93,8 +146,11 @@ def compute_targets(
 ) -> dict[str, dict[int, float]]:
     """Run *research* on *frames* and key each target position by bar close.
 
-    A :class:`MultiAssetStrategy` sees the frames aligned on their shared bar
-    closes; a single-asset strategy runs on each frame independently.
+    A :class:`MultiAssetStrategy` sees the frames aligned on the union of their
+    bar closes (see :func:`_align`: null before a symbol's first bar and after
+    its last); targets are kept only on each symbol's real bars. A single-asset
+    strategy runs on each frame independently. With several symbols, one whose
+    bars end before the others' is flattened on its last bar.
 
     Args:
         research: The research strategy.
@@ -107,16 +163,20 @@ def compute_targets(
         raise ValueError("frames must not be empty")
     targets: dict[str, dict[int, float]] = {}
     if isinstance(research, MultiAssetStrategy):
-        aligned = _align(frames)
+        aligned, real = _align(frames)
         signals = research.generate_signals(aligned)
         for symbol, frame in aligned.items():
             values = _clean(signals[symbol], frame.height, symbol)
+            mask = real[symbol]
+            targets[symbol] = dict(
+                zip(_ts_ns(frame)[mask].tolist(), values[mask].tolist(), strict=True)
+            )
+    else:
+        for symbol, frame in frames.items():
+            frame = frame.sort("ts_init")
+            values = _clean(research.generate_signals(frame), frame.height, symbol)
             targets[symbol] = dict(zip(_ts_ns(frame).tolist(), values.tolist(), strict=True))
-        return targets
-    for symbol, frame in frames.items():
-        frame = frame.sort("ts_init")
-        values = _clean(research.generate_signals(frame), frame.height, symbol)
-        targets[symbol] = dict(zip(_ts_ns(frame).tolist(), values.tolist(), strict=True))
+    _exit_delisted(frames, targets)
     return targets
 
 

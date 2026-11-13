@@ -62,6 +62,19 @@ def _futures(multipliers: dict[str, int], n: int = 700, weekdays: bool = False) 
     return MarketData.from_frames(frames, instruments)
 
 
+def _ragged(n: int = 600) -> MarketData:
+    """Six symbols; B lists 150 bars late and C delists 200 bars early (an index universe)."""
+    frames = {}
+    for i, symbol in enumerate("ABCDEF"):
+        frame = daily_bars(_closes(n, seed=30 + i))
+        if symbol == "B":
+            frame = frame.slice(150)
+        elif symbol == "C":
+            frame = frame.slice(0, n - 200)
+        frames[symbol] = frame
+    return MarketData.from_frames(frames, {s: synthetic_future(s) for s in frames})
+
+
 def _rolled_es() -> MarketData:
     contracts, frames = _market(carry=0.001)
     return MarketData.from_outrights("ES.FUT", frames, contracts)
@@ -121,6 +134,16 @@ CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
         CrossSectionalMomentum(lookback=60, skip_recent=5, rebal_freq=5),
         synthetic_data({s: _closes(600, 20 + i) for i, s in enumerate("ABCDEF")}),
         {"costs": _FEE, "start": "2020-05-01"},
+    ),
+    "ragged universe, cross-sectional": (
+        CrossSectionalMomentum(lookback=60, skip_recent=5, rebal_freq=5),
+        _ragged(),
+        {"costs": _FEE, "start": "2020-04-01", "initial_capital": 1e8},
+    ),
+    "ragged universe, delisting exit": (
+        TimeSeriesMomentum(lookback=60, vol_lookback=20, vol_target=0.4),
+        _ragged(),
+        {"costs": _FEE, "initial_capital": 1e8},
     ),
     "rolled ES, per-contract fee": (
         TrendFollowing(fast_period=10, slow_period=40),
