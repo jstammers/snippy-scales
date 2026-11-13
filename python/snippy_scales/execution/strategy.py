@@ -352,10 +352,20 @@ class SignalStrategy(NautilusStrategy):
             self._ends[symbol] = bar.ts_init
         self._targets = compute_targets(self._research, self._history)
 
+    def _net_position(self, instrument: Any) -> Decimal:  # noqa: ANN401 — any Nautilus instrument
+        """Net position rounded to the instrument's size precision.
+
+        Nautilus reports it with float noise (``Decimal('3928347.000000001')``):
+        unrounded, an unchanged target leaves a delta of ~1e-9, which becomes a
+        zero ``Quantity`` and raises, aborting the rest of that bar's batch.
+        """
+        position = Decimal(str(self.portfolio.net_position(instrument.id)))
+        return position.quantize(Decimal(1).scaleb(-instrument.size_precision))
+
     def _close(self, instrument_id: str) -> None:
         """Flatten the position in *instrument_id* (the old contract of a roll)."""
         instrument = self._instruments[instrument_id]
-        position = self.portfolio.net_position(instrument.id)
+        position = self._net_position(instrument)
         if position == 0:
             return
         side = OrderSide.SELL if position > 0 else OrderSide.BUY
@@ -383,7 +393,7 @@ class SignalStrategy(NautilusStrategy):
         increment = Decimal(str(instrument.size_increment))
         wanted = target * self._weights[symbol] * equity / (price * multiplier)
         lots = (Decimal(repr(wanted)) / increment).to_integral_value(ROUND_HALF_EVEN)
-        delta = lots * increment - self.portfolio.net_position(instrument.id)
+        delta = lots * increment - self._net_position(instrument)
         if delta == 0:
             return
         if not force and float(abs(delta)) * price * multiplier < self._band * equity:

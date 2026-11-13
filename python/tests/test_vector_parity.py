@@ -103,6 +103,13 @@ _FEE = Costs(commission_rate=5e-4)
 
 CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
     "constant long": (_Fixed(1.0), synthetic_data({"X": _closes(400, 1)}), {}),
+    # Millions of contracts held unchanged: Nautilus's net position carries float
+    # noise (1e-9), which must not turn into a zero-quantity order.
+    "constant long, huge unchanged position": (
+        _Fixed(1.0),
+        synthetic_data({"X": _closes(300, 50)}),
+        {"initial_capital": 1e10},
+    ),
     "trend, rate fee": (TrendFollowing(), synthetic_data({"X": _closes(800, 2)}), {"costs": _FEE}),
     "trend, band, window": (
         TrendFollowing(fast_period=10, slow_period=40),
@@ -258,3 +265,22 @@ def test_walk_forward_rejects_unknown_engine() -> None:
     data = synthetic_data({"X": _closes(300, 9)})
     with pytest.raises(ValueError, match="engine"):
         WalkForward(data, make_folds(data.closes(), n_splits=2, min_train=100), engine="gpu")
+
+
+def test_net_position_float_noise_is_rounded_away() -> None:
+    """Nautilus reported Decimal('3928347.000000001') for 3,928,347 SPY shares; unrounded, an
+    unchanged target became a zero-quantity order that raised inside on_bar."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from snippy_scales.execution.strategy import SignalStrategy
+
+    noisy = Decimal("3928347.000000001")
+    stub = SimpleNamespace(portfolio=SimpleNamespace(net_position=lambda _iid: noisy))
+    instrument = SimpleNamespace(id="SPY.ALPACA", size_precision=0)
+    assert SignalStrategy._net_position(stub, instrument) == Decimal(3928347)  # type: ignore[arg-type]
+    instrument = SimpleNamespace(id="X.SIM", size_precision=2)
+    stub = SimpleNamespace(
+        portfolio=SimpleNamespace(net_position=lambda _iid: Decimal("-1.2300004"))
+    )
+    assert SignalStrategy._net_position(stub, instrument) == Decimal("-1.23")  # type: ignore[arg-type]
