@@ -1197,27 +1197,6 @@ wheels = [
 ]
 
 [[package]]
-name = "maturin"
-version = "1.12.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2f/a6/54e73f0ec0224488ae25196ce8b4df298cae613b099ad0c4f39dd7e3a8d2/maturin-1.12.4.tar.gz", hash = "sha256:06f6438be7e723aaf4b412fb34839854b540a1350f7614fadf5bd1db2b98d5f7", size = 262134, upload-time = "2026-02-21T10:24:25.64Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/cd/8285f37bf968b8485e3c7eb43349a5adbccfddfc487cd4327fb9104578cc/maturin-1.12.4-py3-none-linux_armv6l.whl", hash = "sha256:cf8a0eddef9ab8773bc823c77aed3de9a5c85fb760c86448048a79ef89794c81", size = 9758449, upload-time = "2026-02-21T10:24:35.382Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/91/f51191db83735f77bc988c8034730bb63b750a4a1a04f9c8cba10f44ad45/maturin-1.12.4-py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:eba1bd1c1513d00fec75228da98622c68a9f50f9693aaa6fb7dacb244e7bbf26", size = 18938848, upload-time = "2026-02-21T10:24:10.701Z" },
-    { url = "https://files.pythonhosted.org/packages/65/47/03c422adeac93b903354b322bba632754fdb134b27ace71b5603feba5906/maturin-1.12.4-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:89749cfc0e6baf5517fa370729a98955552e42fefc406b95732d5c8e85bc90c0", size = 9791641, upload-time = "2026-02-21T10:24:21.72Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/30/dd78acf6afc48d358512b5ed928fd24e2bc6b68db69b1f6bba3ffd7bcaed/maturin-1.12.4-py3-none-manylinux_2_12_i686.manylinux2010_i686.musllinux_1_1_i686.whl", hash = "sha256:4d68664e5b81f282144a3b717a7e8593ec94ac87d7ae563a4c464e93d6cde877", size = 9811625, upload-time = "2026-02-21T10:24:08.152Z" },
-    { url = "https://files.pythonhosted.org/packages/e3/9a/a6e358a18815ab090ef55187da0066df01a955c7c44a61fb83b127055f23/maturin-1.12.4-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl", hash = "sha256:88e09e6c386b08974fab0c7e4c07d7c7c50a0ba63095d31e930d80568488e1be", size = 10255812, upload-time = "2026-02-21T10:24:15.117Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/c5/84dfcce1f3475237cba6e6201a1939980025afbb41c076aa5147b10ac202/maturin-1.12.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:5cc56481b0f360571587c35a1d960ce6d0a0258d49aebb6af98fff9db837c337", size = 9645462, upload-time = "2026-02-21T10:24:28.814Z" },
-    { url = "https://files.pythonhosted.org/packages/de/82/0845fff86ea044028302db17bc611e9bfe1b7b2c992756162cbe71267df5/maturin-1.12.4-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:8fd7eb0c9bb017e98d81aa86a1d440b912fe4f7f219571035dd6ab330c82071c", size = 9593649, upload-time = "2026-02-21T10:24:33.376Z" },
-    { url = "https://files.pythonhosted.org/packages/2b/14/6e8969cd48c7c8ea27d7638e572d46eeba9aa0cb370d3031eb6a3f10ff8d/maturin-1.12.4-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.musllinux_1_1_ppc64le.whl", hash = "sha256:5bb07c349dd066277a61e017a6d6e0860cd54b7b33f8ead10b9e5a4ffb740a0a", size = 12681515, upload-time = "2026-02-21T10:24:31.097Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/8d/2ad86623dca3cfa394049f4220188dececa6e4cefd73ac1f1385fc79c876/maturin-1.12.4-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:c21baaed066b5bec893db2d261bfe3b9da054d99c018326f0bdcf1dc4c3a1eb9", size = 10448453, upload-time = "2026-02-21T10:24:26.827Z" },
-    { url = "https://files.pythonhosted.org/packages/9c/eb/c66e2d3272e74dd590ae81bb51590bd98c3cd4e3f6629d4e4218bd6a5c28/maturin-1.12.4-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:939c4c57efa8ea982a991ee3ccb3992364622e9cbd1ede922b5cfb0f652bf517", size = 9970879, upload-time = "2026-02-21T10:24:12.881Z" },
-    { url = "https://files.pythonhosted.org/packages/38/a0/998f8063d67fa19639179af7e8ea46016ceaa12f85b9720a2e4846449f43/maturin-1.12.4-py3-none-win32.whl", hash = "sha256:d72f626616292cb3e283941f47835ffc608207ebd8f95f4c50523a6631ffcb2e", size = 8518146, upload-time = "2026-02-21T10:24:17.296Z" },
-    { url = "https://files.pythonhosted.org/packages/69/14/6ceea315db6e47093442ec70c2d01bb011d69f5243de5fc0e6a5fab97513/maturin-1.12.4-py3-none-win_amd64.whl", hash = "sha256:ab32c5ff7579a549421cae03e6297d3b03d7b81fa2934e3bdf24a102d99eb378", size = 9863686, upload-time = "2026-02-21T10:24:19.35Z" },
-    { url = "https://files.pythonhosted.org/packages/d4/28/73e14739c6f7605ff9b9d108726d3ff529d4f91a7838739b4dd0afd33ec1/maturin-1.12.4-py3-none-win_arm64.whl", hash = "sha256:b8c05d24209af50ed9ae9e5de473c84866b9676c637fcfad123ee57f4a9ed098", size = 8557843, upload-time = "2026-02-21T10:24:23.894Z" },
-]
-
-[[package]]
 name = "mdurl"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1493,6 +1472,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6f/7b/6248dada39781db1ab3ebf08943080df0796098515a87f6f8696d14ec744/narwhals-2.25.0.tar.gz", hash = "sha256:62c036c810662bf7820b7737077176313bc59350eeeefb808510f388c743e4b2", size = 677076, upload-time = "2026-08-20T18:10:15.454Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/dc/55481808fd70ef1567cf13540ffd4702af3f74b112e35427564b03f79c2d/narwhals-2.25.0-py3-none-any.whl", hash = "sha256:1f0f403e8c7e4463cde9bfe78b12fdd809e3ae3dda6d9b2f802934fb9c7a6a8f", size = 467373, upload-time = "2026-08-20T18:10:13.834Z" },
+]
+
+[[package]]
+name = "nautilus-trader"
+version = "2.0.0rc6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/c6/b40b0a0847e126d5467885ebd4eacf8f45ffd60c7a78429f3a61118c0b20/nautilus_trader-2.0.0rc6.tar.gz", hash = "sha256:947ff476a5a8c04ad7a4b61b284736d630035c76ff5e9c247bf1f8bdfefa9829", size = 11670069, upload-time = "2026-10-05T02:59:49.943Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/4c/c0a67e3d79cea5213581dee9ccd6e861fa2b71d0c37296c4f07d846278c9/nautilus_trader-2.0.0rc6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ca2aa24e790ef2a4251f7efced1ca8e3c8408d23b69af949a0467d6d5ae33618", size = 59959591, upload-time = "2026-10-05T02:57:12.104Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/22/f22878d4773c50b7297e971195e21762b652105e32eac145c30e89f3f9cf/nautilus_trader-2.0.0rc6-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:c4409a4544ce2b4cd9c9014da62b9202740a455cc5a8baba4fec5f127e3cbfa3", size = 65680465, upload-time = "2026-10-05T02:57:16.887Z" },
+    { url = "https://files.pythonhosted.org/packages/59/9a/0886eb3c2610e802cb4c432f97bf5a323ff204ebee0b644ec738bf3f0f54/nautilus_trader-2.0.0rc6-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:9b4002a7bf5e6399c51073039b740ccf3ca7a1e2584ff72c7d479f03eaa9658d", size = 69828675, upload-time = "2026-10-05T02:57:21.386Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/50/60ea5a6f6efb1507886d85222c42f263f0cd60cd5f43a91e14492a2b7144/nautilus_trader-2.0.0rc6-cp312-cp312-win_amd64.whl", hash = "sha256:34aa33d832beff98af3f82a9ab6f001b05e1b12838db3ab456fbf3dcbdd67527", size = 64272273, upload-time = "2026-10-05T02:57:25.638Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/1e/8cd3398ccaf5bdad0ded6d7bb82e485ff7d652d80dc21bba0d159506046f/nautilus_trader-2.0.0rc6-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ec1a777efd507bb4834d641d88779407957e6323a40eaec78610738aa2646cf2", size = 60005134, upload-time = "2026-10-05T02:57:29.737Z" },
+    { url = "https://files.pythonhosted.org/packages/66/47/05acf6fb853ebf82ef7c5fc7ff10170ece7026fb11e34a1f41c8b2241e1d/nautilus_trader-2.0.0rc6-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:3e8dcebcc6a62d2694bff8f41f7d07e3bc9de5fc9457218320d49c2ac47ab4d8", size = 65727070, upload-time = "2026-10-05T02:57:34.676Z" },
+    { url = "https://files.pythonhosted.org/packages/56/30/b8b4668745f2842eb2d419e075524f372c007b0d0dc0af57f4198c3e87ce/nautilus_trader-2.0.0rc6-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:224739eb3b56e966b9de3aa43e236707b72eec9e3dab886467c5e61990cbb565", size = 69875633, upload-time = "2026-10-05T02:57:39.435Z" },
+    { url = "https://files.pythonhosted.org/packages/67/c3/5f466afbcbf6f3fe47eb2d9c75db2cc9a75debc1fbb74e4d778c39320870/nautilus_trader-2.0.0rc6-cp313-cp313-win_amd64.whl", hash = "sha256:af7e2b4e7851decadcc6988190d348906c89238c60040d1e170586fc3e185686", size = 64320514, upload-time = "2026-10-05T02:57:43.834Z" },
 ]
 
 [[package]]
@@ -2503,7 +2498,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "ipython" },
     { name = "loguru" },
-    { name = "maturin" },
+    { name = "nautilus-trader" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "polars" },
@@ -2557,7 +2552,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "ipython", specifier = ">=9.17.1" },
     { name = "loguru", specifier = ">=0.7" },
-    { name = "maturin", specifier = ">=1.5" },
+    { name = "nautilus-trader", specifier = "==2.0.0rc6" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "optuna", marker = "extra == 'optuna'", specifier = ">=3.6" },
     { name = "pandas", specifier = ">=2.2" },
@@ -2570,14 +2565,11 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "quantstats", specifier = ">=0.0.62" },
     { name = "raptorbt", specifier = ">=0.8.0" },
+    { name = "requests", specifier = ">=2.32.5" },
     { name = "rich", specifier = ">=13" },
     { name = "scikit-learn", specifier = ">=1.4" },
     { name = "scipy", specifier = ">=1.14" },
     { name = "scoringrules", specifier = ">=0.11" },
-    { name = "requests", specifier = ">=2.32.5" },
-    { name = "rich", specifier = ">=13" },
-    { name = "scikit-learn", specifier = ">=1.4" },
-    { name = "scipy", specifier = ">=1.12" },
     { name = "statsmodels", specifier = ">=0.15.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
