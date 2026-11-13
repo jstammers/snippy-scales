@@ -187,6 +187,7 @@ class SignalStrategy(NautilusStrategy):
         self._venue = Venue(venues.pop())
         self._currency: Currency = self._instruments[next(iter(traded))].quote_currency
         self._targets = compute_targets(research, self._history)
+        self._ends = {s: self._last_close(f) for s, f in self._history.items()}
         if expected is None:
             counts = (
                 pl.concat([f.select("ts_init") for f in self._history.values()])
@@ -243,7 +244,7 @@ class SignalStrategy(NautilusStrategy):
         self.equity[ts] = equity
         active = {s: sched.active(ts) for s, sched in self._schedules.items()}
         live = {s: batch[i] for s, i in active.items() if i in batch}
-        if any(ts > self._history_end(s) for s in live):
+        if any(ts > self._ends[s] for s in live):
             self._extend_history(live)
         for symbol, bar in live.items():
             iid = active[symbol]
@@ -258,9 +259,9 @@ class SignalStrategy(NautilusStrategy):
             if target is not None:
                 self._rebalance(symbol, iid, target, float(bar.close), equity, force=rolled)
 
-    def _history_end(self, symbol: str) -> int:
-        """Close of the last bar in *symbol*'s history (``-1`` if empty)."""
-        frame = self._history[symbol]
+    @staticmethod
+    def _last_close(frame: pl.DataFrame) -> int:
+        """Close of the last bar in *frame* (``-1`` if empty)."""
         return int(_ts_ns(frame.tail(1))[0]) if frame.height else -1
 
     def _extend_history(self, live: Mapping[str, Bar]) -> None:
@@ -270,7 +271,7 @@ class SignalStrategy(NautilusStrategy):
         unadjusted anchor of a back-adjusted series, so raw prices append as is.
         """
         for symbol, bar in live.items():
-            if bar.ts_init <= self._history_end(symbol):
+            if bar.ts_init <= self._ends[symbol]:
                 continue
             frame = self._history[symbol]
             row = pl.DataFrame(
@@ -288,6 +289,7 @@ class SignalStrategy(NautilusStrategy):
             if self._window is not None:
                 frame = frame.tail(self._window)
             self._history[symbol] = frame
+            self._ends[symbol] = bar.ts_init
         self._targets = compute_targets(self._research, self._history)
 
     def _close(self, instrument_id: str) -> None:
