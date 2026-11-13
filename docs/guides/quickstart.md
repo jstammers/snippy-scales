@@ -35,11 +35,12 @@ just
 ## First Backtest
 
 ```bash
-# Ingest some data (requires DATABENTO_API_KEY env var)
-just algo data ingest GLBX.MDP3 --symbol ES.c.0 --start 2020-01-01 --end 2024-12-31
+# Sync daily futures bars into the catalog (requires DATABENTO_API_KEY)
+just algo data sync configs/databento.yaml --dry-run
+just algo data sync configs/databento.yaml -s ES.c.0
 
-# Run a backtest on the trend-following strategy
-just algo backtest run trend_following --symbol ES.c.0
+# Walk-forward evaluation of the trend-following strategy
+just algo eval run trend-following --symbol ES.c.0
 ```
 
 ## Development Workflow

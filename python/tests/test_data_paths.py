@@ -24,7 +24,9 @@ class TestDataRoot:
         paths = _reload_paths()
         assert Path("data") == paths.DATA_ROOT
         assert Path("data/raw") == paths.RAW_DIR
+        assert Path("data/catalog") == paths.CATALOG_DIR
         assert Path("data/universe") == paths.UNIVERSE_DIR
+        assert Path("data/derived/manifests") == paths.MANIFEST_DIR
 
     def test_honors_env_var_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SNIPPY_DATA_ROOT", "/mnt/bigdisk/algo-data")
@@ -32,6 +34,7 @@ class TestDataRoot:
         assert Path("/mnt/bigdisk/algo-data") == paths.DATA_ROOT
         assert Path("/mnt/bigdisk/algo-data/raw") == paths.RAW_DIR
         assert Path("/mnt/bigdisk/algo-data/universe") == paths.UNIVERSE_DIR
+        assert Path("/mnt/bigdisk/algo-data/catalog") == paths.CATALOG_DIR
 
     def teardown_method(self) -> None:
         # Restore the module to its real-environment state for subsequent tests.

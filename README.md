@@ -10,7 +10,7 @@ ours; data storage, backtest execution and live trading are moving to
 ```
 python/          # Research, strategies, evaluation, CLI
 docs/            # Architecture decisions, API reference, guides
-configs/         # Data ingestion configs
+configs/         # Data sync configs
 data/            # Local data (gitignored)
 ```
 

@@ -17,7 +17,7 @@ from snippy_scales.data.backfill import (
     resolve_backfill_window,
     save_symbols_cache,
 )
-from snippy_scales.data.ingest import IngestRow
+from snippy_scales.data.catalog import SyncResult
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -138,14 +138,15 @@ class TestManifest:
     def test_merge_writes_new_rows(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.csv"
         rows = [
-            IngestRow("sp500", "ohlcv-1m", "AAPL", True, "data/raw/AAPL/ohlcv-1m.parquet"),
-            IngestRow("sp500", "ohlcv-1m", "BADCO", False, "AlpacaCredentialsError"),
+            SyncResult("AAPL", "ohlcv-1m", written=10),
+            SyncResult("BADCO", "ohlcv-1m", error="AlpacaCredentialsError"),
         ]
         merged = merge_manifest(path, rows)
 
         assert set(merged) == {"AAPL", "BADCO"}
         assert merged["AAPL"]["succeeded"] == "True"
         assert merged["BADCO"]["succeeded"] == "False"
+        assert merged["AAPL"]["written"] == "10"
 
         reloaded = read_manifest(path)
         assert reloaded == merged
@@ -155,25 +156,25 @@ class TestManifest:
         merge_manifest(
             path,
             [
-                IngestRow("sp500", "ohlcv-1m", "AAPL", True, "ok"),
-                IngestRow("sp500", "ohlcv-1m", "BADCO", False, "boom"),
+                SyncResult("AAPL", "ohlcv-1m"),
+                SyncResult("BADCO", "ohlcv-1m", error="boom"),
             ],
         )
 
         # A retry-failed run only re-ingests BADCO.
-        merge_manifest(path, [IngestRow("sp500", "ohlcv-1m", "BADCO", True, "ok now")])
+        merge_manifest(path, [SyncResult("BADCO", "ohlcv-1m", written=5)])
 
         final = read_manifest(path)
         assert final["AAPL"]["succeeded"] == "True"
         assert final["BADCO"]["succeeded"] == "True"
-        assert final["BADCO"]["detail"] == "ok now"
+        assert final["BADCO"]["detail"] == ""
 
     def test_merge_updates_existing_symbol_row(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.csv"
-        merge_manifest(path, [IngestRow("sp500", "ohlcv-1m", "AAPL", False, "first try")])
-        merge_manifest(path, [IngestRow("sp500", "ohlcv-1m", "AAPL", True, "second try")])
+        merge_manifest(path, [SyncResult("AAPL", "ohlcv-1m", error="first try")])
+        merge_manifest(path, [SyncResult("AAPL", "ohlcv-1m", written=3)])
 
         final = read_manifest(path)
         assert len(final) == 1
         assert final["AAPL"]["succeeded"] == "True"
-        assert final["AAPL"]["detail"] == "second try"
+        assert final["AAPL"]["written"] == "3"

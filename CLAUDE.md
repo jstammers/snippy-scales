@@ -55,21 +55,21 @@ it.
 │   │   │   └── tearsheet.py    ← TearsheetGenerator
 │   │   ├── research/           ← Feature engineering helpers
 │   │   ├── strategies/         ← Concrete strategy implementations
-│   │   ├── data/               ← Data ingestion (Databento futures + Alpaca equities)
+│   │   ├── data/               ← Market data in the NautilusTrader catalog (data/catalog/)
+│   │   │   ├── catalog.py      ← load_bars, write_bars, frame_to_bars, missing_ranges, instruments
+│   │   │   ├── databento.py    ← DatabentoSync — incremental sync via Nautilus's Databento client
+│   │   │   ├── alpaca.py       ← AlpacaLoader + RateLimiter — the one Alpaca module
 │   │   │   ├── config.py       ← IngestConfig, AlpacaConfig, AssetClassConfig, load_config
-│   │   │   ├── ingest.py       ← upsert_bars (provider-agnostic), load_bars, ingest_from_config
-│   │   │   ├── schema.py       ← BAR_SCHEMA_COLUMNS, conform_bars — shared Parquet layout
-│   │   │   ├── providers/      ← BarProvider Protocol + DatabentoProvider, AlpacaProvider
-│   │   │   ├── ratelimit.py    ← RateLimiter (used by AlpacaProvider)
-│   │   │   ├── batch.py        ← run_batch_job — shared Databento Batch API submit/poll/download
 │   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
 │   │   │   ├── backfill.py     ← helpers behind `algo data backfill-sp500`
-│   │   │   └── tick.py         ← Event-level (Databento-only) ingestion
+│   │   │   └── paths.py        ← CATALOG_DIR, RAW_DIR (legacy, read-only), MANIFEST_DIR
 │   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
-│   │       └── data.py         ← ingest, ingest-config, coverage, update-universe, backfill-sp500
+│   │       └── data.py         ← sync, coverage, consolidate, update-universe, backfill-sp500
 │   └── tests/
+├── scripts/
+│   └── migrate_raw_to_catalog.py ← one-off copy of data/raw/ into the catalog (read-only on raw)
 ├── docs/                       ← MkDocs documentation
-├── configs/                    ← Ingestion configs (databento.yaml, databento_es_trades.yaml,
+├── configs/                    ← Sync configs (databento.yaml, databento_es_trades.yaml,
 │                                  alpaca.yaml, alpaca_sp500_1m.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
 └── pyproject.toml
@@ -173,6 +173,20 @@ All PRs must pass: `ruff check`, `ruff format --check`, `ty check`, `pytest`.
 ---
 
 ## Key patterns
+
+### Market data (NautilusTrader catalog)
+
+```python
+from snippy_scales.data.catalog import load_bars, open_catalog
+
+bars = load_bars("ES.c.0", "ohlcv-1d")   # polars: ts_event (open), ts_init (close), OHLCV, symbol
+catalog = open_catalog()                 # nautilus_trader ParquetDataCatalog at data/catalog/
+```
+
+Write to the catalog only through `data.catalog.write_bars` / `DatabentoSync` /
+`AlpacaLoader`: the catalog rejects overlapping writes, and these helpers write
+only data outside existing coverage. `ts_init` must be the bar **close**.
+Fetch data with `algo data sync <config>`.
 
 ### Running a backtest
 
