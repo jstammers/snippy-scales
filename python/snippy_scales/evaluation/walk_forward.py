@@ -47,7 +47,7 @@ from snippy_scales.evaluation.statistics import (
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
 )
-from snippy_scales.execution import Costs, run_backtest
+from snippy_scales.execution import ENGINES, Costs
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -217,7 +217,13 @@ def stitch_returns(runs: Sequence[BacktestRun]) -> pl.DataFrame:
 
 @dataclass(frozen=True)
 class WalkForward:
-    """Market data, folds and backtest settings shared by every trial."""
+    """Market data, folds and backtest settings shared by every trial.
+
+    *engine* picks the backtester: ``"nautilus"`` (the event-driven reference) or
+    ``"vector"`` (:mod:`snippy_scales.execution.vector`, a numba kernel that
+    reproduces Nautilus's fills, returns and return statistics on bars with
+    ample volume, for screening). Validate the trials you keep on Nautilus.
+    """
 
     data: MarketData
     folds: Sequence[Fold]
@@ -225,9 +231,15 @@ class WalkForward:
     initial_capital: float = 1_000_000.0
     rebalance_band: float = 0.0
     leverage: float = 10.0
+    engine: str = "nautilus"
+
+    def __post_init__(self) -> None:
+        if self.engine not in ENGINES:
+            raise ValueError(f"engine must be one of {sorted(ENGINES)}, got {self.engine!r}")
 
     def run_folds(self, research: Strategy | MultiAssetStrategy) -> list[BacktestRun]:
         """Backtest *research* on every fold's test window."""
+        run_backtest = ENGINES[self.engine]
         return [
             run_backtest(
                 research,
@@ -308,6 +320,7 @@ def run_study(
     study.set_user_attr("costs", asdict(wf.costs))
     study.set_user_attr("initial_capital", wf.initial_capital)
     study.set_user_attr("rebalance_band", wf.rebalance_band)
+    study.set_user_attr("engine", wf.engine)
     study.set_user_attr("space", json.loads(json.dumps(space, default=str)))
     study.set_user_attr("returns_dir", str(trial_dir))
 

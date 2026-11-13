@@ -40,7 +40,8 @@ it.
 │   │   ├── _constants.py       ← TRADING_DAYS_PER_YEAR = 252 (single source of truth)
 │   │   ├── execution/          ← NautilusTrader execution — the only trading user of nautilus_trader
 │   │   │   ├── strategy.py     ← SignalStrategy, compute_targets (research targets → orders)
-│   │   │   └── backtest.py     ← MarketData, load_market_data, run_backtest, Costs, BacktestRun
+│   │   │   ├── backtest.py     ← MarketData, load_market_data, run_backtest, Costs, BacktestRun
+│   │   │   └── vector.py       ← numba screening engine: same run_backtest signature, Nautilus-parity tested
 │   │   ├── evaluation/         ← Walk-forward studies and selection-bias statistics
 │   │   │   ├── walk_forward.py ← make_folds, WalkForward, run_study (Optuna), summarize_study, write_tearsheet
 │   │   │   ├── statistics.py   ← DSR, PSR, PBO, MinTRL
@@ -236,6 +237,8 @@ report.best_params, report.sharpe, report.dsr, report.pbo
 
 Each trial's value is its mean fold Sharpe; the report is computed on the best trial's
 stitched out-of-sample returns and deflated for the number of trials.
+`WalkForward(..., engine="vector")` (CLI `--engine vector`) screens on the numba kernel in
+`execution/vector.py` (~50× faster end to end); validate kept trials on Nautilus.
 CLI: `algo eval run | sweep | run-all | list | report | tearsheet`, `algo backtest run`.
 
 ## Experiment storage
