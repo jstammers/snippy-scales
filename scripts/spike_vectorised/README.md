@@ -20,6 +20,7 @@ NUMBA_CACHE_DIR=$(mktemp -d) /tmp/spike-venv/bin/python speed.py speed.json
 | `fixtures.py` | AAPL, 8 equities, the 19 GLBX `*.c.0` series with stand-in contracts, synthetic rolled ES; `ample_volume` |
 | `accuracy.py` | The accuracy matrix vs `execution.run_backtest` |
 | `speed.py` | Single runs, 100-trial × 5-fold grid, batched variants, first-call JIT cost |
+| `signals.py` | Target generation (signals, dict packaging, panel) vs kernel time, up to 400 equities |
 
 Excluded from `ty` (`pyproject.toml`) because `vectorbt`, `raptorbt` and `numba` are not
 project dependencies.

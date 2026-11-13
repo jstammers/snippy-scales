@@ -215,6 +215,51 @@ RNG, which no other engine can reproduce bar for bar. A screening engine should 
 the *expected* cost, `slippage_prob × tick` per contract, and leave the realised draw to
 Nautilus validation.
 
+## Target generation costs more than simulation
+
+The speed tables above time the simulation on a prebuilt panel. A screening run also
+has to produce the targets. `scripts/spike_vectorised/signals.py` splits one run into
+four parts, timed as warm medians in milliseconds on real data:
+
+- **`generate_signals`:** the strategy's own polars maths.
+- **`compute_targets`:** that maths plus packaging the result as per-symbol
+  `{ts_init: target}` Python dicts.
+- **panel:** turning those dicts back into the `[T, N]` arrays the kernel reads.
+- **kernel:** the simulation.
+
+The 100- and 400-equity rows use S&P names with the full 2,690-bar history, because
+`CrossSectionalMomentum` needs aligned bars.
+
+| Workload | `generate_signals` | `compute_targets` | panel | kernel | (targets + panel) ÷ kernel |
+|---|---|---|---|---|---|
+| AAPL TrendFollowing | 0.34 | 0.86 | 0.08 | 0.03 | 30× |
+| 19 futures TSMOM | 5.9 | 18.2 | 2.9 | 0.59 | 36× |
+| 8 equities CSMOM | — | 51.6 | 0.66 | 0.05 | 1,000× |
+| 100 equities TrendFollowing | 29.0 | 81.3 | 8.5 | 1.4 | 62× |
+| 100 equities CSMOM | — | 218 | 9.0 | 1.4 | 164× |
+| 400 equities TrendFollowing | 117 | 320 | 35.9 | 9.0 | 39× |
+| 400 equities CSMOM | — | 724 | 35.1 | 4.3 | 175× |
+
+(`generate_signals` isn't timed separately for multi-asset strategies, which need
+`compute_targets`' alignment first.)
+
+Once the simulation is a kernel, getting the targets costs **30–1,000× the simulation**.
+A 1,000-trial sweep over 400 equities with TrendFollowing would spend about 6 minutes
+on targets and about 9 s simulating. Where that time goes:
+
+1. **Dict packaging, about 2/3 of the per-asset cost.** `compute_targets` converts each
+   symbol's series to a `{ts: target}` dict, which `SignalStrategy` needs for per-bar
+   lookup. A matrix engine then converts it straight back. A screening path that returns
+   the `[T, N]` array directly removes both steps.
+2. **One symbol at a time.** Single-asset strategies run once per symbol from Python
+   (about 0.3 ms each). One long frame computed with per-symbol window expressions
+   (`.over("symbol")`) would handle every symbol in one polars pass.
+3. **One parameter set at a time.** Every trial recomputes every indicator, even when
+   trials share lookbacks. Computing each distinct indicator once per sweep, or batching
+   parameters, is where large grids gain most.
+4. **`CrossSectionalMomentum` is slow even at 8 symbols** (52 ms). This hasn't been
+   profiled.
+
 ## Implications for `execution/vector.py`
 
 - **Kernel.** Copy `_simulate` and keep the panel semantics: per-symbol `RollSchedule`,
@@ -222,7 +267,8 @@ Nautilus validation.
 - **Parity test.** Gate the kernel with a parity test against `run_backtest` on ample-volume
   synthetic data: final equity within 0.1% and Sharpe within 0.02. In practice it is
   within 1e-8.
-- **Reuse signals.** Compute targets once per trial and slice them per fold. Every
+- **Reuse signals.** Compute targets once per trial and slice them per fold (see the
+  target-generation section: this is now the dominant cost). Every
   strategy is causal, and this is where the remaining grid time goes.
 - **Validate on Nautilus.** Keep Nautilus validation of top trials mandatory. The kernel
   has no liquidity model (−0.0075 Sharpe on the real futures portfolio) and no realised
