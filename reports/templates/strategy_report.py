@@ -370,10 +370,17 @@ def _(alt, cfg, data, mo, pl, rp):
                 Deflated Sharpe ratio and the probability of backtest overfitting (PBO)
                 are reported, not raw Sharpe alone.
 
-                **Objective.** Each trial's value is its **mean fold Sharpe**
-                (annualised, daily mark-to-market, `Sharpe Ratio (252 days)` as
-                Nautilus computes it). The reported out-of-sample series concatenates
-                ("stitches") the fold test windows.
+                **Objective.** Each trial's value is its **mean fold Sharpe**: Nautilus's
+                `Sharpe Ratio (252 days)` on daily mark-to-market equity. The reported
+                out-of-sample series concatenates ("stitches") the fold test windows.
+
+                **Two Sharpe bases.** Nautilus samples equity on *every calendar day*
+                (weekends are zero returns) and annualises by √252. For a weekday-traded
+                asset that is about 0.83× the usual trading-day Sharpe. Fold Sharpes,
+                the objective and the Nautilus statistic tables use that basis. The
+                stitched OOS Sharpe, the benchmark Sharpe, the attribution (5.3) and the
+                checks annualise by the series' **observed** frequency, which matches
+                the trading-day convention. Rankings and DSR/PSR are unaffected.
 
                 **Execution assumptions.**
 
@@ -797,6 +804,91 @@ def _(alt, full_run, mo, pl, rp):
                     ),
                 }
             ),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(cfg, data, mo, rp, validation):
+    with mo.status.spinner(title="Attributing returns…"):
+        attr = rp.attribution(
+            cfg, data, validation.report.best_params, benchmark=rp.benchmark_bars(cfg)
+        )
+    return (attr,)
+
+
+@app.cell(hide_code=True)
+def _(alt, attr, cfg, mo, pl):
+    _c = {r["component"]: r for r in attr.components.iter_rows(named=True)}
+    _e, _s = attr.exposure, attr.signal
+    _bench = cfg.data.benchmark or "the equal-weight universe"
+    _cum = attr.series.select(
+        "ts",
+        *[
+            (1 + pl.col(k)).cum_prod().alias(k)
+            for k in ("long leg", "short leg", "market timing", "selection", "total")
+        ],
+    ).unpivot(index="ts", variable_name="component", value_name="growth")
+    _chart = (
+        alt.Chart(_cum)
+        .mark_line(strokeWidth=1.2)
+        .encode(
+            x=alt.X("ts:T", title=None),
+            y=alt.Y("growth:Q", title="growth of 1 (gross)"),
+            color=alt.Color("component:N", legend=alt.Legend(orient="bottom", title=None)),
+        )
+        .properties(height=220, width="container")
+    )
+    _fmt = lambda v: "n/a" if v != v else f"{v:.3f}"  # noqa: E731
+    _signal = "\n".join(f"| {k} | {_fmt(v)} |" for k, v in _s.items())
+    _worst = ", ".join(
+        f"`{r['symbol']}` {r['contribution_bp']:.0f}"
+        for r in attr.contributors.head(6).iter_rows(named=True)
+    )
+    _best = ", ".join(
+        f"`{r['symbol']}` {r['contribution_bp']:+.0f}"
+        for r in attr.contributors.tail(6).reverse().iter_rows(named=True)
+    )
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+                ### 5.3 Where the returns come from
+
+                The validated parameters' **gross** daily P&L, rebuilt from the same
+                targets the engines trade, over the out-of-sample span. It is split two
+                ways: long leg + short leg, and **market timing** + **selection**.
+                Market timing is the average position across listed names times the
+                equal-weight universe return: what a single index position would
+                earn. Selection is the remainder: choosing *which* names to hold.
+                Beta-hedged removes a static beta to {_bench}. A momentum edge should
+                show up in *selection* or *beta-hedged*. If only timing or the long leg
+                is positive, the strategy is mostly long the market.
+
+                | component | ann. return | ann. vol | Sharpe |
+                |---|---|---|---|
+                {chr(10).join(f"| {k} | {v['ann_return']:+.2%} | {v['ann_vol']:.2%} | {v['sharpe']:.2f} |" for k, v in _c.items()).replace(chr(10), chr(10) + "                ")}
+
+                Mean net exposure **{_e["mean net exposure"]:+.1%}** of equity (gross
+                {_e["mean gross exposure"]:.1%}); beta {_e["beta to benchmark"]:.3f} and
+                correlation **{_e["correlation to benchmark"]:.2f}** to {_bench}.
+
+                **Signal quality** (next 21 bars, non-overlapping): does the sign of a
+                target predict the sign of the next month's return? The hit rate is
+                worth something only if it beats always-long, i.e. the base rate of up
+                months. The rank IC is the cross-sectional rank correlation between
+                targets and next-month returns.
+
+                | measure | value |
+                |---|---|
+                {_signal.replace(chr(10), chr(10) + "                ")}
+
+                **Largest detractors (bp of equity):** {_worst}
+                **Largest contributors:** {_best}
+                """
+            ),
+            _chart,
         ]
     )
     return

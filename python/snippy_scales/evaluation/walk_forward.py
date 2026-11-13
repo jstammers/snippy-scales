@@ -202,6 +202,34 @@ def _sampler(kind: str, space: Mapping[str, Any], seed: int) -> optuna.samplers.
 # ── Running ───────────────────────────────────────────────────────────────────
 
 
+def bar_returns(bars: pl.DataFrame) -> pl.DataFrame:
+    """Close-to-close returns of *bars*, labelled as Nautilus labels daily returns.
+
+    Nautilus (and therefore every :class:`BacktestRun.returns` and stitched
+    study series) labels the return from one day's equity to the next with the
+    day it **starts** on. A bar's return ends at its close (``ts_init``), so it
+    is labelled with the day before that close's day. Labelling it with the
+    close's own day puts a benchmark one day late against strategy returns: its
+    correlation with a market-exposed strategy then collapses to ~0.
+
+    Args:
+        bars: At least ``ts_init`` (bar close) and ``close``.
+
+    Returns:
+        ``ts`` (``Datetime[ns, UTC]``, midnight), ``return``.
+    """
+    return (
+        bars.sort("ts_init")
+        .select(
+            (pl.col("ts_init").dt.truncate("1d") - pl.duration(days=1))
+            .cast(pl.Datetime("ns", "UTC"))
+            .alias("ts"),
+            pl.col("close").pct_change().alias("return"),
+        )
+        .drop_nulls()
+    )
+
+
 def stitch_returns(runs: Sequence[BacktestRun]) -> pl.DataFrame:
     """Concatenate fold returns into one daily series (compounding shared days)."""
     frames = [r.returns for r in runs if r.returns.height]
@@ -358,10 +386,27 @@ def _trial_returns(trial: optuna.trial.FrozenTrial) -> pl.DataFrame:
     return pl.read_parquet(trial.user_attrs["returns_path"])
 
 
-def _annualised_sharpe(returns: np.ndarray) -> float:
+def periods_per_year(returns: pl.DataFrame) -> float:
+    """Observed return periods per year of a ``ts``/``return`` series.
+
+    Nautilus samples equity on **every calendar day** (weekends and holidays are
+    zero returns), so a daily series has ~365 periods a year, not 252.
+    Annualising it by √252, as Nautilus's ``Sharpe Ratio (252 days)`` does,
+    understates the Sharpe of a weekday-traded asset by √(252/365) ≈ 0.83, and
+    dividing its observation count by 252 overstates track-record years by ~45%.
+    Falls back to :data:`TRADING_DAYS_PER_YEAR` for fewer than two returns.
+    """
+    if returns.height < 2:  # noqa: PLR2004
+        return float(TRADING_DAYS_PER_YEAR)
+    first, last = returns["ts"].min(), returns["ts"].max()
+    days = (last - first).total_seconds() / 86_400 + 1  # type: ignore[operator, union-attr]
+    return returns.height / (days / 365.25)
+
+
+def _annualised_sharpe(returns: np.ndarray, periods: float = TRADING_DAYS_PER_YEAR) -> float:
     if returns.size < 2 or returns.std(ddof=1) == 0.0:
         return 0.0
-    return float(returns.mean() / returns.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR))
+    return float(returns.mean() / returns.std(ddof=1) * math.sqrt(periods))
 
 
 @dataclass(frozen=True)
@@ -378,12 +423,16 @@ class StudyReport:
         fold_sharpes: The best trial's Sharpe per fold.
         returns: The best trial's stitched OOS daily returns.
         stats_returns: Nautilus statistics of those returns.
-        sharpe: Annualised Sharpe of the stitched returns.
+        sharpe: Annualised Sharpe of the stitched returns, by their observed
+            frequency (:func:`periods_per_year`). Nautilus's ``Sharpe Ratio
+            (252 days)`` in *stats_returns* annualises the same calendar-day
+            series by √252, so it is ~0.83× this for weekday-traded assets.
         total_return: Compounded stitched return, as a fraction.
         max_drawdown: Worst peak-to-trough fall of the stitched equity, ``<= 0``.
         psr: Probability the true Sharpe is above zero.
         dsr: PSR against the expected best Sharpe of ``n_trials`` skill-less trials.
-        min_track_record_years: Years of returns needed for 95% confidence.
+        min_track_record_years: Years of returns needed for 95% confidence
+            (observations needed / observed periods per year).
         pbo: Probability of Backtest Overfitting over all trials (``None`` if < 2).
     """
 
@@ -441,14 +490,18 @@ def summarize_study(
             raise ValueError(f"study {selection.study_name!r} has no completed trials")
     trial_returns = {t.number: _trial_returns(t) for t in trials}
     trial_sharpes = np.array(
-        [_annualised_sharpe(r["return"].to_numpy()) for r in trial_returns.values()]
+        [
+            _annualised_sharpe(r["return"].to_numpy(), periods_per_year(r))
+            for r in trial_returns.values()
+        ]
     )
-    sharpe = _annualised_sharpe(values)
+    periods = periods_per_year(returns)
+    sharpe = _annualised_sharpe(values, periods)
     n_obs = values.size
     skew = float(sps.skew(values)) if n_obs > 2 else 0.0
     kurt = float(sps.kurtosis(values, fisher=False)) if n_obs > 3 else 3.0
     trial_std = float(trial_sharpes.std(ddof=1)) if trial_sharpes.size > 1 else 0.0
-    common = dict(skew=skew, kurtosis=kurt, periods_per_year=TRADING_DAYS_PER_YEAR)
+    common = dict(skew=skew, kurtosis=kurt, periods_per_year=periods)
 
     pbo: float | None = None
     if len(trials) > 1:
@@ -481,7 +534,7 @@ def summarize_study(
         dsr=deflated_sharpe_ratio(
             sharpe, n_trials=len(trials), n_obs=n_obs, trial_std=trial_std, **common
         ),
-        min_track_record_years=min_trl / TRADING_DAYS_PER_YEAR,
+        min_track_record_years=min_trl / periods,
         pbo=pbo,
     )
 

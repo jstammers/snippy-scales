@@ -343,3 +343,41 @@ def test_rejection_summary_groups_reasons() -> None:
     table = rp.rejection_summary(run)
     assert table.row(0) == ("rejected: No market for <instrument>", 2)
     assert table.height == 2
+
+
+def test_benchmark_returns_line_up_with_strategy_returns() -> None:
+    """A fully invested strategy's daily returns equal its bars' returns on the same labels."""
+    from snippy_scales.evaluation import bar_returns
+    from tests.conftest import synthetic_data
+
+    closes = _closes(300, 7)
+    data = synthetic_data({"X": closes})
+    run = run_backtest(_Long(), data, initial_capital=1e9)
+    joined = run.returns.join(bar_returns(data.frames["X"]), on="ts", suffix="_bench")
+    assert joined.height >= 290
+    corr = joined.select(pl.corr("return", "return_bench")).item()
+    assert corr > 0.99
+    # One day late (the old labelling) is uncorrelated.
+    late = bar_returns(data.frames["X"]).with_columns(pl.col("ts").dt.offset_by("1d"))
+    off = run.returns.join(late, on="ts", suffix="_bench")
+    assert abs(off.select(pl.corr("return", "return_bench")).item()) < 0.2
+
+
+def test_attribution_decomposes_and_matches_the_engine() -> None:
+    cfg = _cfg()
+    data = _ragged()
+    params = {"lookback": 40, "vol_lookback": 20, "rebal_freq": 5}
+    start = rp.folds(cfg, data)[0].test_start
+    att = rp.attribution(cfg, data, params, start=start)
+    s = att.series
+    np.testing.assert_allclose(s["long leg"] + s["short leg"], s["total"], atol=1e-12)
+    np.testing.assert_allclose(s["market timing"] + s["selection"], s["total"], atol=1e-12)
+    comp = {r["component"]: r for r in att.components.iter_rows(named=True)}
+    engine = vector.run_backtest(
+        rp.strategy_class(cfg)(**params), data, start=start, initial_capital=1e9
+    )
+    # Panel (gross, unrounded, trading-day returns) ≈ zero-cost engine (calendar days).
+    assert comp["total"]["sharpe"] == pytest.approx(engine.sharpe * np.sqrt(365 / 252), abs=0.15)
+    assert 0.0 <= att.signal["hit rate"] <= 1.0
+    assert att.contributors.height == len(data.frames)
+    assert att.exposure["mean gross exposure"] > 0
