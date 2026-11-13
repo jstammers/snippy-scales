@@ -320,3 +320,26 @@ def test_environment_and_commands() -> None:
     assert {"git commit", "python", "nautilus_trader"} <= set(env)
     text = rp.commands(_cfg(), ReportPaths(Path("reports/unit")))
     assert "algo report build unit" in text
+
+
+def test_rejection_summary_groups_reasons() -> None:
+    from snippy_scales.execution import BacktestRun
+
+    run = BacktestRun(
+        stats_returns={},
+        stats_pnls={},
+        stats_general={},
+        returns=pl.DataFrame(),
+        equity=pl.DataFrame(),
+        fills=None,  # type: ignore[arg-type]
+        positions=None,  # type: ignore[arg-type]
+        rejections=(
+            "rejected: No market for ADT.ALPACA",
+            "rejected: No market for XYZ.ALPACA",
+            "denied: RATE_LIMIT_EXCEEDED",
+        ),
+        total_orders=3,
+    )
+    table = rp.rejection_summary(run)
+    assert table.row(0) == ("rejected: No market for <instrument>", 2)
+    assert table.height == 2

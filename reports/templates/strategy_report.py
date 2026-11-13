@@ -752,7 +752,7 @@ def _(cfg, data, mo, rp, validation):
 
 
 @app.cell(hide_code=True)
-def _(alt, full_run, mo, pl):
+def _(alt, full_run, mo, pl, rp):
     _stats = "\n".join(f"| {k} | {v:,.4g} |" for k, v in sorted(full_run.stats.items()))
     _eq = full_run.equity
     _fills = full_run.fills
@@ -792,8 +792,8 @@ def _(alt, full_run, mo, pl):
             mo.accordion(
                 {
                     "All Nautilus statistics": mo.md("| statistic | value |\n|---|---|\n" + _stats),
-                    "Rejections": mo.md(
-                        "\n".join(f"- {r}" for r in full_run.rejections[:50]) or "none"
+                    "Denied / rejected orders by reason": mo.ui.table(
+                        rp.rejection_summary(full_run), selection=None
                     ),
                 }
             ),
@@ -829,8 +829,8 @@ def _(bench, cfg, mo, paths, validation):
 
 
 @app.cell(hide_code=True)
-def _(bench_oos, comparison, rp, validation):
-    checks_df = rp.checks(validation, comparison, bench_oos)
+def _(bench_oos, comparison, full_run, rp, validation):
+    checks_df = rp.checks(validation, comparison, bench_oos, full_run)
     return (checks_df,)
 
 
