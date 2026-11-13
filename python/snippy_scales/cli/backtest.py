@@ -4,6 +4,9 @@ Usage::
 
     algo backtest run trend-following -s AAPL --start 2018-01-01 \\
         --params '{"fast_period": 10}' --fees 0.0005 --band 0.02
+
+    # Real ES outrights, rolled on volume
+    algo backtest run momentum-ts -s ES.FUT --per-contract 2.25
 """
 
 from __future__ import annotations
@@ -14,10 +17,12 @@ import typer
 from rich.table import Table
 
 from snippy_scales.cli._common import (
+    ROLL_HELP,
     STRATEGY_NAMES,
     console,
     load_data,
     make_costs,
+    make_roll,
     parse_json,
     resolve_strategy,
 )
@@ -39,13 +44,16 @@ def run(
     slippage: float = typer.Option(0.0, "--slippage", help="Probability of one tick of slippage"),
     band: float = typer.Option(0.0, "--band", help="Skip trades below this fraction of equity"),
     catalog_path: Path = typer.Option(None, "--catalog", help="Catalog root"),  # noqa: B008
+    roll: str = typer.Option("volume", "--roll", help=ROLL_HELP),
+    roll_days: int = typer.Option(5, "--roll-days", help="Calendar roll: days before expiry"),
+    roll_months: str = typer.Option(None, "--roll-months", help="Contract months, e.g. HMUZ"),
 ) -> None:
     """Backtest one strategy and print Nautilus' statistics."""
     from snippy_scales.execution import run_backtest
 
     cls = resolve_strategy(strategy)
     research = cls(**parse_json(params, "--params"))
-    data = load_data(symbol, schema, catalog_path)
+    data = load_data(symbol, schema, catalog_path, make_roll(roll, roll_days, roll_months))
     result = run_backtest(
         research,
         data,
@@ -60,6 +68,7 @@ def run(
     table.add_column(justify="right")
     table.add_row("total return", f"{result.total_return:+.2%}")
     table.add_row("orders", str(result.total_orders))
+    table.add_row("rolls", str(len(result.rolls)))
     for key, value in sorted(result.stats.items()):
         table.add_row(key, f"{value:,.4f}")
     console.print(table)

@@ -164,3 +164,81 @@ def test_backtest_run(env: dict[str, str]) -> None:
     )
     assert "Sharpe Ratio (252 days)" in out
     assert "total return" in out
+
+
+def test_run_all_rolls_outrights_and_skips_undefined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outrights become one ES.FUT symbol; series without definitions are skipped."""
+    from tests.test_futures_rolls import _market
+
+    monkeypatch.setattr(eval_cli, "EXPERIMENTS_DIR", tmp_path / "experiments")
+    root = tmp_path / "catalog"
+    catalog = cat.open_catalog(root)
+    contracts, frames = _market()
+    catalog.write_instruments(contracts)
+    for contract in contracts:
+        cat.write_bars(
+            catalog,
+            cat.frame_to_bars(
+                frames[str(contract.id)],
+                bar_type=cat.bar_type(str(contract.raw_symbol), "GLBX", "ohlcv-1d"),
+                price_precision=2,
+                interval_ns=cat.bar_interval_ns("ohlcv-1d"),
+            ),
+        )
+    _write_symbol(root, "NQ.c.0", seed=3, n=700)
+    # A continuous series with bars but no instrument definition.
+    cat.write_bars(
+        catalog,
+        cat.frame_to_bars(
+            daily_bars(np.linspace(50, 60, 300)),
+            bar_type=cat.bar_type("CL.c.0", "GLBX", "ohlcv-1d"),
+            price_precision=2,
+            interval_ns=cat.bar_interval_ns("ohlcv-1d"),
+        ),
+    )
+    out = _invoke(
+        eval_cli.app,
+        ["run-all", "--catalog", str(root), "--storage", "memory", "--min-train", "100"],
+    )
+    assert "Discovered 3 symbol(s)" in out
+    assert "skip CL.c.0" in out
+    assert "ES.FUT" in out and "ESH0" not in out
+    assert "2 symbols" in out  # momentum-cs on ES.FUT + NQ.c.0
+
+
+def test_backtest_parent_symbol(tmp_path: Path) -> None:
+    from tests.test_futures_rolls import _market
+
+    root = tmp_path / "catalog"
+    catalog = cat.open_catalog(root)
+    contracts, frames = _market()
+    catalog.write_instruments(contracts)
+    for contract in contracts:
+        cat.write_bars(
+            catalog,
+            cat.frame_to_bars(
+                frames[str(contract.id)],
+                bar_type=cat.bar_type(str(contract.raw_symbol), "GLBX", "ohlcv-1d"),
+                price_precision=2,
+                interval_ns=cat.bar_interval_ns("ohlcv-1d"),
+            ),
+        )
+    out = _invoke(
+        backtest_cli.app,
+        [
+            "-s",
+            "ES.FUT",
+            "--catalog",
+            str(root),
+            "--per-contract",
+            "2.25",
+            "--roll",
+            "calendar",
+            "--roll-months",
+            "HMUZ",
+            "trend-following",
+        ],
+    )
+    assert "rolls" in out

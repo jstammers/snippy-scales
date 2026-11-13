@@ -465,3 +465,80 @@ def test_helpers() -> None:
     assert _stype_for("ES.c.0") == "continuous"
     assert _stype_for("ES.FUT") == "parent"
     assert _stype_for("ESZ4") == "raw_symbol"
+
+
+class ParentClient(FakeClient):
+    """Parent requests (``ES.FUT``) return bars for two outrights and a calendar spread."""
+
+    async def get_range_bars(
+        self,
+        dataset: str,
+        instrument_ids: list[InstrumentId],
+        aggregation: BarAggregation,
+        start: int,
+        end: int,
+        price_precision: int | None = None,
+        timestamp_on_close: bool = True,
+    ) -> list[Bar]:
+        assert str(instrument_ids[0]) == "ES.FUT.GLBX"
+        assert price_precision == 2
+        self.calls.append(("bars", start, end))
+        out = []
+        for raw, base in (("ESH4", 4500.0), ("ESM4", 4550.0), ("ESH4-ESM4", -50.0)):
+            bar_type = BarType.from_str(f"{raw}.GLBX-1-DAY-LAST-EXTERNAL")
+            for open_ns in range(start, end, _DAY):
+                px = Price(base + (open_ns - _T0) // _DAY * 0.25, 2)
+                close_ns = open_ns + _DAY
+                out.append(Bar(bar_type, px, px, px, px, Quantity(10, 0), close_ns, close_ns))
+        return out
+
+
+class TestParentSymbols:
+    def test_stype_is_parent_even_if_config_says_continuous(
+        self, catalog: ParquetDataCatalog
+    ) -> None:
+        sync = DatabentoSync(
+            catalog, dataset="GLBX.MDP3", stype_in="continuous", client=ParentClient()
+        )
+        assert sync._stype("ES.FUT") == "parent"  # noqa: SLF001
+        assert sync._stype("ES.c.0") == "continuous"  # noqa: SLF001
+
+    def test_instruments_then_bars_per_outright(
+        self, catalog: ParquetDataCatalog, tmp_path: Path
+    ) -> None:
+        client = ParentClient()
+        sync = DatabentoSync(catalog, dataset="GLBX.MDP3", client=client)
+        with pytest.raises(ValueError, match="sync instrument definitions first"):
+            sync.sync("ES.FUT", "ohlcv-1d", _T0, _T0 + 5 * _DAY)
+
+        assert sync.sync_instruments(["ES.FUT"], _T0, _T0 + 5 * _DAY) == 2
+        assert sorted(str(i.id) for i in catalog.instruments()) == ["ESH4.GLBX", "ESM4.GLBX"]
+
+        # Spread bars are dropped; each outright gets its own series.
+        assert sync.sync("ES.FUT", "ohlcv-1d", _T0, _T0 + 5 * _DAY) == 10
+        root = tmp_path / "catalog"
+        assert sorted(s for s, _ in cat.list_bar_series("ohlcv-1d", root)) == ["ESH4", "ESM4"]
+        h4 = cat.load_bars("ESH4", "ohlcv-1d", catalog_path=root)
+        assert h4["close"].to_list()[0] == 4500.0
+
+        # Covered now: nothing to plan or fetch; extending the window fetches the tail.
+        assert sync.plan("ES.FUT", "ohlcv-1d", _T0, _T0 + 5 * _DAY) == []
+        client.calls.clear()
+        assert sync.sync("ES.FUT", "ohlcv-1d", _T0, _T0 + 8 * _DAY) == 6
+        assert client.calls == [("bars", _T0 + 5 * _DAY, _T0 + 8 * _DAY)]
+
+    def test_instrument_resync_requests_only_after_newest_definition(
+        self, catalog: ParquetDataCatalog
+    ) -> None:
+        client = ParentClient()
+        sync = DatabentoSync(catalog, dataset="GLBX.MDP3", client=client)
+        sync.sync_instruments(["ES.FUT"], _T0 - 200 * _DAY, _T0 + 5 * _DAY)
+        client.calls.clear()
+        assert sync.sync_instruments(["ES.FUT"], _T0 - 200 * _DAY, _T0 + 5 * _DAY) == 0
+        newest = max(i.ts_init for i in catalog.instruments())
+        assert client.calls == [("instruments", max(_T0 - 200 * _DAY, newest), _T0 + 5 * _DAY)]
+
+    def test_parent_ticks_unsupported(self, catalog: ParquetDataCatalog) -> None:
+        sync = DatabentoSync(catalog, dataset="GLBX.MDP3", client=ParentClient())
+        with pytest.raises(ValueError, match="bar schemas only"):
+            sync.plan("ES.FUT", "trades", _T0, _T0 + _DAY)

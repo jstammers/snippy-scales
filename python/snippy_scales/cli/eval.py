@@ -31,10 +31,12 @@ import typer
 from rich.table import Table
 
 from snippy_scales.cli._common import (
+    ROLL_HELP,
     STRATEGY_NAMES,
     console,
     load_data,
     make_costs,
+    make_roll,
     parse_json,
     registry,
     resolve_strategy,
@@ -45,6 +47,7 @@ from snippy_scales.evaluation.walk_forward import DEFAULT_STORAGE
 if TYPE_CHECKING:
     import optuna
 
+    from snippy_scales.data.futures import RollRule
     from snippy_scales.evaluation import StudyReport, WalkForward
     from snippy_scales.execution import Costs, MarketData
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
@@ -127,11 +130,12 @@ def _run(
     storage: str,
     study_name: str | None,
     tearsheet: Path | None,
+    roll: RollRule,
 ) -> None:
     from snippy_scales.evaluation import run_study, summarize_study
 
     cls = resolve_strategy(strategy)
-    data = load_data(symbols, schema, catalog_path)
+    data = load_data(symbols, schema, catalog_path, roll)
     wf = _walk_forward(
         data,
         splits=splits,
@@ -179,6 +183,9 @@ _BAND = typer.Option(0.0, "--band", help="Skip trades below this fraction of equ
 _STORAGE = typer.Option(DEFAULT_STORAGE, "--storage", help=_STORAGE_HELP)
 _STUDY = typer.Option(None, "--study", help="Study name (default: strategy-symbols-time)")
 _TEARSHEET = typer.Option(None, "--tearsheet", help="Write a tearsheet (.html) here")
+_ROLL = typer.Option("volume", "--roll", help=ROLL_HELP)
+_ROLL_DAYS = typer.Option(5, "--roll-days", help="Calendar roll: days before expiry")
+_ROLL_MONTHS = typer.Option(None, "--roll-months", help="Contract months to trade, e.g. HMUZ")
 
 
 @app.command()
@@ -199,6 +206,9 @@ def run(
     storage: str = _STORAGE,
     study: str = _STUDY,
     tearsheet: Path = _TEARSHEET,
+    roll: str = _ROLL,
+    roll_days: int = _ROLL_DAYS,
+    roll_months: str = _ROLL_MONTHS,
 ) -> None:
     """Walk-forward one parameter set (defaults unless --params is given)."""
     fixed = parse_json(params, "--params")
@@ -222,6 +232,7 @@ def run(
         storage=storage,
         study_name=study,
         tearsheet=tearsheet,
+        roll=make_roll(roll, roll_days, roll_months),
     )
 
 
@@ -249,6 +260,9 @@ def sweep(
     storage: str = _STORAGE,
     study: str = _STUDY,
     tearsheet: Path = _TEARSHEET,
+    roll: str = _ROLL,
+    roll_days: int = _ROLL_DAYS,
+    roll_months: str = _ROLL_MONTHS,
 ) -> None:
     """Search parameters by mean walk-forward Sharpe; report DSR and PBO."""
     _run(
@@ -268,6 +282,7 @@ def sweep(
         storage=storage,
         study_name=study,
         tearsheet=tearsheet,
+        roll=make_roll(roll, roll_days, roll_months),
     )
 
 
@@ -284,36 +299,62 @@ def run_all(
     slippage: float = _SLIPPAGE,
     band: float = _BAND,
     storage: str = _STORAGE,
+    roll: str = _ROLL,
+    roll_days: int = _ROLL_DAYS,
+    roll_months: str = _ROLL_MONTHS,
 ) -> None:
     """Walk-forward every strategy (default parameters) on every catalog symbol.
 
-    Single-asset strategies run per symbol; multi-asset strategies run once on
-    all symbols, over the dates they share.
+    Outright futures contracts are evaluated as one rolled parent symbol per root
+    (``ES.FUT``). Single-asset strategies run per symbol; multi-asset strategies
+    run once per venue on all its symbols, over the dates they share. Symbols
+    that can't be loaded (e.g. no instrument definition) are skipped.
     """
-    from snippy_scales.data.catalog import list_bar_series
+    from snippy_scales.data import catalog as cat
+    from snippy_scales.data.futures import tradable_symbols
     from snippy_scales.evaluation import run_study, summarize_study
+    from snippy_scales.execution import load_market_data
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy as _Multi
 
-    series = list_bar_series(schema, catalog_path)
+    series = cat.list_bar_series(schema, catalog_path)
     if not series:
         console.print(
             f"[red]No {schema!r} bars found in the catalog.[/]  Run [cyan]algo data sync[/] first."
         )
         raise typer.Exit(1)
-    symbols = list(dict.fromkeys(symbol for symbol, _ in series))
-    console.print(f"[cyan]Discovered {len(symbols)} symbol(s)[/]")
-    data = load_data(symbols, schema, catalog_path)
+    series = tradable_symbols(cat.open_catalog(catalog_path), series)
+    console.print(f"[cyan]Discovered {len(series)} symbol(s)[/]")
+    rule = make_roll(roll, roll_days, roll_months)
+    data: MarketData | None = None
+    by_venue: dict[str, list[str]] = {}
+    for symbol, venue in series:
+        if any(symbol in v for v in by_venue.values()):
+            console.print(f"  [yellow]skip[/] {symbol}.{venue}: symbol already loaded")
+            continue
+        try:
+            part = load_market_data(
+                symbol, schema, venue=venue, roll=rule, catalog_path=catalog_path
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            console.print(f"  [yellow]skip[/] {symbol}: {exc}")
+            continue
+        data = part if data is None else data.merge(part)
+        by_venue.setdefault(venue, []).append(symbol)
+    if data is None:
+        console.print("[red]No symbol could be loaded.[/]")
+        raise typer.Exit(1)
     costs = make_costs(fees, per_contract, slippage)
 
     jobs: list[tuple[str, type[Strategy] | type[MultiAssetStrategy], list[str]]] = []
     for name, cls in registry().items():
         if issubclass(cls, _Multi):
-            if len(symbols) < 2:  # noqa: PLR2004
-                console.print(f"[yellow]Skipping {name}:[/] needs at least 2 symbols.")
-                continue
-            jobs.append((name, cls, symbols))
+            for venue, symbols in by_venue.items():
+                if len(symbols) < 2:  # noqa: PLR2004
+                    console.print(f"[yellow]Skipping {name} on {venue}:[/] needs 2+ symbols.")
+                    continue
+                jobs.append((name, cls, symbols))
         else:
-            jobs.extend((name, cls, [s]) for s in symbols)
+            jobs.extend((name, cls, [s]) for symbols in by_venue.values() for s in symbols)
 
     summary: list[tuple[str, str, StudyReport]] = []
     for name, cls, job_symbols in jobs:

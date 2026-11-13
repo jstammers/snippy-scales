@@ -240,8 +240,39 @@ Other intervals (e.g. 5 minutes) are aggregated from these — in polars with
 | `<ROOT>.FUT` | Every outright contract under the root | `ES.FUT` |
 
 Databento continuous series are **unadjusted** front-month prices: they jump
-at every roll. Back-adjusting for signals and trading the real outright are
-phase 4 of the [migration plan](../architecture/nautilus_migration.md).
+at every roll, so their returns are wrong on roll days, and they can't be traded.
+
+### Real contracts and rolls (`<ROOT>.FUT`)
+
+`configs/databento_futures.yaml` syncs parent symbols. A parent sync stores
+**each outright as its own series** (`ESH5.GLBX-1-DAY-LAST-EXTERNAL`) with its own
+definition (expiry, multiplier, tick). Calendar spreads in the parent response are
+dropped. Coverage of a parent is the combined coverage of its stored outrights,
+so re-runs fetch only the head or tail. Definitions are fetched first (and only
+after the newest stored one on re-runs), because bars are kept only for contracts
+with a definition. Parent symbols always use `parent` symbology, whatever
+`stype_in` the config sets. Parent requests include every listed contract and
+spread, so check the `--dry-run` cost before syncing.
+
+```bash
+uv run algo data sync configs/databento_futures.yaml --dry-run
+uv run algo data sync configs/databento_futures.yaml
+uv run algo backtest run momentum-ts -s ES.FUT --per-contract 2.25
+uv run algo eval run trend-following -s ES.FUT --roll calendar --roll-days 5 --roll-months HMUZ
+```
+
+Backtesting `ES.FUT` (see [Backtesting and Evaluation](../architecture/backtest_engine.md#futures-rolls)):
+
+- **Roll schedule.** Each bar close has one active outright. With `--roll volume`
+  (the default, like Databento's `.v.0`), the strategy rolls on the first close a later
+  contract trades more than the active one. With `--roll calendar --roll-days N`, it
+  rolls N days before expiry. `--roll-months HMUZ` restricts trading to a cycle.
+- **Signals** come from a backward-ratio-adjusted splice of the active contracts.
+  Every return in it is the return of the contract actually held.
+- **Orders** go to the active outright. On a roll's close, the strategy closes the old
+  contract and opens the new one, so roll costs are paid.
+- `algo eval run-all` evaluates the outrights of each root as one `<ROOT>.FUT`
+  symbol, not contract by contract.
 
 ---
 
