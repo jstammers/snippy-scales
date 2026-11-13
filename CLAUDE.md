@@ -49,7 +49,8 @@ it.
 │   │   ├── strategies/         ← Concrete strategy implementations
 │   │   ├── data/               ← Market data in the NautilusTrader catalog (data/catalog/)
 │   │   │   ├── catalog.py      ← load_bars, write_bars, frame_to_bars, missing_ranges, instruments
-│   │   │   ├── databento.py    ← DatabentoSync — incremental sync via Nautilus's Databento client
+│   │   │   ├── databento.py    ← DatabentoSync — incremental sync via Nautilus's Databento client (incl. ES.FUT parents)
+│   │   │   ├── futures.py      ← outrights, RollRule, RollSchedule, roll_schedule, back_adjust (ratio)
 │   │   │   ├── alpaca.py       ← AlpacaLoader + RateLimiter — the one Alpaca module
 │   │   │   ├── config.py       ← IngestConfig, AlpacaConfig, AssetClassConfig, load_config
 │   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
@@ -200,6 +201,11 @@ run.stats                               # all Nautilus statistics, flat dict
 run.equity                              # polars: ts, equity (per bar close)
 run.rejections                          # non-empty → orders were denied/rejected
 ```
+
+Futures: `-s ES.FUT` / `load_market_data("ES.FUT", roll=RollRule("volume"))` trades real
+outrights through a `RollSchedule`; signals use a backward-**ratio**-adjusted splice, so
+strategies on rolled symbols must be scale-invariant (returns, vol, MA signs).
+`ES.c.0` (Databento continuous) is unadjusted and untradable — prefer `ES.FUT`.
 
 Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.

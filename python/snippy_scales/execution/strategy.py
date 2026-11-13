@@ -15,6 +15,13 @@ When a bar arrives that the precomputed table doesn't cover (live trading), the
 bar is appended to the history and the targets are recomputed on the trailing
 window. Backtests and live trading therefore share one code path.
 
+Each symbol trades through a :class:`~snippy_scales.data.futures.RollSchedule`.
+An equity or a continuous series has a single instrument. A parent futures
+symbol (``ES.FUT``) has one outright per segment: the signals come from the
+back-adjusted series, the orders go to the active outright, and on a roll's bar
+the old contract is closed and the new one opened at that close (two fills, so
+roll costs are paid).
+
 Sizing: on the bar closing at ``t`` the strategy holds
 
     contracts = target_t * weight * equity_t / (close_t * multiplier)
@@ -43,6 +50,7 @@ if TYPE_CHECKING:
 
     from nautilus_trader.model import Bar, Currency, OrderDenied, OrderRejected
 
+    from snippy_scales.data.futures import RollSchedule
     from snippy_scales.strategies.trend import Strategy
 
 #: Columns a history frame must carry, as :func:`~snippy_scales.data.catalog.load_bars` returns.
@@ -117,13 +125,18 @@ class SignalStrategy(NautilusStrategy):
 
     Args:
         research: Research strategy producing targets in units of equity.
-        history: ``symbol -> bars`` used to precompute targets. It should cover
-            the run plus any warm-up; bars after it trigger a recompute.
-        instruments: ``symbol -> Nautilus instrument``; all at one venue.
-        bar_types: ``symbol -> BarType`` string to subscribe to.
+        history: ``symbol -> bars`` used to precompute targets (back-adjusted for
+            rolled futures). It should cover the run plus any warm-up; bars after
+            it trigger a recompute.
+        instruments: ``instrument_id -> Nautilus instrument``; all at one venue.
+        bar_types: ``instrument_id -> BarType`` string to subscribe to.
+        schedules: ``symbol -> RollSchedule`` over those instruments.
+        expected: ``bar close -> number of bars`` fed to the engine at that close,
+            so a timestamp's batch is known to be complete. Defaults to counting
+            *history*; closes it doesn't cover expect one bar per symbol.
         weights: ``symbol -> capital weight``. Defaults to ``1 / n_symbols``.
         rebalance_band: Skip trades whose notional is below this fraction of
-            equity. ``0.0`` rebalances on every bar.
+            equity. ``0.0`` rebalances on every bar. Rolls are never skipped.
         history_window: Bars kept when recomputing live; ``None`` keeps all.
     """
 
@@ -138,50 +151,57 @@ class SignalStrategy(NautilusStrategy):
         history: Mapping[str, pl.DataFrame],
         instruments: Mapping[str, Any],
         bar_types: Mapping[str, str],
+        schedules: Mapping[str, RollSchedule],
+        expected: Mapping[int, int] | None = None,
         weights: Mapping[str, float] | None = None,
         rebalance_band: float = 0.0,
         history_window: int | None = None,
     ) -> None:
         super().__init__()
-        symbols = list(instruments)
-        if set(history) != set(symbols) or set(bar_types) != set(symbols):
-            raise ValueError("history, instruments and bar_types must cover the same symbols")
-        venues = {str(i.id.venue) for i in instruments.values()}
+        symbols = list(schedules)
+        if set(history) != set(symbols):
+            raise ValueError("history and schedules must cover the same symbols")
+        traded = {iid for sched in schedules.values() for iid in sched.instrument_ids}
+        if traded - set(instruments) or traded - set(bar_types):
+            raise ValueError(f"no instrument or bar type for {sorted(traded - set(instruments))}")
+        venues = {str(instruments[i].id.venue) for i in traded}
         if len(venues) != 1:
             raise ValueError(f"all instruments must share one venue, got {sorted(venues)}")
         if rebalance_band < 0.0:
             raise ValueError(f"rebalance_band must be non-negative, got {rebalance_band}")
-        currencies = {str(i.quote_currency) for i in instruments.values()}
+        currencies = {str(instruments[i].quote_currency) for i in traded}
         if len(currencies) != 1:
             raise ValueError(f"all instruments must share one currency, got {sorted(currencies)}")
 
         self._research = research
         self._history = {s: history[s].select(HISTORY_COLUMNS).sort("ts_init") for s in symbols}
-        self._instruments = dict(instruments)
-        self._bar_types = {s: BarType.from_str(bar_types[s]) for s in symbols}
-        self._symbol_of = {str(bt): s for s, bt in self._bar_types.items()}
+        self._schedules = dict(schedules)
+        self._instruments = {i: instruments[i] for i in traded}
+        self._bar_types = {i: BarType.from_str(bar_types[i]) for i in traded}
+        self._iid_of = {str(bt): i for i, bt in self._bar_types.items()}
         self._weights = (
             dict(weights) if weights is not None else dict.fromkeys(symbols, 1.0 / len(symbols))
         )
         self._band = rebalance_band
         self._window = history_window
         self._venue = Venue(venues.pop())
-        self._currency: Currency = next(iter(instruments.values())).quote_currency
+        self._currency: Currency = self._instruments[next(iter(traded))].quote_currency
         self._targets = compute_targets(research, self._history)
-        # How many symbols have a bar at each close, so a timestamp's batch is
-        # known to be complete. Closes beyond the history expect every symbol.
-        counts = (
-            pl.concat([f.select("ts_init") for f in self._history.values()])
-            .group_by("ts_init")
-            .len()
-        )
-        self._expected: dict[int, int] = dict(
-            zip(_ts_ns(counts).tolist(), counts["len"].to_list(), strict=True)
-        )
+        self._ends = {s: self._last_close(f) for s, f in self._history.items()}
+        if expected is None:
+            counts = (
+                pl.concat([f.select("ts_init") for f in self._history.values()])
+                .group_by("ts_init")
+                .len()
+            )
+            expected = dict(zip(_ts_ns(counts).tolist(), counts["len"].to_list(), strict=True))
+        self._expected = dict(expected)
+        self._holding: dict[str, str | None] = dict.fromkeys(symbols)
         self._pending: dict[str, Bar] = {}
         self._pending_ts: int | None = None
         self.equity: dict[int, float] = {}
         self.rejections: list[str] = []
+        self.rolls: list[tuple[int, str, str]] = []
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -193,14 +213,15 @@ class SignalStrategy(NautilusStrategy):
         """Collect the bars closing at one timestamp, then rebalance them together.
 
         Sizing every instrument after all of them are marked to this close
-        uses one consistent equity figure. A bar with a later close flushes an
-        incomplete batch (e.g. a symbol that didn't trade that day).
+        uses one consistent equity figure, and a roll sees both contracts'
+        closes. A bar with a later close flushes an incomplete batch (e.g. a
+        symbol that didn't trade that day).
         """
         if self._pending_ts is not None and bar.ts_init != self._pending_ts:
             self._flush()
         self._pending_ts = bar.ts_init
-        self._pending[self._symbol_of[str(bar.bar_type)]] = bar
-        if len(self._pending) >= self._expected.get(bar.ts_init, len(self._instruments)):
+        self._pending[self._iid_of[str(bar.bar_type)]] = bar
+        if len(self._pending) >= self._expected.get(bar.ts_init, len(self._schedules)):
             self._flush()
 
     def on_order_denied(self, event: OrderDenied) -> None:
@@ -214,29 +235,43 @@ class SignalStrategy(NautilusStrategy):
     # -- internals -----------------------------------------------------------
 
     def _flush(self) -> None:
-        """Rebalance every instrument in the pending batch at one equity figure."""
+        """Roll and rebalance every symbol in the pending batch at one equity figure."""
         batch, ts = self._pending, self._pending_ts
         self._pending, self._pending_ts = {}, None
         if not batch or ts is None:
             return
         equity = float(self.portfolio.equity(self._venue)[self._currency])
         self.equity[ts] = equity
-        if any(ts > self._history_end(s) for s in batch):
-            self._extend_history(batch)
-        for symbol, bar in batch.items():
+        active = {s: sched.active(ts) for s, sched in self._schedules.items()}
+        live = {s: batch[i] for s, i in active.items() if i in batch}
+        if any(ts > self._ends[s] for s in live):
+            self._extend_history(live)
+        for symbol, bar in live.items():
+            iid = active[symbol]
+            held = self._holding[symbol]
+            rolled = False
+            if held is not None and held != iid:
+                rolled = True
+                self._close(held)
+                self.rolls.append((ts, held, iid))
+                self._holding[symbol] = None
             target = self._targets[symbol].get(ts)
             if target is not None:
-                self._rebalance(symbol, target, float(bar.close), equity)
+                self._rebalance(symbol, iid, target, float(bar.close), equity, force=rolled)
 
-    def _history_end(self, symbol: str) -> int:
-        """Close of the last bar in *symbol*'s history (``-1`` if empty)."""
-        frame = self._history[symbol]
+    @staticmethod
+    def _last_close(frame: pl.DataFrame) -> int:
+        """Close of the last bar in *frame* (``-1`` if empty)."""
         return int(_ts_ns(frame.tail(1))[0]) if frame.height else -1
 
-    def _extend_history(self, batch: Mapping[str, Bar]) -> None:
-        """Append live bars to the history and recompute targets (the live path)."""
-        for symbol, bar in batch.items():
-            if bar.ts_init <= self._history_end(symbol):
+    def _extend_history(self, live: Mapping[str, Bar]) -> None:
+        """Append live bars to the history and recompute targets (the live path).
+
+        Beyond the history the active contract is a schedule's last one, the
+        unadjusted anchor of a back-adjusted series, so raw prices append as is.
+        """
+        for symbol, bar in live.items():
+            if bar.ts_init <= self._ends[symbol]:
                 continue
             frame = self._history[symbol]
             row = pl.DataFrame(
@@ -254,11 +289,34 @@ class SignalStrategy(NautilusStrategy):
             if self._window is not None:
                 frame = frame.tail(self._window)
             self._history[symbol] = frame
+            self._ends[symbol] = bar.ts_init
         self._targets = compute_targets(self._research, self._history)
 
-    def _rebalance(self, symbol: str, target: float, price: float, equity: float) -> None:
-        """Trade *symbol* towards *target* units of equity at *price*."""
-        instrument = self._instruments[symbol]
+    def _close(self, instrument_id: str) -> None:
+        """Flatten the position in *instrument_id* (the old contract of a roll)."""
+        instrument = self._instruments[instrument_id]
+        position = self.portfolio.net_position(instrument.id)
+        if position == 0:
+            return
+        side = OrderSide.SELL if position > 0 else OrderSide.BUY
+        quantity = Quantity(float(abs(position)), instrument.size_precision)
+        self.submit_order(self.order_factory.market(instrument.id, side, quantity))
+
+    def _rebalance(
+        self,
+        symbol: str,
+        instrument_id: str,
+        target: float,
+        price: float,
+        equity: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Trade *instrument_id* towards *target* units of equity at *price*.
+
+        *force* skips the rebalance band (re-entering after a roll).
+        """
+        instrument = self._instruments[instrument_id]
         if price <= 0.0 or equity <= 0.0:
             return
         multiplier = float(instrument.multiplier)
@@ -268,8 +326,9 @@ class SignalStrategy(NautilusStrategy):
         delta = lots * increment - self.portfolio.net_position(instrument.id)
         if delta == 0:
             return
-        if float(abs(delta)) * price * multiplier < self._band * equity:
+        if not force and float(abs(delta)) * price * multiplier < self._band * equity:
             return
         side = OrderSide.BUY if delta > 0 else OrderSide.SELL
         quantity = Quantity(float(abs(delta)), instrument.size_precision)
         self.submit_order(self.order_factory.market(instrument.id, side, quantity))
+        self._holding[symbol] = instrument_id

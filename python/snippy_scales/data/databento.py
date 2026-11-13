@@ -13,6 +13,13 @@ close. Instrument definitions come from Databento's ``definition`` schema; a
 continuous symbol (``ES.c.0``) additionally gets a synthetic instrument cloned
 from its most recent outright, so backtests on the continuous series have the
 right tick size and multiplier.
+
+A parent symbol (``ES.FUT``, Databento ``parent`` symbology) syncs every outright
+contract of the root: definitions first (outrights only; spreads are dropped),
+then bars, which the client returns per contract and which are stored per
+contract (``ESH5.GLBX-1-DAY-LAST-EXTERNAL``). Coverage of a parent is the
+combined coverage of its stored outrights. See :mod:`snippy_scales.data.futures`
+for rolling between them.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from nautilus_trader.model import (
 )
 
 from snippy_scales.data import catalog as cat
+from snippy_scales.data import futures
 from snippy_scales.data.paths import CACHE_DIR
 
 if TYPE_CHECKING:
@@ -281,7 +289,7 @@ class DatabentoSync:
                     schema=schema,
                     start=_iso(lo),
                     end=_iso(hi),
-                    stype_in=self.stype_in or _stype_for(symbol),
+                    stype_in=self._stype(symbol),
                 )
             except db.BentoClientError as exc:
                 if getattr(exc, "http_status", None) != 422:  # noqa: PLR2004
@@ -348,6 +356,8 @@ class DatabentoSync:
         *end* is capped at the dataset's available end. For a series that is
         already stored, ranges with no records are dropped (see class docstring).
         """
+        if futures.is_parent(symbol):
+            return self._plan_parent(symbol, schema, start, end)
         if schema in _BAR_AGGREGATION:
             interval = cat.bar_interval_ns(schema)
             data_type, identifier = NautilusDataType.Bar, cat.bar_type(symbol, self.venue, schema)
@@ -369,6 +379,36 @@ class DatabentoSync:
         if not ranges or not stored or self._metadata() is None:
             return ranges
         return [r for r in ranges if self._record_count(symbol, schema, *r) != 0]
+
+    def _outrights(self, symbol: str) -> list[FuturesContract]:
+        return futures.outrights(self.catalog, futures.parent_root(symbol), venue=self.venue)
+
+    def _plan_parent(self, symbol: str, schema: str, start: int, end: int) -> list[tuple[int, int]]:
+        """Missing ranges of a parent symbol: outside the union of its outrights' coverage."""
+        if schema not in _BAR_AGGREGATION:
+            raise ValueError(f"parent symbols support bar schemas only, not {schema!r}")
+        interval = cat.bar_interval_ns(schema)
+        firsts, lasts = [], []
+        for contract in self._outrights(symbol):
+            bt = cat.bar_type(str(contract.raw_symbol), self.venue, schema)
+            first = self.catalog.query_first_timestamp(NautilusDataType.Bar, bt)
+            last = self.catalog.query_last_timestamp(NautilusDataType.Bar, bt)
+            if first is not None and last is not None:
+                firsts.append(first)
+                lasts.append(last)
+        return cat.coverage_gaps(
+            min(firsts) if firsts else None,
+            max(lasts) if lasts else None,
+            start,
+            self._cap_end(end, interval, schema),
+            interval_ns=interval,
+        )
+
+    def _stype(self, symbol: str, override: str | None = None) -> str:
+        """``stype_in`` for *symbol*: parent symbols are always ``parent``."""
+        if futures.is_parent(symbol):
+            return "parent"
+        return override or self.stype_in or _stype_for(symbol)
 
     def estimate_cost(
         self, symbol: str, schema: str, start: int, end: int, *, stype_in: str | None = None
@@ -397,7 +437,7 @@ class DatabentoSync:
                     schema=schema,
                     start=_iso(lo),
                     end=_iso(hi),
-                    stype_in=stype_in or self.stype_in or _stype_for(symbol),
+                    stype_in=self._stype(symbol, stype_in),
                 )
             except db.BentoClientError as exc:
                 # 422 symbology_invalid_request on a short window means nothing
@@ -418,6 +458,9 @@ class DatabentoSync:
         precision of instruments it fetched itself, and a continuous symbol
         (``ES.c.0``) never has a definition of its own.
         """
+        if futures.is_parent(symbol):
+            precisions = [c.price_precision for c in self._outrights(symbol)]
+            return max(precisions) if precisions else None
         if schema in _BAR_AGGREGATION:
             stored = cat.stored_precision(self.catalog, cat.bar_type(symbol, self.venue, schema))
             if stored is not None:
@@ -455,8 +498,33 @@ class DatabentoSync:
                         timestamp_on_close=True,
                     )
                 )
+                if futures.is_parent(symbol):
+                    written += self._write_outright_bars(symbol, schema, bars)
+                    continue
                 normalised = [_normalise_bar(b, bar_type, interval_ns) for b in bars]
                 written += cat.write_bars(self.catalog, normalised)
+        return written
+
+    def _write_outright_bars(self, symbol: str, schema: str, bars: list[Bar]) -> int:
+        """Store a parent request's bars per outright; drop spreads and unknown contracts."""
+        interval_ns = cat.bar_interval_ns(schema)
+        known = {str(c.id): c for c in self._outrights(symbol)}
+        groups: dict[str, list[Bar]] = {}
+        skipped = 0
+        for bar in bars:
+            iid = str(bar.bar_type.instrument_id)
+            if iid in known:
+                groups.setdefault(iid, []).append(bar)
+            else:
+                skipped += 1
+        if skipped:
+            logger.info("%s: skipped %d bars of spreads/undefined contracts", symbol, skipped)
+        written = 0
+        for iid, series in groups.items():
+            raw = str(known[iid].raw_symbol)
+            bar_type = BarType.from_str(cat.bar_type(raw, self.venue, schema))
+            normalised = [_normalise_bar(b, bar_type, interval_ns) for b in series]
+            written += cat.write_bars(self.catalog, sorted(normalised, key=lambda b: b.ts_init))
         return written
 
     def sync_ticks(self, symbol: str, schema: str, start: int, end: int) -> int:
@@ -507,10 +575,13 @@ class DatabentoSync:
         Returns:
             Number of new instruments written.
         """
+        parents = [s for s in symbols if futures.is_parent(s)]
+        written = sum(self._sync_parent_instruments(p, start, end) for p in parents)
+        symbols = [s for s in symbols if not futures.is_parent(s)]
         stored = {str(i.id) for i in self.catalog.instruments()}
         todo = [s for s in symbols if str(self._instrument_id(s)) not in stored]
         if not todo:
-            return 0
+            return written
         defs = self._fetch_definitions(todo, start, end)
         latest: dict[str, Any] = {}
         for d in sorted(defs, key=lambda d: d.ts_init):
@@ -535,7 +606,36 @@ class DatabentoSync:
             (i for i in latest.values() if str(i.id) not in stored), key=lambda i: i.ts_init
         )
         cat.write_instruments(self.catalog, instruments)
-        return len(instruments)
+        return written + len(instruments)
+
+    def _sync_parent_instruments(self, symbol: str, start: int, end: int) -> int:
+        """Store outright definitions of a parent symbol's root.
+
+        Only the part of the window after the newest stored outright definition
+        is requested, which picks up newly listed contracts on re-runs.
+        """
+        root = futures.parent_root(symbol)
+        stored = self._outrights(symbol)
+        lo = max([start, *(c.ts_init for c in stored)])
+        if lo >= end:
+            return 0
+        defs = _call(
+            lambda: self.client.get_range_instruments(
+                self.dataset, [self._instrument_id(symbol)], lo, end
+            )
+        )
+        latest: dict[str, FuturesContract] = {}
+        for d in sorted(defs, key=lambda d: d.ts_init):
+            if (
+                isinstance(d, FuturesContract)
+                and d.underlying == root
+                and futures.month_code(d, root) is not None
+            ):
+                latest[str(d.id)] = d
+        have = {str(c.id) for c in stored}
+        new = sorted((c for i, c in latest.items() if i not in have), key=lambda c: c.ts_init)
+        cat.write_instruments(self.catalog, new)
+        return len(new)
 
     def _fetch_definitions(self, symbols: list[str], start: int, end: int) -> list[Any]:
         continuous = [s for s in symbols if ".c." in s]

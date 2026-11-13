@@ -1,6 +1,6 @@
 # Migration Plan: NautilusTrader
 
-**Status:** in progress (revision 2) — phases 0–3 done; next is phase 4 (real futures contracts and rolls) · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
+**Status:** in progress (revision 2) — phases 0–4 done (phase 4 not yet run on real outright data); next is phase 5 (paper trading on IB) · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
 (pinned exactly), moving to `2.0.x` stable when released
 
 ## Goal
@@ -397,15 +397,86 @@ Deviations from the plan:
 **Exit:** met. `algo eval run-all` runs on Optuna + Nautilus, DSR/PBO are reported per
 study, and nothing imports `backtesting/` (it no longer exists).
 
-### Phase 4: Real futures contracts and rolls
+### Phase 4: Real futures contracts and rolls — **done** (not yet run on real outright data)
 
-Today every futures series is Databento's unadjusted continuous front month (`ES.c.0`). It can't
-be traded, and its roll gaps distort returns.
+What landed:
 
-- Sync parent symbology (`ES.FUT`) bars and definitions into the catalog.
-- Build back-adjusted series for signals with Nautilus continuous-futures support (you supply
-  the roll transitions). `SignalStrategy` trades the active outright and rolls on schedule, with
-  roll costs in the backtest.
+- **Parent syncs.** `DatabentoSync` handles `ES.FUT` (parent symbology).
+  - Definitions come first: outrights only, and on re-runs only those after the newest
+    stored one.
+  - Bars are stored per outright (`ESH5.GLBX-1-DAY-…`). Spreads and contracts without a
+    definition are dropped.
+  - Coverage is the union of the root's outright series, so re-runs fetch only the head
+    or tail (`catalog.coverage_gaps`).
+  - Parent symbols always use `stype_in=parent`.
+  - `configs/databento_futures.yaml` is an example config.
+- **`data/futures.py`.**
+  - `outrights` lists a root's contracts from the catalog.
+  - `RollRule`: volume (default) or calendar N days before expiry, with an optional
+    `months` cycle.
+  - `roll_schedule` produces a `RollSchedule`: the active instrument per bar close.
+  - `back_adjust` splices the active contracts with **backward ratio** adjustment.
+  - `tradable_symbols` collapses outright series into `<ROOT>.FUT` for discovery.
+- **Execution.**
+  - `MarketData` is now keyed by instrument, with a `RollSchedule` per symbol. It's a
+    single instrument for anything but a parent.
+  - `load_market_data("ES.FUT", roll=RollRule(...))` loads the outrights and builds the
+    schedule and adjusted signal frame. `MarketData.from_outrights` does the same for
+    synthetic data.
+  - `SignalStrategy` sizes off the active contract. On a roll's close it closes the old
+    contract and opens the new one (both fills pay costs; the rebalance band doesn't
+    apply to the re-entry). `BacktestRun.rolls` lists the rolls.
+- **CLI.** `--roll volume|calendar`, `--roll-days` and `--roll-months` on `algo backtest
+  run` and `algo eval run | sweep | run-all`. `run-all` now:
+  - evaluates one `<ROOT>.FUT` per root instead of each contract;
+  - runs multi-asset strategies per venue (ALPACA equities and GLBX futures can't share
+    one account);
+  - skips symbols it can't load (e.g. no instrument definition) instead of aborting.
+- **Tests** (`test_futures_rolls.py`, plus parent cases in `test_data_databento.py` and
+  `test_cli_eval.py`): volume and calendar roll dates; the months filter; that adjusted
+  returns equal held-contract returns (to 1e-10); that signals are unchanged by later
+  rolls; that a constant target on rolled outrights tracks the adjusted series to 3e-5
+  with zero costs; and that each roll bar fills both contracts and pays commission on both.
+
+Deviations from the plan:
+
+- **The splice is ours, not Nautilus's continuous futures.** Nautilus splices inside
+  the engine at subscription time (`continuous_future_transitions` params). That needs
+  internally aggregated bar types and produces no polars history before the run, which
+  precomputed signals require. The splice itself is about 40 lines and is checked against
+  the held-contract returns.
+- **Ratio adjustment only.** With backward *spread* adjustment, every new roll shifts all
+  earlier prices by a constant. That changes their percentage returns, so signals
+  precomputed before a roll would differ from those computed after it, breaking the
+  causality guarantee. Ratio adjustment rescales them instead, which return-based signals
+  ignore. Strategies on rolled symbols must be scale-invariant; all four built-in ones are.
+- **Live rolls are not handled yet.** A live session can extend a schedule's last
+  contract, but it can't roll to a contract that wasn't in the loaded data (phase 5).
+
+**Not yet verified end to end:**
+- Like phase 1, the parent path was tested against a fake client with the real method
+  signatures. In particular, it assumes `DatabentoHistoricalClient.get_range_bars` with
+  `ES.FUT.GLBX` returns bars keyed per child instrument; check that on the first real
+  `--dry-run` and sync.
+- The catalog currently holds 19 continuous `*.c.0` daily series with no instrument
+  definitions. They can't be backtested until `algo data sync configs/databento.yaml
+  --instruments-only` is run.
+
+**Benchmarks (2026-11-13, Apple Silicon, single process).** Same data for every engine.
+
+| Workload | Old raptorbt | Old `TargetPositionEngine` | Nautilus (now) |
+|---|---|---|---|
+| 19 futures × 4,630 daily bars, TSMOM | 0.03 s | 0.04 s | 9.7 s (58,681 orders); 4.1 s with a 0.2% band (12,210 orders) |
+| One AAPL run, 2,690 bars | 0.9 ms | 1.1 ms | 257 ms (2,612 orders) |
+| AAPL 9-trial × 5-fold grid | 0.04 s (90 runs incl. train) | 0.05 s | 1.67 s (45 runs, 37 ms each) |
+
+Against the plan's revision-2 measurements (Linux x86, synthetic data): order handling is
+0.13 ms/order versus 0.3 ms. Bar handling is about 25 µs/bar versus 3 µs: the plan
+measured a strategy that did nothing, whereas `SignalStrategy` batches, marks and sizes on
+every bar. The plan's estimate that a 100-trial × 5-fold daily study takes "about 8 minutes"
+holds: about 20 s on one equity, and about 7–16 min on the 19-future portfolio (2 s per fold
+run, or 0.8 s with a rebalance band). The vectorised engines were 100–300× faster per run,
+but they couldn't model orders, contracts or rolls, and raptorbt's metrics were wrong.
 
 ### Phase 5: Paper trading on Interactive Brokers
 

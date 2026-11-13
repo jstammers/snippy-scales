@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Databento sync: real outright futures contracts (parent symbology)
+# ---------------------------------------------------------------------------
+# Each `<ROOT>.FUT` syncs every outright of the root: definitions first (expiry,
+# multiplier, tick; spreads are dropped), then daily bars stored per contract
+# (ESH5.GLBX-1-DAY-LAST-EXTERNAL). Backtests use `-s ES.FUT`, which rolls
+# between outrights (default: volume) and back-adjusts the signal series.
+#
+#   algo data sync configs/databento_futures.yaml --dry-run   # missing ranges + cost
+#   algo data sync configs/databento_futures.yaml
+#   algo backtest run momentum-ts -s ES.FUT --per-contract 2.25
+#
+# Parent requests cover every listed contract (including spreads, which are
+# downloaded and discarded), so they cost more than one continuous series:
+# check the --dry-run estimate first. stype_in is not set: parent symbols always
+# use `parent` symbology.
+# ---------------------------------------------------------------------------
+
+dataset: "GLBX.MDP3"
+schemas: ["1d"]
+start: "2010-06-06"
+
+asset_classes:
+  equity_index:
+    symbols:
+      - ES.FUT   # E-mini S&P 500
+      - NQ.FUT   # E-mini Nasdaq-100
+
+  rates:
+    symbols:
+      - ZN.FUT   # 10-Year Treasury Note

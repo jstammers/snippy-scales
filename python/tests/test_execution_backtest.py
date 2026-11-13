@@ -24,6 +24,7 @@ from nautilus_trader.model import (
 )
 
 from snippy_scales.data import catalog as cat
+from snippy_scales.data.futures import RollSchedule
 from snippy_scales.execution import (
     BacktestRun,
     Costs,
@@ -229,8 +230,9 @@ def test_live_bar_beyond_history_recomputes() -> None:
     strategy = SignalStrategy(
         TrendFollowing(fast_period=5, slow_period=20),
         history={"X": frame.head(40)},
-        instruments={"X": instrument},
-        bar_types={"X": cat.bar_type("X", "SIM", "ohlcv-1d")},
+        instruments={"X.SIM": instrument},
+        bar_types={"X.SIM": cat.bar_type("X", "SIM", "ohlcv-1d")},
+        schedules={"X": RollSchedule.single("X", "X.SIM")},
     )
     full = compute_targets(TrendFollowing(fast_period=5, slow_period=20), {"X": frame})
     bar = cat.frame_to_bars(
@@ -239,7 +241,7 @@ def test_live_bar_beyond_history_recomputes() -> None:
         price_precision=2,
         interval_ns=_DAY,
     )[0]
-    strategy._extend_history({"X": bar})
+    strategy._extend_history({"X": bar})  # keyed by symbol
     assert strategy._targets["X"][bar.ts_init] == pytest.approx(full["X"][bar.ts_init])
 
 
@@ -274,7 +276,7 @@ def test_window_slices_bars_and_frames() -> None:
     start = dt.datetime(2020, 1, 11, tzinfo=dt.UTC)
     end = dt.datetime(2020, 1, 31, tzinfo=dt.UTC)
     sub = data.window(start, end)
-    ts = [b.ts_init for b in sub.bars["X"]]
+    ts = [b.ts_init for b in sub.bars["X.SIM"]]
     lo, hi = cat.to_ns(start), cat.to_ns(end)
     assert lo is not None and hi is not None
     assert min(ts) >= lo and max(ts) <= hi

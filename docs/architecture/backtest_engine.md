@@ -39,6 +39,40 @@ market order for the delta         fills at that bar's close; earns the next bar
 - **Liquidity.** With bar execution, an order larger than the bar's volume walks the
   simulated book and fills partly a tick worse.
 
+## Futures rolls
+
+A symbol trades through a `RollSchedule` (`data/futures.py`) that names the active
+instrument at each bar close. Equities and continuous series have one instrument.
+A parent symbol (`ES.FUT`) rolls through real outrights:
+
+```python
+from snippy_scales.data.futures import RollRule
+data = load_market_data("ES.FUT", roll=RollRule("volume"))   # or "calendar", days_before_expiry=5
+run = run_backtest(TimeSeriesMomentum(), data, costs=Costs(commission_per_contract=2.25))
+run.rolls   # (close ns, old contract, new contract) for each roll of a held position
+```
+
+- **Schedule.** With the volume rule, the strategy rolls on the first close a later
+  contract trades more than the active one; it never rolls back. With the calendar
+  rule, it rolls on the first close at least N days before expiry. `months="HMUZ"`
+  restricts trading to a cycle. A roll at close `T` needs a bar in both contracts at `T`.
+- **Signals** use `back_adjust`: before each roll at `T`, every bar is multiplied
+  by `close_new(T) / close_old(T)`. Each return of the spliced series is then
+  exactly the return of the contract held over that bar. A later roll rescales all
+  earlier bars by one constant, so signals built from returns, volatility or
+  moving-average crossovers are unchanged, and precomputing them stays causal.
+  This is tested. Spread (additive) adjustment would not have this property, which
+  is why ratio is the only mode.
+- **Execution.** On a roll's close, `SignalStrategy` closes the old contract (that
+  bar's close) and opens the new one, ignoring the rebalance band for that trade.
+  Both fills pay costs.
+- **Check.** With zero costs, a constant target on rolled outrights tracks
+  `target × adjusted returns` to 1e-5, which is whole-contract rounding.
+- Nautilus's own continuous futures (`continuous_future_transitions` subscription
+  params) splice bars inside the engine at subscription time. They need internally
+  aggregated bar types, and they aren't available as a polars history before the run,
+  which precomputed signals need. That is why the splice is done here.
+
 ## Costs
 
 | `Costs` field | Nautilus model |

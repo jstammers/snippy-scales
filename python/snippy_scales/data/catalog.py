@@ -384,6 +384,22 @@ def missing_ranges(
     """
     first = catalog.query_first_timestamp(data_type, identifier)
     last = catalog.query_last_timestamp(data_type, identifier)
+    return coverage_gaps(first, last, start, end, interval_ns, head_tolerance_ns)
+
+
+def coverage_gaps(
+    first: int | None,
+    last: int | None,
+    start: int,
+    end: int,
+    interval_ns: int = 0,
+    head_tolerance_ns: int = HEAD_GAP_TOLERANCE_NS,
+) -> list[tuple[int, int]]:
+    """The head and tail of ``[start, end)`` outside stored coverage ``[first, last]``.
+
+    See :func:`missing_ranges`; this is its arithmetic on given bounds (e.g.
+    the combined coverage of every outright of a futures root).
+    """
     if first is None or last is None:
         return [(start, end)] if start < end else []
     ranges = []
