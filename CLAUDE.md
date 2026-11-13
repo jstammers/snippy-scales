@@ -57,12 +57,19 @@ it.
 │   │   │   ├── universe.py     ← sp500_ever_members (Wikipedia-sourced membership history)
 │   │   │   ├── backfill.py     ← helpers behind `algo data backfill-sp500`
 │   │   │   └── paths.py        ← CATALOG_DIR, RAW_DIR (legacy, read-only), MANIFEST_DIR
+│   │   ├── reporting/          ← Strategy research reports (marimo template → reports/<name>/)
+│   │   │   ├── config.py       ← ReportConfig (config.yaml), fingerprint
+│   │   │   ├── pipeline.py     ← screening (vector) → Nautilus validation → full backtest, checks
+│   │   │   └── scaffold.py     ← new_report, export_html (marimo export)
 │   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
-│   │       └── data.py         ← sync, coverage, consolidate, update-universe, backfill-sp500
+│   │       ├── data.py         ← sync, coverage, consolidate, update-universe, backfill-sp500
+│   │       └── report.py       ← algo report new | build | edit | list
 │   └── tests/
 ├── scripts/
 │   └── migrate_raw_to_catalog.py ← one-off copy of data/raw/ into the catalog (read-only on raw)
-├── docs/                       ← MkDocs documentation
+├── reports/                    ← Report instances: GIT-IGNORED (proprietary results)
+│   └── templates/              ← tracked: strategy_report.py (marimo) + configs/*.yaml
+├── docs/                       ← MkDocs documentation (docs/strategies/<name>.md = report theory)
 ├── configs/                    ← Sync configs (databento.yaml, databento_es_trades.yaml,
 │                                  alpaca.yaml, alpaca_sp500_1m.yaml)
 ├── justfile                    ← Dev workflow commands (see below)
@@ -83,6 +90,7 @@ it.
 | `execution/` | Nautilus strategy adapter, `MarketData`, `run_backtest` | Fold/sweep logic, analysis aggregation |
 | `evaluation/` | Folds, Optuna studies, DSR/PSR/PBO, tearsheets | Execution details |
 | `research/` | Feature engineering helpers | Magic constants |
+| `reporting/` | Report configs, the screen → validate → backtest pipeline, scaffolding | Strategy or engine logic (it calls `evaluation/` and `execution/`) |
 | `_constants.py` | `TRADING_DAYS_PER_YEAR = 252` | — |
 
 ---
@@ -240,6 +248,24 @@ stitched out-of-sample returns and deflated for the number of trials.
 `WalkForward(..., engine="vector")` (CLI `--engine vector`) screens on the numba kernel in
 `execution/vector.py` (~50× faster end to end); validate kept trials on Nautilus.
 CLI: `algo eval run | sweep | run-all | list | report | tearsheet`, `algo backtest run`.
+
+### Strategy reports
+
+```bash
+algo report new tsmom-sp500 --from reports/templates/configs/tsmom_sp500.yaml
+algo report build tsmom-sp500     # marimo export → reports/tsmom-sp500/report.html
+```
+
+One tracked marimo template (`reports/templates/strategy_report.py`); instances in
+`reports/<name>/` are git-ignored, never commit them. Keep computations in
+`reporting/pipeline.py` (tested) and only layout in the notebook; run
+`uv run marimo check reports/templates/strategy_report.py` after editing it. A new
+strategy needs `docs/strategies/<registry-name>.md` (rendered as the report's theory).
+Guide: `docs/guides/strategy_reports.md`.
+
+Multi-asset strategies see frames aligned on the **union** of dates (null before a
+symbol's first bar / after its last), so ragged index universes work. A symbol whose
+data ends early is flattened on its last bar (`compute_targets`).
 
 ## Experiment storage
 

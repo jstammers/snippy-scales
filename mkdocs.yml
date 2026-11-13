@@ -26,6 +26,12 @@ markdown_extensions:
   - pymdownx.highlight
   - pymdownx.superfences
   - admonition
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
 
 nav:
   - Home: index.md
@@ -38,6 +44,11 @@ nav:
       - Quickstart: guides/quickstart.md
       - Adding a Strategy: guides/adding_strategy.md
       - Data Ingestion: guides/data_ingestion.md
+      - Strategy Reports: guides/strategy_reports.md
+  - Strategies:
+      - Time-series momentum: strategies/momentum-ts.md
+      - Moving-average trend following: strategies/trend-following.md
+      - Cross-sectional momentum: strategies/momentum-cs.md
   - Research:
       - SDEs and Neural SDEs: research/sde_market_dynamics.md
       - raptorbt Defects (historical): research/raptorbt_defects.md

@@ -1,0 +1,33 @@
+# Moving-average crossover trend following on S&P 500 constituents.
+#   algo report new trend-sp500 --from reports/templates/configs/trend_sp500.yaml
+name: trend-sp500
+title: Moving-average trend following on S&P 500 constituents
+strategy: trend-following
+question: >-
+  Does a volatility-scaled moving-average crossover, traded per stock and equally
+  weighted across every stock that has been in the S&P 500 since 2016, earn a
+  positive risk-adjusted return after costs that survives deflation for the search?
+data:
+  universe: sp500_ever_members
+  venue: ALPACA
+  schema: ohlcv-1d
+  benchmark: SPY
+  example_symbol: AAPL
+evaluation:
+  n_splits: 5
+  test_size: 0.15
+  min_train: 252
+  initial_capital: 100000000
+  commission_rate: 0.0005
+  rebalance_band: 0.0
+screening:
+  engine: vector
+  sampler: tpe
+  n_trials: 60
+  seed: 42
+  space:
+    fast_period: {low: 5, high: 60}
+    slow_period: {low: 80, high: 250}
+    vol_lookback: [20, 63]
+validation:
+  top_k: 5

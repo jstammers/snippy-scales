@@ -1,0 +1,37 @@
+# Cross-sectional momentum (long winners, short losers) on S&P 500 constituents:
+# the relative-strength extension of time-series momentum. Members listing and
+# delisting at different times are handled by aligning on the union of dates.
+#   algo report new csmom-sp500 --from reports/templates/configs/csmom_sp500.yaml
+name: csmom-sp500
+title: Cross-sectional momentum on S&P 500 constituents
+strategy: momentum-cs
+question: >-
+  Does ranking every stock that has been in the S&P 500 since 2016 on its trailing
+  return, long the top and short the bottom quantile, earn a positive risk-adjusted
+  return after costs that survives deflation for the parameter search?
+data:
+  universe: sp500_ever_members
+  venue: ALPACA
+  schema: ohlcv-1d
+  benchmark: SPY
+  example_symbol: AAPL
+evaluation:
+  n_splits: 5
+  test_size: 0.15
+  min_train: 252
+  initial_capital: 100000000
+  commission_rate: 0.0005
+  rebalance_band: 0.0
+screening:
+  engine: vector
+  sampler: tpe
+  n_trials: 40
+  seed: 42
+  space:
+    lookback: [126, 189, 252]
+    skip_recent: [0, 21]
+    top_quantile: [0.1, 0.2, 0.3]
+    bottom_quantile: [0.1, 0.2, 0.3]
+    rebal_freq: [5, 21]
+validation:
+  top_k: 5

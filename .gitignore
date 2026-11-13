@@ -34,5 +34,12 @@ data/*.db
 .code-graph/
 notebooks/
 
+# Strategy reports: instances (results, conclusions, exported HTML) are
+# proprietary and stay local. Only the template, example configs and README
+# are tracked — see reports/README.md.
+reports/*
+!reports/README.md
+!reports/templates/
+
 # Hypothesis example database
 .hypothesis/
