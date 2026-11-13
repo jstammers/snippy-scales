@@ -91,6 +91,10 @@ quote-style = "double"
 python-version = "3.12"
 root = ["python"]
 
+[tool.ty.src]
+# Spike code that imports libraries outside the project (scripts/spike_vectorised/README.md).
+exclude = ["scripts/spike_vectorised"]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 asyncio_mode = "auto"

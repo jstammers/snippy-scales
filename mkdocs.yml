@@ -33,6 +33,7 @@ nav:
       - Overview: architecture/overview.md
       - Backtesting & Evaluation: architecture/backtest_engine.md
       - NautilusTrader Migration: architecture/nautilus_migration.md
+      - "Spike: Vectorised Screening": architecture/vectorised_screening_spike.md
   - Guides:
       - Quickstart: guides/quickstart.md
       - Adding a Strategy: guides/adding_strategy.md
@@ -40,6 +41,7 @@ nav:
   - Research:
       - SDEs and Neural SDEs: research/sde_market_dynamics.md
       - raptorbt Defects (historical): research/raptorbt_defects.md
+      - "Spike: vectorbt vs raptorbt": research/vectorised_engines_spike.md
   - API Reference:
       - Python: api/python/index.md
       - Data: api/python/data.md
