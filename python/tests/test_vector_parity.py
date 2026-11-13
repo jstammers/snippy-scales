@@ -164,6 +164,20 @@ CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
 }  # fmt: skip
 
 
+def test_large_universe_is_not_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """More symbols than Nautilus's default 100 orders/second all trade on one close."""
+    data = synthetic_data({f"S{i:03d}": _closes(40, 100 + i) for i in range(150)})
+    run = run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE)
+    assert run.rejections == ()
+    assert_parity(run, vector.run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE))
+
+    from snippy_scales.execution import backtest as backtest_module
+
+    monkeypatch.setattr(backtest_module, "_MAX_ORDER_SUBMIT_RATE", "100/00:00:01")
+    throttled = run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE)
+    assert any("RATE_LIMIT_EXCEEDED" in r for r in throttled.rejections)
+
+
 @pytest.mark.parametrize("case", list(CASES))
 def test_vector_matches_nautilus(case: str) -> None:
     research, data, kwargs = CASES[case]
