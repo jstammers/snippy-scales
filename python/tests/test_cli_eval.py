@@ -166,6 +166,19 @@ def test_backtest_run(env: dict[str, str]) -> None:
     assert "total return" in out
 
 
+def test_vector_engine_from_the_cli(env: dict[str, str]) -> None:
+    common = ["-s", "ES.c.0", "--catalog", env["catalog"], "--engine", "vector"]
+    out = _invoke(backtest_cli.app, [*common, "trend-following"])
+    assert "Sharpe Ratio (252 days)" in out
+    out = _invoke(
+        eval_cli.app,
+        ["run", "trend-following", *common, "--storage", env["storage"], "--min-train", "100"],
+    )
+    assert "DSR" in out
+    bad = _runner.invoke(backtest_cli.app, ["-s", "ES.c.0", "--engine", "gpu", "trend-following"])
+    assert bad.exit_code != 0
+
+
 def test_run_all_rolls_outrights_and_skips_undefined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

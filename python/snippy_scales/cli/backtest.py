@@ -47,9 +47,17 @@ def run(
     roll: str = typer.Option("volume", "--roll", help=ROLL_HELP),
     roll_days: int = typer.Option(5, "--roll-days", help="Calendar roll: days before expiry"),
     roll_months: str = typer.Option(None, "--roll-months", help="Contract months, e.g. HMUZ"),
+    engine: str = typer.Option(
+        "nautilus", "--engine", help="nautilus (reference) or vector (numba screening kernel)"
+    ),
 ) -> None:
     """Backtest one strategy and print Nautilus' statistics."""
-    from snippy_scales.execution import run_backtest
+    from snippy_scales.execution import ENGINES
+
+    if engine not in ENGINES:
+        console.print(f"[red]--engine must be one of {', '.join(ENGINES)}[/]")
+        raise typer.Exit(1)
+    run_backtest = ENGINES[engine]
 
     cls = resolve_strategy(strategy)
     research = cls(**parse_json(params, "--params"))

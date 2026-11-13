@@ -72,6 +72,7 @@ def _walk_forward(
     costs: Costs,
     capital: float,
     band: float,
+    engine: str = "nautilus",
 ) -> WalkForward:
     from snippy_scales.evaluation import WalkForward, make_folds
 
@@ -84,7 +85,13 @@ def _walk_forward(
         f"[cyan]Folds:[/] {len(folds)} test windows, "
         f"{folds[0].test_start:%Y-%m-%d} → {folds[-1].test_end:%Y-%m-%d}"
     )
-    return WalkForward(data, folds, costs=costs, initial_capital=capital, rebalance_band=band)
+    try:
+        return WalkForward(
+            data, folds, costs=costs, initial_capital=capital, rebalance_band=band, engine=engine
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
 
 
 def _print_report(report: StudyReport) -> None:
@@ -131,6 +138,7 @@ def _run(
     study_name: str | None,
     tearsheet: Path | None,
     roll: RollRule,
+    engine: str = "nautilus",
 ) -> None:
     from snippy_scales.evaluation import run_study, summarize_study
 
@@ -144,6 +152,7 @@ def _run(
         costs=costs,
         capital=capital,
         band=band,
+        engine=engine,
     )
     try:
         study = run_study(
@@ -186,6 +195,11 @@ _TEARSHEET = typer.Option(None, "--tearsheet", help="Write a tearsheet (.html) h
 _ROLL = typer.Option("volume", "--roll", help=ROLL_HELP)
 _ROLL_DAYS = typer.Option(5, "--roll-days", help="Calendar roll: days before expiry")
 _ROLL_MONTHS = typer.Option(None, "--roll-months", help="Contract months to trade, e.g. HMUZ")
+_ENGINE = typer.Option(
+    "nautilus",
+    "--engine",
+    help="nautilus (event-driven, reference) or vector (numba screening kernel, ~50x faster)",
+)
 
 
 @app.command()
@@ -209,6 +223,7 @@ def run(
     roll: str = _ROLL,
     roll_days: int = _ROLL_DAYS,
     roll_months: str = _ROLL_MONTHS,
+    engine: str = _ENGINE,
 ) -> None:
     """Walk-forward one parameter set (defaults unless --params is given)."""
     fixed = parse_json(params, "--params")
@@ -233,6 +248,7 @@ def run(
         study_name=study,
         tearsheet=tearsheet,
         roll=make_roll(roll, roll_days, roll_months),
+        engine=engine,
     )
 
 
@@ -263,6 +279,7 @@ def sweep(
     roll: str = _ROLL,
     roll_days: int = _ROLL_DAYS,
     roll_months: str = _ROLL_MONTHS,
+    engine: str = _ENGINE,
 ) -> None:
     """Search parameters by mean walk-forward Sharpe; report DSR and PBO."""
     _run(
@@ -283,6 +300,7 @@ def sweep(
         study_name=study,
         tearsheet=tearsheet,
         roll=make_roll(roll, roll_days, roll_months),
+        engine=engine,
     )
 
 
@@ -302,6 +320,7 @@ def run_all(
     roll: str = _ROLL,
     roll_days: int = _ROLL_DAYS,
     roll_months: str = _ROLL_MONTHS,
+    engine: str = _ENGINE,
 ) -> None:
     """Walk-forward every strategy (default parameters) on every catalog symbol.
 
@@ -369,6 +388,7 @@ def run_all(
                 costs=costs,
                 capital=capital,
                 band=band,
+                engine=engine,
             )
             study = run_study(cls, wf, storage=_storage(storage), returns_dir=EXPERIMENTS_DIR)
             report = summarize_study(study)
