@@ -530,8 +530,13 @@ def checks(
     validation: StageResult,
     comparison: pl.DataFrame,
     benchmark: pl.DataFrame | None,
+    full_run: BacktestRun | None = None,
 ) -> pl.DataFrame:
-    """Pass/fail checks on the validated result, for the conclusions section."""
+    """Pass/fail checks on the validated result, for the conclusions section.
+
+    Orders Nautilus denied or rejected (validation folds and *full_run*) mean it
+    did not trade as the strategy intended, so its numbers are suspect.
+    """
     r = validation.report
     oos_years = r.returns.height / 365.25 if r.returns.height else 0.0
     rows: list[dict[str, Any]] = [
@@ -575,6 +580,8 @@ def checks(
             }
         )
         rejections = int(comparison["nautilus_rejections"].sum())
+        if full_run is not None:
+            rejections += len(full_run.rejections)
         rows.append(
             {
                 "check": "No orders denied or rejected by Nautilus",
@@ -586,6 +593,16 @@ def checks(
         [{**r, "value": float(r["value"]), "passed": bool(r["passed"])} for r in rows],
         schema={"check": pl.String, "value": pl.Float64, "passed": pl.Boolean},
     )
+
+
+def rejection_summary(run: BacktestRun) -> pl.DataFrame:
+    """Denied/rejected orders grouped by reason (instrument IDs folded away), most first."""
+    if not run.rejections:
+        return pl.DataFrame(schema={"reason": pl.String, "orders": pl.UInt32})
+    reasons = pl.Series("reason", list(run.rejections)).str.replace_all(
+        r"\b[A-Z0-9.]+\.[A-Z]+\b", "<instrument>"
+    )
+    return reasons.to_frame().group_by("reason").len("orders").sort("orders", descending=True)
 
 
 def environment() -> dict[str, str]:
