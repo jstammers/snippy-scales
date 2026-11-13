@@ -16,14 +16,16 @@ correct implementation should:
 * Produce clean, rank-ordered signals with no look-ahead bias.
 * Rebalance at the correct frequency with position carry-forward between
   rebalance dates.
-* Produce a non-trivial long-short portfolio.
+* Produce a non-trivial long-short portfolio that exercises both books in
+  :class:`~snippy_scales.backtesting.runner.BasketRunner`.
 
 Interface
 ---------
 :class:`CrossSectionalMomentum` extends :class:`MultiAssetStrategy`, which is
 the multi-asset analogue of the single-asset
-:class:`~snippy_scales.strategies.trend.Strategy` ABC.
-:func:`snippy_scales.execution.run_backtest` accepts either base class.
+:class:`~snippy_scales.strategies.trend.Strategy` ABC.  The
+:class:`~snippy_scales.backtesting.runner.BasketRunner` accepts either base
+class and handles raptorbt wiring automatically.
 """
 
 from __future__ import annotations
@@ -42,8 +44,8 @@ class MultiAssetStrategy(ABC):
     returns a per-symbol position Series.  This enables cross-sectional signals
     that depend on the *relative* performance of assets.
 
-    :func:`snippy_scales.execution.run_backtest` aligns the frames on their
-    shared bar closes before calling :meth:`generate_signals`.
+    The :class:`~snippy_scales.backtesting.runner.BasketRunner` accepts any
+    concrete implementation of this class.
     """
 
     @abstractmethod
@@ -94,7 +96,8 @@ class CrossSectionalMomentum(MultiAssetStrategy):
     Example::
 
         strategy = CrossSectionalMomentum(lookback=252, top_quantile=0.25)
-        run = run_backtest(strategy, load_market_data(["ES.c.0", "NQ.c.0", "CL.c.0"]))
+        runner = BasketRunner(initial_capital=1_000_000.0)
+        result = runner.run(strategy, multi_bars)
     """
 
     def __init__(

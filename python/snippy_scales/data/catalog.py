@@ -211,7 +211,7 @@ def resolve_bar_type(
     return bar_type(symbol, venues[0], schema)
 
 
-def to_ns(value: str | dt.date | dt.datetime | int | None) -> int | None:
+def _to_ns(value: str | dt.date | dt.datetime | int | None) -> int | None:
     """Convert a date, datetime, ISO string or ns integer to UNIX nanoseconds (UTC)."""
     if value is None or isinstance(value, int):
         return value
@@ -257,7 +257,7 @@ def load_bars(
         raise FileNotFoundError(f"No catalog at {root}. Run `algo data sync` first.")
     bt = resolve_bar_type(symbol, schema, venue=venue, catalog_path=root)
     payload = ParquetDataCatalog(str(root)).query_data_arrow_bytes(
-        NautilusDataType.Bar, [bt], start=to_ns(start), end=to_ns(end), display=True
+        NautilusDataType.Bar, [bt], start=_to_ns(start), end=_to_ns(end), display=True
     )
     df = pl.from_arrow(pa.ipc.open_stream(payload).read_all())
     assert isinstance(df, pl.DataFrame)  # noqa: S101 — from_arrow(Table) is always a DataFrame

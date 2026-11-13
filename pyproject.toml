@@ -17,12 +17,11 @@ dependencies = [
     "pyyaml>=6",
     "pydantic>=2.7",
     "loguru>=0.7",
+    "raptorbt>=0.8.0",
     # Exact pin: v2 is a release candidate with breaking changes between RCs.
     # The catalog contract tests (test_nautilus_contract.py) guard upgrades.
-    # `visualization` adds plotly for Nautilus tearsheets (`algo eval tearsheet`).
-    "nautilus_trader[visualization]==2.0.0rc6",
-    # Walk-forward parameter search and the experiment store (evaluation/walk_forward.py).
-    "optuna>=4.0",
+    "nautilus_trader==2.0.0rc6",
+    "quantstats>=0.0.62",
     "duckdb>=1.0",
     "scoringrules>=0.11",
     "altair>=6.2.2",
@@ -34,6 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+optuna = ["optuna>=3.6"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -78,7 +78,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
 
 [tool.ruff.lint.per-file-ignores]
 "python/tests/**" = ["ANN", "TC003"]
-# Optuna trials and Nautilus objects are loosely typed; Any is necessary for interop.
+# raptorbt is a Rust extension without type stubs; Any is necessary for interop.
+"python/snippy_scales/backtesting/**" = ["ANN401"]
+# quantstats/pandas have no complete type stubs; Any is necessary for interop.
 "python/snippy_scales/evaluation/**" = ["ANN401"]
 # CLI modules must import Path unconditionally so typer can resolve annotations
 # at runtime — moving it to TYPE_CHECKING (TC003) would break typer.

@@ -113,51 +113,30 @@ signals = strat.generate_signals(bars)
 print(signals)
 ```
 
-### 4. Register it and prove it is causal
-
-- Add it to `registry()` in `python/snippy_scales/cli/_common.py` so the CLI can find it.
-- Add an instance to `_SINGLE` (or `_MULTI`) in `python/tests/test_strategy_causality.py`.
-  Backtests precompute signals on the whole history, which is only valid if
-  `generate_signals(bars[:k]) == generate_signals(bars)[:k]`; the test checks that.
-- Never import `nautilus_trader` from a strategy.
-
-### 5. Run a Backtest
+### 4. Run a Backtest
 
 ```bash
-uv run algo backtest run my-strategy -s ES.c.0 --start 2020-01-01 --end 2024-12-31 \
-    --params '{"ma_period": 50}' --fees 0.0002
+just algo backtest run my_strategy --symbol ES.c.0 --start 2020-01-01 --end 2024-12-31
 ```
 
 Or programmatically:
 
 ```python
-from snippy_scales.execution import Costs, load_market_data, run_backtest
+from snippy_scales.backtesting.runner import BacktestRunner
 from snippy_scales.strategies.my_strategy import MyMeanReversion
 
-data = load_market_data("ES.c.0", "ohlcv-1d")
-run = run_backtest(
-    MyMeanReversion(ma_period=50),
-    data,
-    start="2020-01-01",      # earlier bars warm up the signals
-    end="2024-12-31",
-    costs=Costs(commission_per_contract=2.25),
+runner = BacktestRunner(
+    strategy=MyMeanReversion(ma_period=50),
+    instruments=["ES.c.0"],
+    start_date="2020-01-01",
+    end_date="2024-12-31",
 )
-print(f"Sharpe: {run.sharpe:.2f}")
-print(f"Return: {run.total_return:.2%}")
-print(f"Max DD: {run.stats['Max Drawdown']:.2%}")
+
+result = runner.run()
+print(f"Sharpe: {result.sharpe_ratio:.2f}")
+print(f"Max DD: {result.max_drawdown:.2%}")
+print(f"Returns: {result.total_return:.2%}")
 ```
-
-### 6. Walk-forward and parameter search
-
-```bash
-uv run algo eval sweep my-strategy -s ES.c.0 --search grid \
-    --params '{"ma_period": [20, 50, 100]}'
-```
-
-This runs an Optuna study (one trial per parameter set, each backtested on every
-out-of-sample fold) and reports the stitched out-of-sample Sharpe together with the
-Deflated Sharpe Ratio and the Probability of Backtest Overfitting. Studies are kept
-in `data/derived/experiments/optuna.db`; see `algo eval list | report | tearsheet`.
 
 ## Advanced Patterns
 

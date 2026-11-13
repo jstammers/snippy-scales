@@ -7,8 +7,6 @@
 * :data:`UNIVERSE_DIR` — resolved stock universes (e.g. S&P 500 membership).
 * :data:`MANIFEST_DIR` — per-symbol job manifests for long backfills.
 * :data:`CACHE_DIR` — small downloaded reference files (e.g. Databento publishers).
-* :data:`EXPERIMENTS_DIR` — walk-forward studies: the Optuna database and each
-  trial's out-of-sample returns.
 
 The datastore root is relocatable via the ``SNIPPY_DATA_ROOT`` env var
 (e.g. to point at an external disk) — read once at import time, defaulting
@@ -26,4 +24,3 @@ RAW_DIR = DATA_ROOT / "raw"
 UNIVERSE_DIR = DATA_ROOT / "universe"
 MANIFEST_DIR = DATA_ROOT / "derived" / "manifests"
 CACHE_DIR = DATA_ROOT / "cache"
-EXPERIMENTS_DIR = DATA_ROOT / "derived" / "experiments"

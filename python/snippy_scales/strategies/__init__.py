@@ -1,12 +1,10 @@
-"""Research strategies: pure polars, no ``nautilus_trader`` imports.
+"""Strategy implementations for the snippy-scales backtesting layer.
 
 All strategies implement either :class:`~snippy_scales.strategies.trend.Strategy`
 (single-asset) or
 :class:`~snippy_scales.strategies.momentum_cs.MultiAssetStrategy` (multi-asset)
-and produce signed-float target positions in units of equity, which
-:func:`snippy_scales.execution.run_backtest` trades through NautilusTrader.
-Strategies must be causal (``tests/test_strategy_causality.py``) and must not
-import ``nautilus_trader``.
+and produce signed-float position series that are consumed by the
+:mod:`snippy_scales.backtesting.runner` infrastructure.
 
 Available strategies
 --------------------
@@ -16,7 +14,7 @@ Phase 1 — Baseline, Robust, Low-Dimensional Alpha
 
 :class:`~snippy_scales.strategies.momentum_cs.CrossSectionalMomentum`
     Rank assets by their *J*-month return and go long (short) the top (bottom)
-    quantile (a :class:`MultiAssetStrategy`).
+    quantile.  Uses :class:`~snippy_scales.backtesting.runner.BasketRunner`.
 
 :class:`~snippy_scales.strategies.momentum_ts.TimeSeriesMomentum`
     Enter long (short) when the *L*-bar return is positive (negative).

@@ -1,6 +1,6 @@
 # Migration Plan: NautilusTrader
 
-**Status:** in progress (revision 2) — phases 0–3 done; next is phase 4 (real futures contracts and rolls) · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
+**Status:** in progress (revision 2) — phases 0 and 1 done · **Date:** 2026-10-14 · **Target:** `nautilus_trader==2.0.0rc6`
 (pinned exactly), moving to `2.0.x` stable when released
 
 ## Goal
@@ -266,136 +266,35 @@ sync should be checked by hand. In particular, check that continuous symbols res
 **Exit (for you to run on real data):** `migrate_raw_to_catalog.py --verify-only` clean;
 `algo eval run-all` gives the same results as before the migration.
 
-### Phase 2: `SignalStrategy` and `run_backtest` — **done**
+### Phase 2: `SignalStrategy` and `run_backtest`; delete `backtesting/`
 
-What landed:
+- `execution/strategy.py`, `instruments.py`, `fees.py`, `backtest.py` as above. Backtests use
+  `BacktestNode` / `BacktestDataConfig` reading `data/catalog/` directly.
+- **Causality test** for every strategy (hypothesis property test):
+  `generate_signals(bars[:k]) == generate_signals(bars)[:k]` for random `k`. This makes
+  precomputation safe and catches lookahead in research code generally.
+- **One-time parity check** against `TargetPositionEngine` for the four built-in strategies, on
+  a synthetic instrument with fine lot size, multiplier 1 and zero costs. Then add costs and
+  check they are in proportion. Record the result in this doc.
+- Then delete all of `backtesting/` and `raptorbt`, and update CLAUDE.md and
+  `docs/architecture/backtest_engine.md`.
 
-- `execution/strategy.py`: `SignalStrategy` (a Nautilus `Strategy`) and `compute_targets`.
-  Targets are precomputed once on the whole history and looked up by bar close. Bars closing
-  at the same timestamp are batched, so every instrument is sized off one equity figure after
-  all of them are marked:
-  `contracts = target × weight × equity / (close × multiplier)`, rounded to the size increment.
-  Weights default to `1 / n_symbols`, the old `BasketRunner` convention. `rebalance_band` skips
-  trades below that fraction of equity. Bars beyond the history (live) are appended and the
-  targets recomputed once per batch, so there is one code path. Denied and rejected orders
-  are collected in `BacktestRun.rejections`.
-- `execution/backtest.py`: `run_backtest(research, data, start, end, ...)` on `MarketData`,
-  loaded from the catalog by `load_market_data` (bars replayed exactly as stored) or built
-  from polars frames by `MarketData.from_frames` (synthetic data). *(Phase 3 split loading
-  from running so folds reuse one load.)* Signals
-  use all history up to `end`, so they are warm at `start`. `Costs` maps to Nautilus models:
-  `commission_per_contract` → `PerContractFeeModel`, `commission_rate` → `MakerTakerFeeModel`,
-  `slippage_prob` → `DefaultFillModel` (seeded). The venue is a `MARGIN`/`NETTING` account.
-  `BacktestRun` holds the flat Nautilus stats dict, `returns_series`, per-bar equity, and the
-  fills and positions reports.
-- `tests/test_strategy_causality.py`: hypothesis property
-  `generate_signals(bars[:k]) == generate_signals(bars)[:k]` for all four built-in strategies
-  (TSMOM with and without `rebal_freq`, CSMOM with two configurations), plus a check that a
-  peeking strategy fails it. All built-in strategies pass.
-- `tests/test_execution_backtest.py`: sizing, fill timing, warm-up, rebalance band, multiplier,
-  costs, catalog round trip, the live recompute path, and the parity check below (the
-  parity test was deleted with the legacy engine in phase 3; its result is recorded here).
-- Real-data smoke run (Alpaca daily, read-only): TrendFollowing on AAPL 2018–2026 took
-  0.68 s for 695 orders; CSMOM on 8 equities took 0.70 s. No orders were rejected.
+**Exit:** parity recorded; no imports from `backtesting/` remain.
 
-**Parity with `TargetPositionEngine` (recorded 2026-11-13).** Synthetic futures with
-multiplier 1, 400 daily bars, `1e9` capital (whole-contract rounding is negligible), unlimited
-bar volume, every-bar rebalancing. "Max rel. diff" compares the two equity curves bar by bar
-with zero costs. "Cost drag" is the fall in final equity from adding a 10 bp commission.
+### Phase 3: Walk-forward on Optuna; delete the rest of `evaluation/`
 
-| Strategy | Assets | Max rel. diff (zero cost) | Return | Legacy cost drag | Nautilus cost drag | Ratio |
-|---|---|---|---|---|---|---|
-| TrendFollowing(10, 40) | 1 | 9.3e-09 | +1.75% | 2.21% | 2.26% | 1.02 |
-| TimeSeriesMomentum(60) | 1 | 5.1e-09 | +3.07% | 3.75% | 3.79% | 1.01 |
-| MeanReversion(20, 1.0, 0.2) | 1 | 2.4e-09 | −5.58% | 9.44% | 9.48% | 1.01 |
-| CrossSectionalMomentum(60, 5) | 4 | 1.1e-08 | +8.14% | 0.99% | 1.06% | 1.07 |
+- `evaluation/walk_forward.py`: fold dates plus an Optuna objective. Each trial runs its folds
+  through `run_backtest`, stores per-fold stats as trial user attributes, and saves its OOS
+  returns to `data/derived/experiments/<study>/<trial>.parquet` (needed for PBO).
+- DSR/PSR/PBO computed from the study: trial count, the trial Sharpe distribution and the OOS
+  returns matrix.
+- Reports: `create_tearsheet_from_stats` on stitched OOS returns.
+- Parallelism: Optuna with one `BacktestEngine` per process (`n_jobs` via processes, or several
+  workers sharing the study storage).
+- Delete `sweep.py`, `results.py`, `database.py`, `tearsheet.py` and `quantstats`. Rewrite
+  `cli/eval.py` around studies.
 
-With zero costs the engines agree to rounding. With costs, Nautilus pays slightly more because
-it also trades to re-size held positions as prices drift; the legacy engine treats a constant
-target as free. That is the more realistic number. The test pins both properties: rtol 1e-7
-with zero costs, and Nautilus drag between 1× and 2× the legacy drag.
-
-Findings:
-
-- **Bar volume is liquidity.** With bar execution, a market order larger than the bar's volume
-  walks the simulated book and fills partly one tick worse. That was the only source of parity
-  error before the test bars were given ample volume. It is realistic for thin bars, but means
-  results depend on position size relative to volume.
-- The Nautilus `Strategy` base is a PyO3 class whose `__new__` takes only `config`, so
-  subclasses with their own constructor arguments must override `__new__`.
-- `returns_series` is mark-to-market daily equity returns (not realised P&L only), so Nautilus
-  Sharpe/Sortino are usable directly.
-
-Deviations from the plan:
-
-- **`backtesting/` is not deleted yet.** `evaluation/` (runner, results, database, tearsheet)
-  and `cli/eval.py` are built on `BacktestRunner`, `BacktestMetrics` and `BacktestStore`.
-  Replacing those *is* phase 3, so deleting `backtesting/` and `raptorbt` moves there. Nothing
-  new imports `backtesting/`; only the parity test uses it, and it goes with it.
-- No `execution/fees.py`: Nautilus 2.0 ships `PerContractFeeModel` and `MakerTakerFeeModel`.
-- No `execution/instruments.py`: instruments come from the catalog (phase 1). The mapping to IB
-  contracts belongs in phase 5.
-- `BacktestEngine` with in-memory bars, not `BacktestNode`/`BacktestDataConfig`: signals need
-  the polars history anyway, and phase 3 needs an engine it can reuse across trials.
-- All instruments in one run must share one venue and currency.
-
-**Exit:** parity recorded. "No imports from `backtesting/` remain" moves to phase 3's exit.
-
-### Phase 3: Walk-forward on Optuna; delete `backtesting/` and the rest of `evaluation/` — **done**
-
-What landed:
-
-- `evaluation/walk_forward.py` (~500 lines with docs):
-  - `make_folds` produces contiguous test windows at the end of the history (old
-    `test_size` semantics, capped to leave `min_train` warm-up bars).
-  - `WalkForward` holds the data, folds and backtest settings.
-  - `run_study` is the Optuna study: grid, random or TPE samplers, and a search space of
-    lists, ranges or fixed values. Each trial runs every fold through `run_backtest` and
-    stores per-fold stats as user attributes. Its stitched OOS returns go to
-    `data/derived/experiments/<study>/trial_<n>.parquet`. Study config (strategy, symbols,
-    folds, costs) is saved as study attributes.
-  - `summarize_study` computes, for the best trial, the stitched OOS Sharpe, return, max
-    drawdown, PSR, **DSR** (N = completed trials, trial std from their stitched Sharpes),
-    MinTRL and **PBO** (CSCV over all trials' aligned OOS returns). It also gives Nautilus
-    return statistics via `PortfolioAnalyzer`.
-  - `write_tearsheet` calls `create_tearsheet_from_stats` with an optional benchmark.
-- Storage (D3): Optuna SQLite at `data/derived/experiments/optuna.db`; several processes can
-  share a study to run in parallel.
-- CLI: `algo eval run | sweep | run-all | list | report | tearsheet` rewritten around
-  studies; `algo backtest run` now works (it was a stub). Multi-asset strategies are
-  supported by `run` and `sweep`, which previously refused them.
-- Deleted: all of `backtesting/` (11 modules), `evaluation/{runner,results,sweep,split,
-  database,tearsheet}.py`, `raptorbt`, `quantstats`, the parity test, and the tests of
-  the deleted code. Strategy integration tests now run through `run_backtest`
-  (`tests/conftest.py`). Net: about 5,150 lines removed and 460 added in the package,
-  before new tests. `optuna` and `nautilus_trader[visualization]` (plotly) are now core
-  dependencies.
-- Real-data smoke run (Alpaca daily, read-only, in-memory storage): a 9-trial × 5-fold
-  TrendFollowing grid on AAPL took 2.0 s (best `fast=10, slow=200`: OOS Sharpe 0.68,
-  DSR 0.94, PBO 0.29). A 4-trial CSMOM grid on 8 equities took 3.4 s (OOS Sharpe 0.12,
-  DSR 0.55, PBO 0.76).
-
-Deviations from the plan:
-
-- **No train-window backtests, and no `window`/`gap` options.** None of the strategies fit
-  anything, so a fold's "training" is only signal warm-up, which `run_backtest` gets from
-  all earlier history. Rolling and expanding windows would give identical results.
-  Parameters are chosen on the OOS folds, as the old runner did; DSR and PBO are the guard.
-  A fitted model will need a per-fold fit step (fit on the train window, then backtest the
-  test window) added to `WalkForward.run_folds`.
-- Each fold starts flat with fresh capital, so the first bar of each test window only
-  opens the position. Stitched OOS returns therefore have one day fewer per fold than
-  test bars.
-- Benchmarks come from a catalog symbol (`--benchmark NQ.c.0`), not a quantstats/Yahoo
-  download.
-- No process-pool parallelism inside `run_study`. Run several `algo eval sweep --study X`
-  processes against the shared storage instead. Daily-bar studies are fast enough that
-  this hasn't been needed.
-- Old experiment databases (`metadata.db`, `analytics.duckdb`) are not migrated. Their
-  raptorbt-era Sharpe values are not comparable (`docs/research/raptorbt_defects.md`).
-
-**Exit:** met. `algo eval run-all` runs on Optuna + Nautilus, DSR/PBO are reported per
-study, and nothing imports `backtesting/` (it no longer exists).
+**Exit:** `algo eval run-all` runs on Optuna + Nautilus, and DSR/PBO are reported per study.
 
 ### Phase 4: Real futures contracts and rolls
 

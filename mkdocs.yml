@@ -31,7 +31,7 @@ nav:
   - Home: index.md
   - Architecture:
       - Overview: architecture/overview.md
-      - Backtesting & Evaluation: architecture/backtest_engine.md
+      - Event-Driven Engine: architecture/backtest_engine.md
       - NautilusTrader Migration: architecture/nautilus_migration.md
   - Guides:
       - Quickstart: guides/quickstart.md
@@ -39,10 +39,6 @@ nav:
       - Data Ingestion: guides/data_ingestion.md
   - Research:
       - SDEs and Neural SDEs: research/sde_market_dynamics.md
-      - raptorbt Defects (historical): research/raptorbt_defects.md
+      - raptorbt Defects: research/raptorbt_defects.md
   - API Reference:
       - Python: api/python/index.md
-      - Data: api/python/data.md
-      - Strategies: api/python/strategies.md
-      - Execution: api/python/execution.md
-      - Evaluation: api/python/evaluation.md

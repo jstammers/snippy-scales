@@ -7,7 +7,7 @@ Tests cover:
 * Direction correctness: large positive z-score → short; negative → long.
 * Parameter validation (ValueError for invalid inputs).
 * Transaction-cost sensitivity: realistic fees should reduce Sharpe vs no-fees.
-* Integration with ``execution.run_backtest`` (Nautilus).
+* Integration with BacktestRunner via raptorbt.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from snippy_scales.execution import Costs
+from snippy_scales.backtesting.runner import BacktestResult, BacktestRunner
 from snippy_scales.strategies.mean_reversion import MeanReversion
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ def test_positions_bounded_by_max_leverage() -> None:
 # ── Transaction-cost sensitivity ──────────────────────────────────────────────
 
 
-def test_higher_fees_reduce_profitability(backtest) -> None:
+def test_higher_fees_reduce_profitability() -> None:
     """Realistic fees should reduce (or equal) performance vs zero fees.
 
     This tests that the backtest correctly models transaction costs — the
@@ -199,38 +199,34 @@ def test_higher_fees_reduce_profitability(backtest) -> None:
     bars = _make_mean_reverting_bars(n=500)
     strategy = MeanReversion(lookback=20, entry_z=1.8, exit_z=0.4)
 
-    result_zero = backtest(strategy, {"MR": bars}, initial_capital=100_000.0)
-    result_real = backtest(
-        strategy,
-        {"MR": bars},
-        initial_capital=100_000.0,
-        costs=Costs(commission_rate=0.002, slippage_prob=1.0),
-    )
+    runner_zerofee = BacktestRunner(initial_capital=100_000.0, fees=0.0, slippage=0.0)
+    runner_realistic = BacktestRunner(initial_capital=100_000.0, fees=0.002, slippage=0.001)
+
+    result_zero = runner_zerofee.run(strategy, bars, symbol="MR_ZEROFEE")
+    result_real = runner_realistic.run(strategy, bars, symbol="MR_REAL")
 
     # Realistic costs should not exceed zero-fee performance.
-    assert result_real.total_return < result_zero.total_return
+    assert result_real.metrics.total_return_pct <= result_zero.metrics.total_return_pct
 
 
-# ── Integration with run_backtest ─────────────────────────────────────────────
+# ── Integration with BacktestRunner ───────────────────────────────────────────
 
 
-def test_run_backtest_returns_result(backtest) -> None:
+def test_run_backtest_returns_result() -> None:
     bars = _make_bars(400, seed=20)
     strategy = MeanReversion(lookback=20, entry_z=2.0, exit_z=0.5)
-    result = backtest(
-        strategy, {"SIM_MR": bars}, initial_capital=100_000.0, costs=Costs(commission_rate=0.001)
-    )
-    assert result.equity.height == 400
-    assert result.rejections == ()
-    assert np.isfinite(result.sharpe)
+    runner = BacktestRunner(initial_capital=100_000.0, fees=0.001, slippage=0.0005)
+    result = runner.run(strategy, bars, symbol="SIM_MR")
+    assert isinstance(result, BacktestResult)
+    assert len(result.equity_curve) > 0
+    assert np.isfinite(result.metrics.sharpe_ratio)
 
 
-def test_mean_reverting_process_with_low_fees(backtest) -> None:
+def test_mean_reverting_process_with_low_fees() -> None:
     """On a genuinely mean-reverting process with low fees, the strategy should
     show at least some trades."""
     bars = _make_mean_reverting_bars(n=500)
     strategy = MeanReversion(lookback=20, entry_z=1.5, exit_z=0.3, max_leverage=2.0)
-    result = backtest(
-        strategy, {"MR_OPT": bars}, initial_capital=100_000.0, costs=Costs(commission_rate=0.0001)
-    )
-    assert result.total_orders > 0
+    runner = BacktestRunner(initial_capital=100_000.0, fees=0.0001, slippage=0.0)
+    result = runner.run(strategy, bars, symbol="MR_OPT")
+    assert result.metrics.total_trades > 0
