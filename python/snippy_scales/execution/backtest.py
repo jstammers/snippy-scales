@@ -191,12 +191,23 @@ class MarketData:
     def symbols(self) -> list[str]:
         return list(self.frames)
 
-    def closes(self) -> pl.Series:
-        """Bar closes shared by every symbol, sorted (``Datetime[ns, UTC]``)."""
+    def closes(self, *, union: bool = False) -> pl.Series:
+        """Bar closes, sorted (``Datetime[ns, UTC]``).
+
+        Args:
+            union: Every close any symbol has, instead of only those shared by
+                all symbols. Use it for a universe whose members list and delist
+                at different times (the shared closes may then be few or none).
+        """
         common: pl.DataFrame | None = None
         for frame in self.frames.values():
             ts = frame.select(pl.col("ts_init").cast(pl.Datetime("ns", "UTC")))
-            common = ts if common is None else common.join(ts, on="ts_init", how="inner")
+            if common is None:
+                common = ts
+            elif union:
+                common = pl.concat([common, ts]).unique()
+            else:
+                common = common.join(ts, on="ts_init", how="inner")
         assert common is not None  # noqa: S101 — frames is never empty
         return common["ts_init"].sort()
 

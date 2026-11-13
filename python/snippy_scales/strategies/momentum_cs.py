@@ -28,6 +28,7 @@ the multi-asset analogue of the single-asset
 
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -42,8 +43,15 @@ class MultiAssetStrategy(ABC):
     returns a per-symbol position Series.  This enables cross-sectional signals
     that depend on the *relative* performance of assets.
 
-    :func:`snippy_scales.execution.run_backtest` aligns the frames on their
-    shared bar closes before calling :meth:`generate_signals`.
+    :func:`snippy_scales.execution.run_backtest` aligns the frames on the
+    **union** of their bar closes before calling :meth:`generate_signals`, so
+    a universe whose members list and delist at different times (e.g. every
+    stock that has been in the S&P 500) keeps all its dates. A symbol's rows
+    before its first bar and after its last are **null** (NaN once converted
+    to numpy); gaps inside its life are forward-filled. Implementations must
+    treat a NaN close as "not in the universe at this date" (as
+    :class:`CrossSectionalMomentum` does by excluding NaN momentum from the
+    ranking). Targets on those rows are ignored.
     """
 
     @abstractmethod
@@ -52,8 +60,9 @@ class MultiAssetStrategy(ABC):
 
         Args:
             multi_bars: Mapping of ``symbol → bar DataFrame``.  Each DataFrame
-                must include at minimum a ``close`` column and must have the
-                same number of rows (i.e. they must be time-aligned).
+                includes at minimum a ``close`` column and all have the same
+                number of rows (time-aligned); ``close`` is null where the
+                symbol is not listed.
 
         Returns:
             Mapping of ``symbol → position Series``.  Each Series must have the
@@ -245,10 +254,13 @@ class CrossSectionalMomentum(MultiAssetStrategy):
         with np.errstate(invalid="ignore", divide="ignore"):
             daily_ret = np.diff(close_matrix, axis=0) / close_matrix[:-1]
 
-        for t in range(self.vol_lookback, n):
-            window = daily_ret[t - self.vol_lookback : t]
-            vol = np.nanstd(window, axis=0) * (252**0.5)
-            vol_matrix[t] = np.maximum(vol, 1e-6)
+        with warnings.catch_warnings():
+            # Symbols not listed over a whole window (null closes) give an all-NaN slice.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for t in range(self.vol_lookback, n):
+                window = daily_ret[t - self.vol_lookback : t]
+                vol = np.nanstd(window, axis=0) * (252**0.5)
+                vol_matrix[t] = np.maximum(vol, 1e-6)
 
         return vol_matrix
 
