@@ -39,6 +39,7 @@ from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 from snippy_scales.data import catalog as cat
 from snippy_scales.evaluation import (
     WalkForward,
+    bar_returns,
     make_folds,
     run_study,
     summarize_study,
@@ -240,21 +241,23 @@ def universe_size(data: MarketData) -> pl.DataFrame:
 
 
 def daily_returns(frame: pl.DataFrame) -> pl.DataFrame:
-    """Close-to-close returns labelled by day (``ts``, ``return``), as the tearsheet expects."""
-    return frame.select(
-        pl.col("ts_init").dt.truncate("1d").alias("ts"),
-        pl.col("close").pct_change().alias("return"),
-    ).drop_nulls()
+    """Close-to-close returns labelled like strategy returns (see :func:`bar_returns`)."""
+    return bar_returns(frame)
+
+
+def benchmark_bars(cfg: ReportConfig, catalog_path: Path | None = None) -> pl.DataFrame | None:
+    """Bars of ``cfg.data.benchmark`` (``None`` if not configured)."""
+    if not cfg.data.benchmark:
+        return None
+    return cat.load_bars(
+        cfg.data.benchmark, cfg.data.schema_, venue=cfg.data.venue, catalog_path=catalog_path
+    )
 
 
 def benchmark_returns(cfg: ReportConfig, catalog_path: Path | None = None) -> pl.DataFrame | None:
     """Buy-and-hold daily returns of ``cfg.data.benchmark`` (``None`` if not configured)."""
-    if not cfg.data.benchmark:
-        return None
-    bars = cat.load_bars(
-        cfg.data.benchmark, cfg.data.schema_, venue=cfg.data.venue, catalog_path=catalog_path
-    )
-    return daily_returns(bars)
+    bars = benchmark_bars(cfg, catalog_path)
+    return None if bars is None else daily_returns(bars)
 
 
 # ── Walk-forward ──────────────────────────────────────────────────────────────
@@ -491,6 +494,203 @@ def full_backtest(cfg: ReportConfig, data: MarketData, params: dict[str, Any]) -
         rebalance_band=e.rebalance_band,
         leverage=e.leverage,
     )
+
+
+# ── Attribution ───────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """Where a strategy's (gross) returns come from, on a positions × returns panel.
+
+    Rebuilt from the same targets the engines trade (``compute_targets``), held
+    between a symbol's bars, weighted ``1/N`` and earning the next bar's return.
+    Costs are excluded, so the total is close to a zero-cost engine run.
+
+    Attributes:
+        components: ``component, ann_return, ann_vol, sharpe``. *total* splits
+            two ways. **long leg + short leg**. **market timing + selection**,
+            where timing is the average position across listed names times
+            the equal-weight universe return, and selection is the rest (picking
+            which names to hold). *beta-hedged* is total minus beta × benchmark.
+        exposure: Mean net and gross exposure (fractions of equity), beta and
+            correlation to the benchmark.
+        signal: Does the target's sign predict the next month? Pooled hit rate
+            against the base rate of up-months, hit rates of longs and shorts,
+            and the mean cross-sectional rank IC with its t-statistic
+            (non-overlapping 21-bar horizons).
+        contributors: Per-symbol total contribution (bp of equity), sorted.
+        series: ``ts`` and the daily component returns, for charts.
+    """
+
+    components: pl.DataFrame
+    exposure: dict[str, float]
+    signal: dict[str, float]
+    contributors: pl.DataFrame
+    series: pl.DataFrame
+
+
+def _sharpe(x: np.ndarray) -> float:
+    if x.size < 2 or x.std(ddof=1) == 0.0:  # noqa: PLR2004
+        return 0.0
+    return float(x.mean() / x.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR))
+
+
+def _ffill(panel: np.ndarray, alive: np.ndarray) -> np.ndarray:
+    out = panel.copy()
+    for i in range(1, out.shape[0]):
+        gap = np.isnan(out[i]) & alive[i]
+        out[i, gap] = out[i - 1, gap]
+    return out
+
+
+def _rate(hits: np.ndarray) -> float:
+    return float(hits.mean()) if hits.size else math.nan
+
+
+def _signal_quality(sign: np.ndarray, nxt: np.ndarray, ic: np.ndarray) -> dict[str, float]:
+    t_stat = math.nan
+    if ic.size > 2 and ic.std() > 0:  # noqa: PLR2004
+        t_stat = float(ic.mean() / ic.std(ddof=1) * math.sqrt(ic.size))
+    return {
+        "hit rate": _rate(np.sign(nxt) == sign),
+        "base rate of up months": _rate(nxt > 0),
+        "hit rate of longs": _rate(nxt[sign > 0] > 0),
+        "hit rate of shorts": _rate(nxt[sign < 0] < 0),
+        "share of positions long": _rate(sign > 0),
+        "rank IC (mean)": float(ic.mean()) if ic.size else math.nan,
+        "rank IC t-stat": t_stat,
+    }
+
+
+def attribution(  # noqa: PLR0915
+    cfg: ReportConfig,
+    data: MarketData,
+    params: dict[str, Any],
+    *,
+    start: dt.datetime | None = None,
+    benchmark: pl.DataFrame | None = None,
+    horizon: int = 21,
+) -> Attribution:
+    """Decompose *params*' gross returns from *start* to the end (see :class:`Attribution`).
+
+    Args:
+        cfg: Report config (strategy).
+        data: Universe.
+        params: Strategy parameters.
+        start: First bar close of the window (default: the first fold's test start).
+        benchmark: Benchmark bars (``ts_init``, ``close``) for beta; ``None`` uses
+            the equal-weight universe.
+        horizon: Bars ahead for the signal hit rate and rank IC.
+    """
+    from snippy_scales.execution import compute_targets
+
+    symbols = list(data.frames)
+    calendar_ = data.closes(union=True)
+    ts = calendar_.dt.epoch("ns").to_numpy()
+    t_n, n = ts.size, len(symbols)
+    close = np.full((t_n, n), np.nan)
+    target = np.full((t_n, n), np.nan)
+    alive = np.zeros((t_n, n), bool)
+    targets = compute_targets(strategy_class(cfg)(**params), data.frames)
+    for j, s in enumerate(symbols):
+        f = data.frames[s]
+        idx = np.searchsorted(ts, f["ts_init"].dt.epoch("ns").to_numpy())
+        close[idx, j] = f["close"].to_numpy()
+        alive[idx[0] : idx[-1] + 1, j] = True
+        keys = np.fromiter(targets[s].keys(), np.int64, len(targets[s]))
+        vals = np.fromiter(targets[s].values(), np.float64, len(targets[s]))
+        target[np.searchsorted(ts, keys), j] = vals
+    close = _ffill(close, alive)
+    target = np.nan_to_num(_ffill(target, alive))
+    ret = np.zeros((t_n, n))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ret[1:] = close[1:] / close[:-1] - 1.0
+    ret[~np.isfinite(ret) | ~alive] = 0.0
+    n_alive = alive.sum(1)
+    ew = np.where(n_alive > 0, ret.sum(1) / np.maximum(n_alive, 1), 0.0)
+    if benchmark is not None:
+        b = np.full(t_n, np.nan)
+        bts = benchmark["ts_init"].dt.epoch("ns").to_numpy()
+        inside = (bts >= ts[0]) & (bts <= ts[-1])
+        b[np.searchsorted(ts, bts[inside])] = benchmark["close"].to_numpy()[inside]
+        b = pl.Series(b).fill_nan(None).forward_fill().to_numpy()
+        bench = np.zeros(t_n)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            bench[1:] = b[1:] / b[:-1] - 1.0
+        bench[~np.isfinite(bench)] = 0.0
+    else:
+        bench = ew
+
+    pos = target[:-1] / n  # set at close t, earns bar t+1
+    r = ret[1:]
+    live = alive[:-1]
+    total = (pos * r).sum(1)
+    long_ = (np.clip(pos, 0.0, None) * r).sum(1)
+    short = (np.clip(pos, None, 0.0) * r).sum(1)
+    mean_pos = (pos * live).sum(1) / np.maximum(live.sum(1), 1)
+    timing = mean_pos * (r * live).sum(1)
+    selection = total - timing
+    first = start if start is not None else folds(cfg, data)[0].test_start
+    lo_ns = cat.to_ns(first)
+    lo = int(np.searchsorted(ts[1:], lo_ns if lo_ns is not None else ts[1]))
+    w = slice(lo, t_n - 1)
+    x = bench[1:][w]
+    y = total[w]
+    beta = float(np.cov(y, x)[0, 1] / x.var(ddof=1)) if x.var() > 0 else 0.0
+    hedged = y - beta * x
+    parts = {
+        "total": y,
+        "long leg": long_[w],
+        "short leg": short[w],
+        "market timing": timing[w],
+        "selection": selection[w],
+        "beta-hedged": hedged,
+    }
+    components = pl.DataFrame(
+        [
+            {
+                "component": k,
+                "ann_return": float(v.mean() * TRADING_DAYS_PER_YEAR),
+                "ann_vol": float(v.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR)),
+                "sharpe": _sharpe(v),
+            }
+            for k, v in parts.items()
+        ]
+    )
+    net, gross = pos.sum(1)[w], np.abs(pos).sum(1)[w]
+    exposure = {
+        "mean net exposure": float(net.mean()),
+        "mean gross exposure": float(gross.mean()),
+        "beta to benchmark": beta,
+        "correlation to benchmark": float(np.corrcoef(y, x)[0, 1]) if y.std() > 0 else 0.0,
+    }
+
+    # Signal quality on non-overlapping horizons.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        logp = np.log(close)
+    fwd = np.full((t_n, n), np.nan)
+    fwd[:-horizon] = logp[horizon:] - logp[:-horizon]
+    rows = np.arange(lo + 1, t_n - horizon, horizon)
+    sign, nxt = np.sign(target[rows]), fwd[rows]
+    ok = (sign != 0) & np.isfinite(nxt) & alive[rows]
+    ics = []
+    for i in rows:
+        m = alive[i] & np.isfinite(fwd[i]) & (target[i] != 0)
+        if m.sum() > 10:  # noqa: PLR2004
+            a = pl.Series(target[i, m]).rank().to_numpy()
+            b_ = pl.Series(fwd[i, m]).rank().to_numpy()
+            if a.std() > 0 and b_.std() > 0:
+                ics.append(float(np.corrcoef(a, b_)[0, 1]))
+    signal = _signal_quality(sign[ok], nxt[ok], np.array(ics))
+    contrib = (pos * r)[w].sum(0) * 1e4
+    contributors = pl.DataFrame({"symbol": symbols, "contribution_bp": contrib}).sort(
+        "contribution_bp"
+    )
+    series = pl.DataFrame(
+        {"ts": calendar_[1:][w], **{k: v for k, v in parts.items()}, "benchmark": x}
+    )
+    return Attribution(components, exposure, signal, contributors, series)
 
 
 # ── Summaries ─────────────────────────────────────────────────────────────────
