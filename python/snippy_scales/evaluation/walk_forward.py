@@ -405,20 +405,40 @@ class StudyReport:
     pbo: float | None
 
 
-def summarize_study(study: optuna.Study, *, pbo_partitions: int = 8) -> StudyReport:
+def _completed(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:
+    return [
+        t for t in study.get_trials(deepcopy=False) if t.state == optuna.trial.TrialState.COMPLETE
+    ]
+
+
+def summarize_study(
+    study: optuna.Study, *, pbo_partitions: int = 8, selection: optuna.Study | None = None
+) -> StudyReport:
     """Compute the out-of-sample report for *study*'s best trial.
 
+    Args:
+        study: The study whose best trial is reported.
+        pbo_partitions: CSCV partitions for the PBO.
+        selection: The study the reported trials were *chosen from*, when that is
+            a different one. Typically *study* re-runs a screening study's top
+            trials on Nautilus: the DSR must then be deflated for every screened
+            trial (``n_trials`` and the spread of their Sharpes), and the PBO
+            computed over them, not over the handful re-run.
+
     Raises:
-        ValueError: If the study has no completed trial.
+        ValueError: If the study (or *selection*) has no completed trial.
     """
-    trials = [t for t in study.get_trials(deepcopy=False) if t.state.is_finished()]
-    trials = [t for t in trials if t.state == optuna.trial.TrialState.COMPLETE]
+    trials = _completed(study)
     if not trials:
         raise ValueError(f"study {study.study_name!r} has no completed trials")
     best = max(trials, key=lambda t: t.value if t.value is not None else -math.inf)
     returns = _trial_returns(best)
     values = returns["return"].to_numpy()
 
+    if selection is not None:
+        trials = _completed(selection)
+        if not trials:
+            raise ValueError(f"study {selection.study_name!r} has no completed trials")
     trial_returns = {t.number: _trial_returns(t) for t in trials}
     trial_sharpes = np.array(
         [_annualised_sharpe(r["return"].to_numpy()) for r in trial_returns.values()]
