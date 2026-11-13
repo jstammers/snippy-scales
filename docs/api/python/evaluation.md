@@ -1,21 +1,13 @@
 # Evaluation
 
-## Database
+## Walk-forward
 
-::: snippy_scales.evaluation.database
+::: snippy_scales.evaluation.walk_forward
 
-## Runner
+## Statistics
 
-::: snippy_scales.evaluation.runner
+::: snippy_scales.evaluation.statistics
 
-## Split
+## Scoring
 
-::: snippy_scales.evaluation.split
-
-## Sweep
-
-::: snippy_scales.evaluation.sweep
-
-## Tearsheet
-
-::: snippy_scales.evaluation.tearsheet
+::: snippy_scales.evaluation.scoring

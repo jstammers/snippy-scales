@@ -1,5 +1,10 @@
 # SDEs and Neural SDEs for Trading: A Feasibility Assessment
 
+> **Historical.** raptorbt, `backtesting/` and `TargetPositionEngine` were removed in
+> NautilusTrader migration phase 3 (2026-11). Backtests now run on Nautilus; see
+> [Backtesting and Evaluation](../architecture/backtest_engine.md). This note is kept as a
+> record of why Sharpe numbers from before the migration are not comparable.
+
 **Question.** Can stochastic differential equations — classical or neural — be turned into
 profitable trading by one person with a computational-physics PhD, ML/MLOps experience, and
 retail access to CME futures?

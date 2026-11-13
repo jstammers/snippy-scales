@@ -8,7 +8,7 @@ Tests cover:
 * Parameter validation (ValueError for out-of-range inputs).
 * Rebalancing frequency: positions freeze correctly between rebal dates.
 * Volatility targeting: position magnitudes reflect vol_target / realized_vol.
-* Integration with BacktestRunner via raptorbt.
+* Integration with ``execution.run_backtest`` (Nautilus).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from snippy_scales.backtesting.runner import BacktestResult, BacktestRunner
+from snippy_scales.execution import Costs
 from snippy_scales.strategies.momentum_ts import TimeSeriesMomentum
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -174,23 +174,25 @@ def test_rebal_freq_positions_change_only_at_rebal_dates() -> None:
             )
 
 
-# ── Integration with BacktestRunner ───────────────────────────────────────────
+# ── Integration with run_backtest ─────────────────────────────────────────────
 
 
-def test_run_backtest_returns_result() -> None:
+def test_run_backtest_returns_result(backtest) -> None:
     bars = _make_bars(500, trend=0.0005, seed=10)
     strategy = TimeSeriesMomentum(lookback=60, vol_target=0.10, max_leverage=2.0)
-    runner = BacktestRunner(initial_capital=100_000.0, fees=0.001)
-    result = runner.run(strategy, bars, symbol="SIM_TS")
-    assert isinstance(result, BacktestResult)
-    assert len(result.equity_curve) > 0
-    assert np.isfinite(result.metrics.sharpe_ratio)
+    result = backtest(
+        strategy, {"SIM_TS": bars}, initial_capital=100_000.0, costs=Costs(commission_rate=0.001)
+    )
+    assert result.equity.height == 500
+    assert result.rejections == ()
+    assert np.isfinite(result.sharpe)
 
 
-def test_trending_asset_gives_positive_return() -> None:
+def test_trending_asset_gives_positive_return(backtest) -> None:
     """On a clean trend with moderate costs, TSMOM should be profitable."""
     bars = _make_trending_bars(600)
     strategy = TimeSeriesMomentum(lookback=60, vol_target=0.15, max_leverage=2.0)
-    runner = BacktestRunner(initial_capital=100_000.0, fees=0.0005)
-    result = runner.run(strategy, bars, symbol="TREND")
-    assert result.metrics.total_return_pct > 0
+    result = backtest(
+        strategy, {"TREND": bars}, initial_capital=100_000.0, costs=Costs(commission_rate=0.0005)
+    )
+    assert result.total_return > 0

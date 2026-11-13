@@ -1,5 +1,10 @@
 # raptorbt 0.8.0 — two metric defects
 
+> **Historical.** raptorbt, `backtesting/` and `TargetPositionEngine` were removed in
+> NautilusTrader migration phase 3 (2026-11). Backtests now run on Nautilus; see
+> [Backtesting and Evaluation](../architecture/backtest_engine.md). This note is kept as a
+> record of why Sharpe numbers from before the migration are not comparable.
+
 Two narrow, reproducible defects found in `raptorbt==0.8.0` (verified 2026-08-15) while building
 a second execution engine and cross-checking it against raptorbt's own output.
 

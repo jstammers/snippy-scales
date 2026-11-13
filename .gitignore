@@ -33,3 +33,6 @@ site/
 data/*.db
 .code-graph/
 notebooks/
+
+# Hypothesis example database
+.hypothesis/

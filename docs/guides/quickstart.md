@@ -72,10 +72,16 @@ just build
 just algo backtest run <strategy> [OPTIONS]
 
 # Example: backtest the trend-following strategy
-just algo backtest run trend_following --symbol ES.c.0 --start 2020-01-01 --end 2024-12-31
+just algo backtest run trend-following --symbol ES.c.0 --start 2020-01-01 --end 2024-12-31
 
-# List available strategies
-just algo backtest strategies
+# Strategy names and options
+just algo backtest run --help
+
+# Walk-forward parameter search, then the deflated report and a tearsheet
+just algo eval sweep trend-following -s ES.c.0 --search grid \
+    --params '{"fast_period": [10, 20, 40], "slow_period": [60, 120]}'
+just algo eval list
+just algo eval tearsheet <study>
 ```
 
 ## Adding a Strategy
@@ -85,9 +91,9 @@ See [Adding a Strategy](adding_strategy.md) for a detailed guide.
 Quick version:
 1. Create `python/snippy_scales/strategies/my_strategy.py`
 2. Implement the `Strategy` interface
-3. Register in `__init__.py`
+3. Register in `__init__.py`, in `cli/_common.py:registry()`, and in `tests/test_strategy_causality.py`
 4. Test with `just test-py`
-5. Backtest with `just algo backtest run my_strategy`
+5. Backtest with `just algo backtest run my-strategy -s ES.c.0`
 
 ## Documentation
 
@@ -129,7 +135,7 @@ pre-release pin is allowed by uv's default resolution; if you have
 ## Next Steps
 
 1. Read [Architecture Overview](../architecture/overview.md) to understand the codebase
-2. Read [Backtesting Engine](../architecture/backtest_engine.md) to learn how to run backtests
+2. Read [Backtesting and Evaluation](../architecture/backtest_engine.md) to learn how backtests and studies work
 3. Read [Adding a Strategy](adding_strategy.md) to implement your first strategy
 4. Read [API Reference](../api/python/index.md) for Python API docs
 

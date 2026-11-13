@@ -7,7 +7,7 @@ Tests cover:
 * Parameter validation (ValueError for invalid inputs).
 * Rebalancing: positions are frozen between rebalancing dates.
 * Quantile coverage: number of long/short assets matches the quantile settings.
-* Integration with BasketRunner via raptorbt.
+* Integration with ``execution.run_backtest`` (Nautilus).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from snippy_scales.backtesting.runner import BacktestResult, BasketRunner
+from snippy_scales.execution import Costs
 from snippy_scales.strategies.momentum_cs import CrossSectionalMomentum, MultiAssetStrategy
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -220,10 +220,10 @@ def test_positions_constant_between_rebal_dates() -> None:
                 assert pos[t] == pos[prev_rebal], f"{sym}: position changed off-rebal at bar {t}"
 
 
-# ── Integration with BasketRunner ─────────────────────────────────────────────
+# ── Integration with run_backtest ───────────────────────────────────────────────
 
 
-def test_basket_runner_integration() -> None:
+def test_run_backtest_integration(backtest) -> None:
     multi_bars = _make_multi_bars(n=500, n_assets=6, seed=99)
     strategy = CrossSectionalMomentum(
         lookback=60,
@@ -232,8 +232,10 @@ def test_basket_runner_integration() -> None:
         bottom_quantile=0.33,
         rebal_freq=10,
     )
-    runner = BasketRunner(initial_capital=500_000.0, fees=0.001)
-    result = runner.run(strategy, multi_bars)
-    assert isinstance(result, BacktestResult)
-    assert len(result.equity_curve) > 0
-    assert np.isfinite(result.metrics.total_return_pct)
+    result = backtest(
+        strategy, multi_bars, initial_capital=500_000.0, costs=Costs(commission_rate=0.001)
+    )
+    assert result.equity.height == 500
+    assert result.rejections == ()
+    assert result.total_orders > 0
+    assert np.isfinite(result.total_return)

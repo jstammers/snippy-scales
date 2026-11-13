@@ -1,37 +1,28 @@
-"""Evaluation framework — walk-forward backtesting with parameter search.
-
-Provides out-of-sample validation, hyperparameter optimisation, a single
-DuckDB persistence layer, and tearsheet generation for all strategies.
+"""Evaluation — walk-forward studies on Optuna and Nautilus, plus statistics
+that correct for selection bias and score probabilistic forecasts.
 
 Typical usage::
 
     from snippy_scales.evaluation import (
-        EvaluationRunner,
-        ParameterGrid,
-        RandomSearch,
-        WalkForwardSplit,
-        AnalyticsStore,
-        TearsheetGenerator,
+        WalkForward, make_folds, run_study, summarize_study, write_tearsheet,
     )
-    from snippy_scales.strategies.trend import TrendFollowing
+    from snippy_scales.execution import Costs, load_market_data
+    from snippy_scales.strategies import TrendFollowing
 
-    runner = EvaluationRunner(
-        n_splits=5,
-        db_path="data/analytics.duckdb",
-        tearsheet_dir="reports/",
+    data = load_market_data("ES.c.0")
+    wf = WalkForward(data, make_folds(data.closes(), n_splits=5), costs=Costs(commission_rate=1e-4))
+    study = run_study(
+        TrendFollowing, wf,
+        space={"fast_period": [10, 20, 40], "slow_period": [60, 120]}, sampler="grid",
     )
-    grid = ParameterGrid({"fast_period": [10, 20, 40], "slow_period": [40, 60, 120]})
-    result = runner.evaluate(TrendFollowing, bars, params=grid, symbol="ES.c.0")
+    report = summarize_study(study)
+    print(report.best_params, report.sharpe, report.dsr, report.pbo)
 
-    print(result.best_params)
-    print(result.summary_df())
+``evaluation/`` never touches orders; it calls ``execution.run_backtest``.
 """
 
 from __future__ import annotations
 
-from snippy_scales.evaluation.database import AnalyticsStore
-from snippy_scales.evaluation.results import EvaluationResult, FoldResult, SweepResult
-from snippy_scales.evaluation.runner import EvaluationRunner
 from snippy_scales.evaluation.scoring import (
     calibration_error,
     coverage,
@@ -39,7 +30,6 @@ from snippy_scales.evaluation.scoring import (
     crps_gaussian,
     pit_values,
 )
-from snippy_scales.evaluation.split import SplitFold, WalkForwardSplit
 from snippy_scales.evaluation.statistics import (
     deflated_sharpe_ratio,
     expected_max_sharpe,
@@ -47,27 +37,35 @@ from snippy_scales.evaluation.statistics import (
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
 )
-from snippy_scales.evaluation.sweep import OptunaSearch, ParameterGrid, RandomSearch
-from snippy_scales.evaluation.tearsheet import TearsheetGenerator
+from snippy_scales.evaluation.walk_forward import (
+    DEFAULT_STORAGE,
+    Fold,
+    StudyReport,
+    WalkForward,
+    load_strategy_class,
+    make_folds,
+    returns_statistics,
+    run_study,
+    stitch_returns,
+    suggest,
+    summarize_study,
+    write_tearsheet,
+)
 
 __all__ = [
-    # split
-    "SplitFold",
-    "WalkForwardSplit",
-    # sweep
-    "ParameterGrid",
-    "RandomSearch",
-    "OptunaSearch",
-    # results
-    "FoldResult",
-    "SweepResult",
-    "EvaluationResult",
-    # database
-    "AnalyticsStore",
-    # tearsheet
-    "TearsheetGenerator",
-    # runner
-    "EvaluationRunner",
+    # walk-forward
+    "DEFAULT_STORAGE",
+    "Fold",
+    "StudyReport",
+    "WalkForward",
+    "load_strategy_class",
+    "make_folds",
+    "returns_statistics",
+    "run_study",
+    "stitch_returns",
+    "suggest",
+    "summarize_study",
+    "write_tearsheet",
     # statistics — selection-bias corrections
     "expected_max_sharpe",
     "probabilistic_sharpe_ratio",

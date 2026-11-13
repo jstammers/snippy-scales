@@ -20,8 +20,9 @@ data/            # Local data (gitignored)
 |---|---|---|
 | Research | `snippy_scales.research` | Feature engineering, ML, prototyping |
 | Strategy Logic | `snippy_scales.strategies` | Signal generation (target positions) |
-| Evaluation | `snippy_scales.evaluation` | Walk-forward, parameter search, overfitting statistics |
-| Data, Backtesting, Execution | NautilusTrader (migration in progress) | Catalog, event-driven engine, live trading |
+| Execution | `snippy_scales.execution` | Adapter from target positions to Nautilus orders; `run_backtest` |
+| Evaluation | `snippy_scales.evaluation` | Walk-forward studies on Optuna, DSR/PSR/PBO, tearsheets |
+| Data, Backtesting, Live | NautilusTrader | Catalog, event-driven engine, live trading (phase 5) |
 | CLI + Orchestration | Python (Typer) | Project control |
 
 ## Quickstart
