@@ -431,6 +431,7 @@ def run_backtest(
     weights: Mapping[str, float] | None = None,
     leverage: float = 10.0,  # noqa: ARG001 — accepted for signature parity; margin not modelled
     targets: Targets | None = None,
+    reports: bool = True,
 ) -> BacktestRun:
     """Backtest *research* on *data* with the vectorised kernel.
 
@@ -499,7 +500,7 @@ def run_backtest(
         equity=pl.DataFrame({"ts": ts, "equity": eq_pre}).with_columns(
             pl.col("ts").cast(pl.Datetime("ns", "UTC"))
         ),
-        fills=_fills(prices, ts, rec, n_orders),
+        fills=_fills(prices, ts, rec, n_orders) if reports else pd.DataFrame(),
         positions=pd.DataFrame(),
         rejections=(),
         total_orders=int(n_orders),

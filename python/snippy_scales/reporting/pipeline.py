@@ -44,7 +44,7 @@ from snippy_scales.evaluation import (
     run_study,
     summarize_study,
 )
-from snippy_scales.execution import Costs, load_market_data, run_backtest
+from snippy_scales.execution import Costs, load_market_data, pool, run_backtest
 from snippy_scales.reporting.config import REPO_ROOT
 
 if TYPE_CHECKING:
@@ -279,7 +279,7 @@ def folds(cfg: ReportConfig, data: MarketData) -> list[Fold]:
     )
 
 
-def walk_forward(cfg: ReportConfig, data: MarketData, engine: str) -> WalkForward:
+def walk_forward(cfg: ReportConfig, data: MarketData, engine: str, workers: int = 1) -> WalkForward:
     e = cfg.evaluation
     return WalkForward(
         data,
@@ -289,7 +289,19 @@ def walk_forward(cfg: ReportConfig, data: MarketData, engine: str) -> WalkForwar
         rebalance_band=e.rebalance_band,
         leverage=e.leverage,
         engine=engine,
+        workers=workers,
     )
+
+
+def validation_workers(cfg: ReportConfig, data: MarketData, trials: int) -> int:
+    """Worker processes for *trials* Nautilus trials: ``cfg.validation.workers`` or a default.
+
+    Data built from frames (no catalog source) runs in-process.
+    """
+    if data.source is None:
+        return 1
+    tasks = trials * cfg.evaluation.n_splits
+    return cfg.validation.workers or pool.default_workers(tasks)
 
 
 def fold_frame(fold_list: list[Fold]) -> pl.DataFrame:
@@ -413,9 +425,11 @@ def run_validation(
     waiting = len(study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.WAITING,)))
     started = dt.datetime.now(dt.UTC)
     if waiting:
+        # Every trial runs at once (threads), queueing its folds on the worker pool.
+        workers = validation_workers(cfg, data, waiting)
         study = run_study(
             strategy_class(cfg),
-            walk_forward(cfg, data, "nautilus"),
+            walk_forward(cfg, data, "nautilus", workers),
             space=cfg.screening.space,
             sampler="tpe",
             n_trials=waiting,
@@ -423,6 +437,7 @@ def run_validation(
             storage=paths.storage,
             returns_dir=paths.trials_dir,
             seed=cfg.screening.seed,
+            n_jobs=waiting if workers > 1 else 1,
         )
     wall = (dt.datetime.now(dt.UTC) - started).total_seconds()
     report = summarize_study(study, selection=screening.study)

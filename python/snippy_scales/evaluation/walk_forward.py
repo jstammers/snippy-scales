@@ -47,7 +47,7 @@ from snippy_scales.evaluation.statistics import (
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
 )
-from snippy_scales.execution import ENGINES, Costs, vector
+from snippy_scales.execution import ENGINES, Costs, pool, vector
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -251,6 +251,12 @@ class WalkForward:
     ``"vector"`` (:mod:`snippy_scales.execution.vector`, a numba kernel that
     reproduces Nautilus's fills, returns and return statistics on bars with
     ample volume, for screening). Validate the trials you keep on Nautilus.
+
+    *workers* > 1 runs Nautilus folds in that many worker processes
+    (:func:`~snippy_scales.execution.pool.shared_pool`, kept for the life of
+    *data*); results are identical to running them here. It needs *data* from
+    :func:`~snippy_scales.execution.load_market_data`. The vector engine always
+    runs in-process.
     """
 
     data: MarketData
@@ -260,34 +266,45 @@ class WalkForward:
     rebalance_band: float = 0.0
     leverage: float = 10.0
     engine: str = "nautilus"
+    workers: int = 1
 
     def __post_init__(self) -> None:
         if self.engine not in ENGINES:
             raise ValueError(f"engine must be one of {sorted(ENGINES)}, got {self.engine!r}")
+        if self.workers < 1:
+            raise ValueError(f"workers must be >= 1, got {self.workers}")
 
-    def run_folds(self, research: Strategy | MultiAssetStrategy) -> list[BacktestRun]:
+    def run_folds(
+        self, research: Strategy | MultiAssetStrategy, *, reports: bool = True
+    ) -> list[BacktestRun]:
         """Backtest *research* on every fold's test window.
+
+        *reports* ``False`` skips the fills and positions reports (see
+        :func:`~snippy_scales.execution.run_backtest`), which studies don't use.
 
         On the vector engine a single-asset strategy's targets are computed once
         for all folds (:func:`~snippy_scales.execution.vector.precompute_targets`).
         """
-        run_backtest = ENGINES[self.engine]
-        extra: dict[str, Any] = {}
+        settings: dict[str, Any] = {
+            "initial_capital": self.initial_capital,
+            "costs": self.costs,
+            "rebalance_band": self.rebalance_band,
+            "leverage": self.leverage,
+            "reports": reports,
+        }
         if self.engine == "vector":
-            extra["targets"] = vector.precompute_targets(research, self.data)
+            settings["targets"] = vector.precompute_targets(research, self.data)
+        elif self.workers > 1 and len(self.folds) > 1:
+            workers = pool.shared_pool(self.data, self.workers)
+            futures = [
+                workers.submit(research, start=f.test_start, end=f.test_end, **settings)
+                for f in self.folds
+            ]
+            return [f.result() for f in futures]
+        run_backtest = ENGINES[self.engine]
         return [
-            run_backtest(
-                research,
-                self.data,
-                start=fold.test_start,
-                end=fold.test_end,
-                initial_capital=self.initial_capital,
-                costs=self.costs,
-                rebalance_band=self.rebalance_band,
-                leverage=self.leverage,
-                **extra,
-            )
-            for fold in self.folds
+            run_backtest(research, self.data, start=f.test_start, end=f.test_end, **settings)
+            for f in self.folds
         ]
 
 
@@ -312,6 +329,7 @@ def run_study(
     storage: str | None = DEFAULT_STORAGE,
     returns_dir: Path = EXPERIMENTS_DIR,
     seed: int = 42,
+    n_jobs: int = 1,
 ) -> optuna.Study:
     """Search *strategy_cls* parameters by walk-forward Sharpe.
 
@@ -327,6 +345,9 @@ def run_study(
             processes can share one storage (and study name) to run in parallel.
         returns_dir: Where per-trial OOS returns are written.
         seed: Sampler seed.
+        n_jobs: Trials run at once, in threads. Useful with ``wf.workers`` > 1
+            on Nautilus, so the folds of several trials share the worker
+            processes; the vector engine is fastest with 1.
 
     Returns:
         The Optuna study.
@@ -362,7 +383,7 @@ def run_study(
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest(trial, space)
-        runs = wf.run_folds(strategy_cls(**params))
+        runs = wf.run_folds(strategy_cls(**params), reports=False)
         folds = [_fold_summary(r) for r in runs]
         path = trial_dir / f"trial_{trial.number}.parquet"
         stitch_returns(runs).write_parquet(path)
@@ -371,7 +392,7 @@ def run_study(
         trial.set_user_attr("returns_path", str(path))
         return float(np.mean([f["sharpe"] for f in folds]))
 
-    study.optimize(objective, n_trials=n_trials)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     return study
 
 

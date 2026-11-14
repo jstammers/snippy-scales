@@ -8,9 +8,10 @@ for trading (``data/`` uses it for storage).
 * :func:`run_backtest` backtests a research strategy on them over a time window.
 * :func:`vector.run_backtest` is the same call on a numba kernel, for screening
   (:data:`ENGINES` maps ``"nautilus"`` / ``"vector"`` to the two).
+* :class:`pool.BacktestPool` runs Nautilus backtests in worker processes.
 """
 
-from snippy_scales.execution import vector  # noqa: E402, I001 — needs backtest/strategy first
+from snippy_scales.execution import pool, vector  # noqa: E402, I001 — needs backtest/strategy first
 from snippy_scales.execution.backtest import (
     SHARPE,
     BacktestRun,
@@ -44,6 +45,7 @@ __all__ = [
     "compute_targets",
     "load_market_data",
     "panel_targets",
+    "pool",
     "run_backtest",
     "stack_frames",
     "target_frame",

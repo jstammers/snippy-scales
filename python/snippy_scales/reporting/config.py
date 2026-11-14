@@ -111,9 +111,16 @@ class ScreeningConfig(_Model):
 
 
 class ValidationConfig(_Model):
-    """How many of the best screened parameter sets to re-run on Nautilus."""
+    """How many of the best screened parameter sets to re-run on Nautilus.
+
+    ``workers`` is the number of processes the Nautilus folds run in (each
+    holds a copy of the data); ``None`` picks half the CPUs, capped at the
+    number of fold runs. It does not change results, so it is not part of the
+    fingerprint.
+    """
 
     top_k: int = Field(default=5, ge=1)
+    workers: int | None = Field(default=None, ge=1)
 
 
 class ReportConfig(_Model):

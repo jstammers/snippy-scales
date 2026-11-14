@@ -62,6 +62,10 @@ template.
    and the dispersion of their Sharpes), and the **PBO** is computed over them.
    The best of five re-runs was selected from the full search, so the full search
    is what the deflation must account for.
+   The `top_k × n_splits` Nautilus fold runs are spread over worker processes
+   (`validation.workers`, default half the CPUs). Each worker reloads the
+   universe from the catalog (~3 GB for the S&P 500 daily set), so lower it on a
+   machine short of memory. It does not change results or the fingerprint.
 3. **Full backtest.** The validated parameters on Nautilus over the whole period
    after warm-up, for Nautilus's own statistics, order counts, rejections and
    turnover. This is in-sample for the parameters and labelled as such.

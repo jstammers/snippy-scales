@@ -17,12 +17,14 @@ slippage on bar data, applied with that probability).
 from __future__ import annotations
 
 import bisect
+import functools
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 import polars as pl
 from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.common import LoggerConfig, LogLevel
@@ -42,10 +44,9 @@ from snippy_scales.execution.strategy import SignalStrategy
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
-    import pandas as pd
     from nautilus_trader.model import Bar, Currency, FuturesContract
 
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
@@ -127,6 +128,12 @@ class MarketData:
         instruments: ``instrument_id -> Nautilus instrument``, all at one venue.
         bar_types: ``instrument_id -> BarType`` string.
         schedules: ``symbol -> RollSchedule``.
+        source: Rebuilds this data from the catalog (set by
+            :func:`load_market_data`, kept by :meth:`select`, :meth:`window`
+            and :meth:`merge`). Nautilus instruments cannot be pickled, so this
+            recipe is what pickling sends — a worker process reloads the data
+            (:mod:`snippy_scales.execution.pool`). ``None`` for data built from
+            frames, which then cannot be sent to another process.
     """
 
     frames: dict[str, pl.DataFrame]
@@ -134,6 +141,23 @@ class MarketData:
     instruments: dict[str, Any] = field(repr=False)
     bar_types: dict[str, str] = field(repr=False)
     schedules: dict[str, RollSchedule]
+    source: Callable[[], MarketData] | None = field(default=None, repr=False, compare=False)
+
+    def __reduce__(self) -> tuple[Callable[..., MarketData], tuple[Any, ...]]:
+        if self.source is None:
+            raise TypeError(
+                "MarketData built from frames cannot be pickled (Nautilus instruments "
+                "are not picklable); load it with load_market_data to send it to "
+                "another process"
+            )
+        return _rebuild, (self.source, self.signature())
+
+    def signature(self) -> tuple[tuple[str, int, int], ...]:
+        """``(instrument, bar count, last bar close)`` per instrument: a cheap identity check."""
+        return tuple(
+            (iid, len(bars), bars[-1].ts_init if bars else -1)
+            for iid, bars in sorted(self.bars.items())
+        )
 
     @classmethod
     def from_frames(
@@ -224,12 +248,18 @@ class MarketData:
         """Both datasets together (symbols must not overlap)."""
         if set(self.frames) & set(other.frames):
             raise ValueError("symbols overlap")
+        source = (
+            functools.partial(_merged, self.source, other.source)
+            if self.source is not None and other.source is not None
+            else None
+        )
         return MarketData(
             {**self.frames, **other.frames},
             {**self.bars, **other.bars},
             {**self.instruments, **other.instruments},
             {**self.bar_types, **other.bar_types},
             {**self.schedules, **other.schedules},
+            source,
         )
 
     def select(self, symbols: Sequence[str]) -> MarketData:
@@ -241,6 +271,7 @@ class MarketData:
             {i: self.instruments[i] for i in ids},
             {i: self.bar_types[i] for i in ids},
             {s: self.schedules[s] for s in symbols},
+            None if self.source is None else functools.partial(_selected, self.source, symbols),
         )
 
     def window(self, start: TimeBound, end: TimeBound) -> MarketData:
@@ -268,7 +299,34 @@ class MarketData:
                 bars[iid] = series[
                     bisect.bisect_left(keys, first) : bisect.bisect_right(keys, last)
                 ]
-        return MarketData(frames, bars, self.instruments, self.bar_types, self.schedules)
+        source = (
+            None if self.source is None else functools.partial(_windowed, self.source, start, end)
+        )
+        return MarketData(frames, bars, self.instruments, self.bar_types, self.schedules, source)
+
+
+def _rebuild(
+    source: Callable[[], MarketData], signature: tuple[tuple[str, int, int], ...]
+) -> MarketData:
+    data = source()
+    if data.signature() != signature:
+        raise RuntimeError(
+            "market data reloaded from the catalog differs from the original "
+            "(the catalog changed since it was loaded)"
+        )
+    return data
+
+
+def _merged(a: Callable[[], MarketData], b: Callable[[], MarketData]) -> MarketData:
+    return a().merge(b())
+
+
+def _selected(source: Callable[[], MarketData], symbols: Sequence[str]) -> MarketData:
+    return source().select(symbols)
+
+
+def _windowed(source: Callable[[], MarketData], start: TimeBound, end: TimeBound) -> MarketData:
+    return source().window(start, end)
 
 
 def _frame_bars(
@@ -350,6 +408,20 @@ def load_market_data(
     names = [symbols] if isinstance(symbols, str) else list(symbols)
     if not names:
         raise ValueError("no symbols given")
+    data = _load(names, schema, venue, roll, catalog_path)
+    source = functools.partial(
+        load_market_data, names, schema, venue=venue, roll=roll, catalog_path=catalog_path
+    )
+    return replace(data, source=source)
+
+
+def _load(
+    names: Sequence[str],
+    schema: str,
+    venue: str | None,
+    roll: RollRule | None,
+    catalog_path: Path | None,
+) -> MarketData:
     catalog = cat.open_catalog(catalog_path)
     singles = [s for s in names if not futures.is_parent(s)]
     loaded = _load_singles(catalog, singles, schema, venue, catalog_path) if singles else None
@@ -493,6 +565,7 @@ def run_backtest(
     rebalance_band: float = 0.0,
     weights: Mapping[str, float] | None = None,
     leverage: float = 10.0,
+    reports: bool = True,
 ) -> BacktestRun:
     """Backtest *research* on *data* between *start* and *end*.
 
@@ -506,6 +579,9 @@ def run_backtest(
         rebalance_band: Skip trades below this fraction of equity.
         weights: ``symbol -> capital weight``. Defaults to equal weights.
         leverage: Venue default leverage for margin checks.
+        reports: Build the fills and positions reports. ``False`` leaves them
+            empty: on a large universe they take seconds and hundreds of MB,
+            and walk-forward statistics don't need them.
 
     Returns:
         The :class:`BacktestRun`.
@@ -556,8 +632,8 @@ def run_backtest(
             stats_general=dict(result.stats_general),
             returns=_series_frame(result.returns_series, "return"),
             equity=_series_frame(dict(sorted(strategy.equity.items())), "equity"),
-            fills=engine.generate_fills_report(),
-            positions=engine.generate_positions_report(),
+            fills=engine.generate_fills_report() if reports else pd.DataFrame(),
+            positions=engine.generate_positions_report() if reports else pd.DataFrame(),
             rejections=tuple(strategy.rejections),
             total_orders=result.total_orders,
             rolls=tuple(strategy.rolls),

@@ -250,6 +250,9 @@ report.best_params, report.sharpe, report.dsr, report.pbo
 
 Each trial's value is its mean fold Sharpe; the report is computed on the best trial's
 stitched out-of-sample returns and deflated for the number of trials.
+`WalkForward(..., workers=n)` runs Nautilus folds in `n` processes (`execution/pool.py`;
+workers reload `MarketData` from the catalog via `MarketData.source`, so scripts that use it
+need an `if __name__ == "__main__":` guard); `run_study(..., n_jobs=k)` runs trials at once.
 `WalkForward(..., engine="vector")` (CLI `--engine vector`) screens on the numba kernel in
 `execution/vector.py` (~50× faster end to end); validate kept trials on Nautilus.
 CLI: `algo eval run | sweep | run-all | list | report | tearsheet`, `algo backtest run`.
