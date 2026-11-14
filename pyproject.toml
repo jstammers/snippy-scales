@@ -84,6 +84,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
 # CLI modules must import Path unconditionally so typer can resolve annotations
 # at runtime — moving it to TYPE_CHECKING (TC003) would break typer.
 "python/snippy_scales/cli/**" = ["TC003", "ANN401"]
+# marimo notebooks: cells are functions of their (untyped) dependencies, and
+# markdown cells hold tables wider than the code limit.
+"reports/templates/**" = ["ANN", "E501"]
 
 [tool.ruff.format]
 quote-style = "double"

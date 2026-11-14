@@ -62,6 +62,19 @@ def _futures(multipliers: dict[str, int], n: int = 700, weekdays: bool = False) 
     return MarketData.from_frames(frames, instruments)
 
 
+def _ragged(n: int = 600) -> MarketData:
+    """Six symbols; B lists 150 bars late and C delists 200 bars early (an index universe)."""
+    frames = {}
+    for i, symbol in enumerate("ABCDEF"):
+        frame = daily_bars(_closes(n, seed=30 + i))
+        if symbol == "B":
+            frame = frame.slice(150)
+        elif symbol == "C":
+            frame = frame.slice(0, n - 200)
+        frames[symbol] = frame
+    return MarketData.from_frames(frames, {s: synthetic_future(s) for s in frames})
+
+
 def _rolled_es() -> MarketData:
     contracts, frames = _market(carry=0.001)
     return MarketData.from_outrights("ES.FUT", frames, contracts)
@@ -90,6 +103,13 @@ _FEE = Costs(commission_rate=5e-4)
 
 CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
     "constant long": (_Fixed(1.0), synthetic_data({"X": _closes(400, 1)}), {}),
+    # Millions of contracts held unchanged: Nautilus's net position carries float
+    # noise (1e-9), which must not turn into a zero-quantity order.
+    "constant long, huge unchanged position": (
+        _Fixed(1.0),
+        synthetic_data({"X": _closes(300, 50)}),
+        {"initial_capital": 1e10},
+    ),
     "trend, rate fee": (TrendFollowing(), synthetic_data({"X": _closes(800, 2)}), {"costs": _FEE}),
     "trend, band, window": (
         TrendFollowing(fast_period=10, slow_period=40),
@@ -122,6 +142,16 @@ CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
         synthetic_data({s: _closes(600, 20 + i) for i, s in enumerate("ABCDEF")}),
         {"costs": _FEE, "start": "2020-05-01"},
     ),
+    "ragged universe, cross-sectional": (
+        CrossSectionalMomentum(lookback=60, skip_recent=5, rebal_freq=5),
+        _ragged(),
+        {"costs": _FEE, "start": "2020-04-01", "initial_capital": 1e8},
+    ),
+    "ragged universe, delisting exit": (
+        TimeSeriesMomentum(lookback=60, vol_lookback=20, vol_target=0.4),
+        _ragged(),
+        {"costs": _FEE, "initial_capital": 1e8},
+    ),
     "rolled ES, per-contract fee": (
         TrendFollowing(fast_period=10, slow_period=40),
         _rolled_es(),
@@ -139,6 +169,20 @@ CASES: dict[str, tuple[Any, MarketData, dict[str, Any]]] = {
         {"costs": Costs(slippage_prob=1.0), "initial_capital": 1e8},
     ),
 }  # fmt: skip
+
+
+def test_large_universe_is_not_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """More symbols than Nautilus's default 100 orders/second all trade on one close."""
+    data = synthetic_data({f"S{i:03d}": _closes(40, 100 + i) for i in range(150)})
+    run = run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE)
+    assert run.rejections == ()
+    assert_parity(run, vector.run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE))
+
+    from snippy_scales.execution import backtest as backtest_module
+
+    monkeypatch.setattr(backtest_module, "_MAX_ORDER_SUBMIT_RATE", "100/00:00:01")
+    throttled = run_backtest(_Fixed(1.0), data, initial_capital=1e8, costs=_FEE)
+    assert any("RATE_LIMIT_EXCEEDED" in r for r in throttled.rejections)
 
 
 @pytest.mark.parametrize("case", list(CASES))
@@ -221,3 +265,22 @@ def test_walk_forward_rejects_unknown_engine() -> None:
     data = synthetic_data({"X": _closes(300, 9)})
     with pytest.raises(ValueError, match="engine"):
         WalkForward(data, make_folds(data.closes(), n_splits=2, min_train=100), engine="gpu")
+
+
+def test_net_position_float_noise_is_rounded_away() -> None:
+    """Nautilus reported Decimal('3928347.000000001') for 3,928,347 SPY shares; unrounded, an
+    unchanged target became a zero-quantity order that raised inside on_bar."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from snippy_scales.execution.strategy import SignalStrategy
+
+    noisy = Decimal("3928347.000000001")
+    stub = SimpleNamespace(portfolio=SimpleNamespace(net_position=lambda _iid: noisy))
+    instrument = SimpleNamespace(id="SPY.ALPACA", size_precision=0)
+    assert SignalStrategy._net_position(stub, instrument) == Decimal(3928347)  # type: ignore[arg-type]
+    instrument = SimpleNamespace(id="X.SIM", size_precision=2)
+    stub = SimpleNamespace(
+        portfolio=SimpleNamespace(net_position=lambda _iid: Decimal("-1.2300004"))
+    )
+    assert SignalStrategy._net_position(stub, instrument) == Decimal("-1.23")  # type: ignore[arg-type]

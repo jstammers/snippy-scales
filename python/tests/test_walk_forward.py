@@ -23,6 +23,7 @@ from snippy_scales.evaluation import (
     summarize_study,
     write_tearsheet,
 )
+from snippy_scales.evaluation.walk_forward import periods_per_year
 from snippy_scales.execution import Costs
 from snippy_scales.strategies import CrossSectionalMomentum, TrendFollowing
 from tests.conftest import synthetic_data
@@ -135,7 +136,27 @@ def test_report_deflates_for_the_search(wf: WalkForward, tmp_path: Path) -> None
     # Stitched OOS covers the four test windows: one daily return per bar after
     # each fold's first (on which the position is only opened).
     assert report.returns.height == sum((f.test_end - f.test_start).days for f in wf.folds)
-    assert report.stats_returns["Sharpe Ratio (252 days)"] == pytest.approx(report.sharpe)
+    # Nautilus annualises calendar-day returns by √252; the report by the observed
+    # frequency (~365 a year here), so the two differ by exactly that factor.
+    periods = periods_per_year(report.returns)
+    assert 350 < periods < 366
+    assert report.sharpe == pytest.approx(
+        report.stats_returns["Sharpe Ratio (252 days)"] * (periods / 252) ** 0.5
+    )
+
+
+def test_periods_per_year_counts_calendar_day_series() -> None:
+    days = pl.datetime_range(
+        dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        dt.datetime(2021, 12, 31, tzinfo=dt.UTC),
+        "1d",
+        eager=True,
+    )
+    cal = pl.DataFrame({"ts": days, "return": np.zeros(days.len())})
+    assert periods_per_year(cal) == pytest.approx(365.25, rel=2e-3)
+    weekdays = cal.filter(pl.col("ts").dt.weekday() <= 5)
+    assert periods_per_year(weekdays) == pytest.approx(261, rel=5e-3)
+    assert periods_per_year(cal.head(1)) == 252.0
 
 
 def test_default_params_single_trial(wf: WalkForward, tmp_path: Path) -> None:

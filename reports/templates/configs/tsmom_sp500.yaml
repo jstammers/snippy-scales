@@ -1,0 +1,39 @@
+# Time-series momentum, one position per stock, across every stock that has
+# been an S&P 500 member since 2016 (Alpaca daily bars, split+dividend adjusted).
+#   algo report new tsmom-sp500 --from reports/templates/configs/tsmom_sp500.yaml
+#   algo report build tsmom-sp500
+name: tsmom-sp500
+title: Time-series momentum on S&P 500 constituents
+strategy: momentum-ts
+question: >-
+  Does time-series momentum (long a stock after a positive trailing return, short
+  after a negative one, volatility-targeted and equally weighted) earn a positive
+  risk-adjusted return after costs across every stock that has been in the
+  S&P 500 since 2016, once the parameter search is accounted for?
+data:
+  universe: sp500_ever_members   # data/universe/sp500_ever_members.txt
+  venue: ALPACA
+  schema: ohlcv-1d
+  benchmark: SPY
+  example_symbol: AAPL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 × 15% of ~2,690 closes ≈ 1.6 years per fold
+  min_train: 252
+  # Large capital so whole-share rounding is negligible with ~800 names × 1/N weight.
+  initial_capital: 100000000
+  commission_rate: 0.0005        # 5 bp of notional per fill
+  slippage_prob: 0.0
+  rebalance_band: 0.0            # per-name weights are ~0.1% of equity; any band skips trades
+screening:
+  engine: vector
+  sampler: tpe
+  n_trials: 60
+  seed: 42
+  space:
+    lookback: {low: 21, high: 252}
+    skip_recent: [0, 21]
+    vol_lookback: [21, 63, 126]
+    rebal_freq: [1, 5, 21]
+validation:
+  top_k: 5

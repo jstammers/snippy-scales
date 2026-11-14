@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.common import LoggerConfig, LogLevel
+from nautilus_trader.config import RiskEngineConfig
 from nautilus_trader.execution import (
     DefaultFillModel,
     FixedFeeModel,
@@ -99,6 +100,14 @@ class Costs:
 def _ts_column(frame: pl.DataFrame, column: str = "ts_init") -> pl.Series:
     ts = frame[column]
     return ts if ts.dtype == pl.Int64 else ts.dt.cast_time_unit("ns").dt.epoch("ns")
+
+
+#: Nautilus's risk engine denies orders beyond 100 submissions per second of
+#: *simulated* time by default. Every symbol rebalances on the same bar close, so
+#: a universe of more than 100 symbols would have most of its orders denied
+#: (``RATE_LIMIT_EXCEEDED``). The limit models a live-venue throttle, which a bar
+#: backtest has no use for; margin and notional checks stay on.
+_MAX_ORDER_SUBMIT_RATE = "100000000/00:00:01"
 
 
 @dataclass(frozen=True)
@@ -191,12 +200,23 @@ class MarketData:
     def symbols(self) -> list[str]:
         return list(self.frames)
 
-    def closes(self) -> pl.Series:
-        """Bar closes shared by every symbol, sorted (``Datetime[ns, UTC]``)."""
+    def closes(self, *, union: bool = False) -> pl.Series:
+        """Bar closes, sorted (``Datetime[ns, UTC]``).
+
+        Args:
+            union: Every close any symbol has, instead of only those shared by
+                all symbols. Use it for a universe whose members list and delist
+                at different times (the shared closes may then be few or none).
+        """
         common: pl.DataFrame | None = None
         for frame in self.frames.values():
             ts = frame.select(pl.col("ts_init").cast(pl.Datetime("ns", "UTC")))
-            common = ts if common is None else common.join(ts, on="ts_init", how="inner")
+            if common is None:
+                common = ts
+            elif union:
+                common = pl.concat([common, ts]).unique()
+            else:
+                common = common.join(ts, on="ts_init", how="inner")
         assert common is not None  # noqa: S101 — frames is never empty
         return common["ts_init"].sort()
 
@@ -458,7 +478,12 @@ def run_backtest(
     )
     first = next(iter(data.instruments.values()))
     currency = first.quote_currency
-    engine = BacktestEngine(BacktestEngineConfig(logging=LoggerConfig(stdout_level=LogLevel.ERROR)))
+    engine = BacktestEngine(
+        BacktestEngineConfig(
+            logging=LoggerConfig(stdout_level=LogLevel.ERROR),
+            risk_engine=RiskEngineConfig(max_order_submit_rate=_MAX_ORDER_SUBMIT_RATE),
+        )
+    )
     try:
         engine.add_venue(
             Venue(str(first.id.venue)),

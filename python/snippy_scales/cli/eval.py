@@ -473,10 +473,8 @@ def _write_tearsheet(
     schema: str,
     catalog_path: Path | None,
 ) -> None:
-    import polars as pl
-
     from snippy_scales.data.catalog import load_bars
-    from snippy_scales.evaluation import write_tearsheet
+    from snippy_scales.evaluation import bar_returns, write_tearsheet
 
     bench = None
     if benchmark:
@@ -485,10 +483,7 @@ def _write_tearsheet(
         except (FileNotFoundError, ValueError) as exc:
             console.print(f"[red]Benchmark: {exc}[/]")
             raise typer.Exit(1) from exc
-        bench = bars.select(
-            pl.col("ts_init").dt.truncate("1d").alias("ts"),
-            pl.col("close").pct_change().alias("return"),
-        ).drop_nulls()
+        bench = bar_returns(bars)
     write_tearsheet(report, output, benchmark=bench, benchmark_name=benchmark or "Benchmark")
     console.print(f"[green]Tearsheet:[/] {output}")
 
