@@ -348,32 +348,79 @@ def load_market_data(
         FileNotFoundError: If a series or instrument is missing from the catalog.
     """
     names = [symbols] if isinstance(symbols, str) else list(symbols)
+    if not names:
+        raise ValueError("no symbols given")
     catalog = cat.open_catalog(catalog_path)
+    singles = [s for s in names if not futures.is_parent(s)]
+    loaded = _load_singles(catalog, singles, schema, venue, catalog_path) if singles else None
+    if loaded is not None and len(singles) == len(names):
+        return loaded
     data: MarketData | None = None
     for symbol in names:
         if futures.is_parent(symbol):
             part = _load_parent(catalog, symbol, schema, venue, catalog_path, roll)
         else:
-            bt = cat.resolve_bar_type(symbol, schema, venue=venue, catalog_path=catalog_path)
-            iid = str(BarType.from_str(bt).instrument_id)
-            found = catalog.instruments(instrument_ids=[iid])
-            if not found:
-                raise FileNotFoundError(
-                    f"No instrument definition for {iid} in the catalog. "
-                    "Run `algo data sync <config> --instruments-only` first."
-                )
-            frame = cat.load_bars(symbol, schema, venue=venue, catalog_path=catalog_path)
-            part = MarketData(
-                frames={symbol: frame},
-                bars={iid: _query_bars(catalog, bt)},
-                instruments={iid: found[-1]},
-                bar_types={iid: bt},
-                schedules={symbol: RollSchedule.single(symbol, iid)},
-            )
+            assert loaded is not None  # noqa: S101 — singles holds every non-parent symbol
+            part = loaded.select([symbol])
         data = part if data is None else data.merge(part)
-    if data is None:
-        raise ValueError("no symbols given")
+    assert data is not None  # noqa: S101 — names is not empty
     return data
+
+
+def _load_singles(
+    catalog: Any,  # noqa: ANN401
+    symbols: Sequence[str],
+    schema: str,
+    venue: str | None,
+    catalog_path: Path | None,
+) -> MarketData:
+    """Load single-instrument symbols with one query each for instruments, frames and bars.
+
+    Each catalog query has a fixed cost (~40 ms) that barely grows with the number
+    of series it reads, so an 800-symbol universe queried symbol by symbol spends
+    over a minute on overhead alone.
+    """
+    if venue is not None:
+        bts = {s: cat.bar_type(s, venue, schema) for s in symbols}
+    else:
+        venues: dict[str, list[str]] = {}
+        for s, v in cat.list_bar_series(schema, catalog_path):
+            venues.setdefault(s, []).append(v)
+        bts = {}
+        for s in symbols:
+            found = venues.get(s, [])
+            if len(found) != 1:  # resolve_bar_type raises the right error
+                cat.resolve_bar_type(s, schema, catalog_path=catalog_path)
+            bts[s] = cat.bar_type(s, found[0], schema)
+    iids = {s: str(BarType.from_str(bt).instrument_id) for s, bt in bts.items()}
+    by_id = {str(i.id): i for i in catalog.instruments(instrument_ids=list(iids.values()))}
+    missing = [i for i in iids.values() if i not in by_id]
+    if missing:
+        raise FileNotFoundError(
+            f"No instrument definition for {', '.join(missing)} in the catalog. "
+            "Run `algo data sync <config> --instruments-only` first."
+        )
+    frames = cat.load_bars_many(bts, catalog_path=catalog_path)
+    bars = _query_bars_many(catalog, list(bts.values()))
+    return MarketData(
+        frames=frames,
+        bars={iids[s]: bars.get(bt, []) for s, bt in bts.items()},
+        instruments={iids[s]: by_id[iids[s]] for s in symbols},
+        bar_types={iids[s]: bt for s, bt in bts.items()},
+        schedules={s: RollSchedule.single(s, iids[s]) for s in symbols},
+    )
+
+
+def _query_bars_many(catalog: Any, bar_types: Sequence[str]) -> dict[str, list[Bar]]:  # noqa: ANN401
+    """``bar type -> bars sorted by ts_init`` from one catalog query."""
+    grouped: dict[Any, list[Bar]] = {}
+    for bar in catalog.query(NautilusDataType.Bar, list(dict.fromkeys(bar_types))):
+        bt = bar.bar_type
+        series = grouped.get(bt)
+        if series is None:
+            grouped[bt] = series = []
+        series.append(bar)
+    return {str(bt): sorted(s, key=lambda b: b.ts_init) for bt, s in grouped.items()}
 
 
 @dataclass(frozen=True)

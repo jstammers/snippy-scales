@@ -220,6 +220,11 @@ Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.
 Every strategy must pass `tests/test_strategy_causality.py` (add new ones to its lists)
 and be registered in `cli/_common.py:registry()` to be usable from the CLI.
+Targets for a whole universe come from `execution.panel_targets` (array `Targets`, no
+per-symbol dicts). For large universes, override `generate_signals_panel` with
+`.over("symbol")` window expressions and add the strategy to
+`tests/test_strategy_panel.py`. Load universes with one `load_market_data([...])` call:
+it reads every symbol in one catalog query.
 Synthetic data for tests: `tests/conftest.py` (`synthetic_data`, the `backtest` fixture).
 
 ### Metrics

@@ -35,6 +35,7 @@ trades smaller than that fraction of equity.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -42,8 +43,10 @@ import numpy as np
 import polars as pl
 from nautilus_trader.model import BarType, OrderSide, Quantity, Venue
 from nautilus_trader.trading import Strategy as NautilusStrategy
+from numba import njit
 
 from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
+from snippy_scales.strategies.trend import SYMBOL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -65,10 +68,173 @@ def _ts_ns(frame: pl.DataFrame) -> np.ndarray:
     return ts.to_numpy().astype(np.int64)
 
 
-def _align(
-    frames: Mapping[str, pl.DataFrame],
-) -> tuple[dict[str, pl.DataFrame], dict[str, np.ndarray]]:
-    """Align every frame on the **union** of bar closes, sorted by ``ts_init``.
+#: Schema of :meth:`Targets.frame`.
+TARGET_SCHEMA = {SYMBOL: pl.Utf8, "ts_init": pl.Int64, "target": pl.Float64}
+
+
+@njit(cache=True)
+def block_searchsorted(ref: np.ndarray, keys: np.ndarray, starts: np.ndarray) -> np.ndarray:
+    """``np.searchsorted(ref, keys)`` for *keys* sorted within each block of *starts*.
+
+    One merge pass per block: over 10x faster than a binary search per key on a
+    universe-sized panel.
+    """
+    out = np.empty(keys.size, np.int64)
+    for b in range(starts.size - 1):
+        j = 0
+        for i in range(starts[b], starts[b + 1]):
+            k = keys[i]
+            while j < ref.size and ref[j] < k:
+                j += 1
+            out[i] = j
+    return out
+
+
+def _block_rows(starts: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """Block offsets after keeping the rows *keep* (a bool mask over all rows)."""
+    kept = np.concatenate([[0], np.cumsum(keep)])
+    return kept[starts]
+
+
+@dataclass(frozen=True)
+class Panel:
+    """Bars of many symbols stacked into one long frame (built by :func:`stack_frames`).
+
+    Attributes:
+        bars: Every column of the frames, :data:`SYMBOL` set to the symbol;
+            each symbol's rows contiguous and sorted by ``ts_init``.
+        symbols: The symbols, in block order.
+        starts: ``int64 [N + 1]`` row offset of each symbol's block (the last
+            entry is the row count); a symbol without bars has an empty block.
+        ts: ``int64`` ``ts_init`` (ns) of every row.
+        columns: The frames' own columns (*bars* adds :data:`SYMBOL` if they lack it).
+    """
+
+    bars: pl.DataFrame
+    symbols: tuple[str, ...]
+    starts: np.ndarray
+    ts: np.ndarray
+    columns: tuple[str, ...]
+
+    def until(self, end_ns: int | None) -> Panel:
+        """The rows with ``ts_init <= end_ns`` (every symbol kept, perhaps empty)."""
+        if end_ns is None:
+            return self
+        keep = self.ts <= end_ns
+        if keep.all():
+            return self
+        return Panel(
+            self.bars.filter(pl.Series(keep)),
+            self.symbols,
+            _block_rows(self.starts, keep),
+            self.ts[keep],
+            self.columns,
+        )
+
+
+def stack_frames(frames: Mapping[str, pl.DataFrame]) -> Panel:
+    """Stack ``symbol -> bars`` into a :class:`Panel`, each symbol sorted by ``ts_init``.
+
+    Build it once per dataset and window it with :meth:`Panel.until`: one
+    filter, instead of one per symbol.
+    """
+    if not frames:
+        raise ValueError("frames must not be empty")
+    parts = [
+        f.sort("ts_init").with_columns(pl.lit(s, pl.Utf8).alias(SYMBOL)) for s, f in frames.items()
+    ]
+    bars = pl.concat(parts, how="diagonal_relaxed")
+    lengths = np.array([p.height for p in parts], np.int64)
+    columns = tuple(dict.fromkeys(c for f in frames.values() for c in f.columns))
+    return Panel(
+        bars, tuple(frames), np.concatenate([[0], np.cumsum(lengths)]), _ts_ns(bars), columns
+    )
+
+
+@dataclass(frozen=True)
+class Targets:
+    """Target positions of many symbols, one per real bar, as flat arrays.
+
+    Laid out as :class:`Panel`: symbol *k*'s rows are
+    ``starts[k]:starts[k + 1]``, sorted by ``ts_init``.
+
+    Attributes:
+        symbols: The symbols, in block order.
+        starts: ``int64 [N + 1]`` block offsets.
+        ts: ``int64`` bar close (ns) of every row.
+        target: ``float64`` target in units of equity (null/NaN already read as flat).
+    """
+
+    symbols: tuple[str, ...]
+    starts: np.ndarray
+    ts: np.ndarray
+    target: np.ndarray
+
+    @property
+    def block(self) -> np.ndarray:
+        """Symbol index of every row."""
+        return np.repeat(np.arange(len(self.symbols)), np.diff(self.starts))
+
+    def until(self, end_ns: int | None) -> Targets:
+        """The rows with ``ts_init <= end_ns``."""
+        if end_ns is None:
+            return self
+        keep = self.ts <= end_ns
+        if keep.all():
+            return self
+        return Targets(
+            self.symbols, _block_rows(self.starts, keep), self.ts[keep], self.target[keep]
+        )
+
+    def exit_delisted(self) -> Targets:
+        """Flatten a symbol on its last bar when its data ends before the universe's.
+
+        A symbol whose bars stop early (delisted, merged, dropped from the data
+        source) would otherwise keep its position, marked at a stale price, for
+        the rest of the run. It is closed at its last close instead.
+        """
+        if len(self.symbols) < 2:  # noqa: PLR2004
+            return self
+        last = self.starts[1:][np.diff(self.starts) > 0] - 1
+        if last.size == 0:
+            return self
+        ends = self.ts[last]
+        early = last[ends < ends.max()]
+        if early.size == 0:
+            return self
+        target = self.target.copy()
+        target[early] = 0.0
+        return Targets(self.symbols, self.starts, self.ts, target)
+
+    def frame(self) -> pl.DataFrame:
+        """:data:`TARGET_SCHEMA`: ``symbol``, ``ts_init`` (ns), ``target``."""
+        symbols = pl.Series(SYMBOL, self.symbols, pl.Utf8)
+        return pl.DataFrame(
+            {
+                SYMBOL: symbols.gather(self.block),
+                "ts_init": self.ts,
+                "target": self.target,
+            },
+            schema=TARGET_SCHEMA,
+        )
+
+    def dicts(self) -> dict[str, dict[int, float]]:
+        """``symbol -> {ts_init ns: target}``, the per-bar lookup :class:`SignalStrategy` uses."""
+        ts, target = self.ts.tolist(), self.target.tolist()
+        return {
+            s: dict(zip(ts[lo:hi], target[lo:hi], strict=True))
+            for s, lo, hi in zip(self.symbols, self.starts[:-1], self.starts[1:], strict=True)
+        }
+
+
+def _finite(values: pl.Series) -> np.ndarray:
+    """Signal values as float64 with null/NaN/inf read as flat."""
+    arr = values.cast(pl.Float64).fill_null(0.0).to_numpy()
+    return np.where(np.isfinite(arr), arr, 0.0)
+
+
+def _align(panel: Panel) -> tuple[pl.DataFrame, np.ndarray, np.ndarray]:
+    """Align every symbol of *panel* on the **union** of bar closes.
 
     A symbol's rows between its first and last bar that it has no bar for are
     forward-filled (``volume`` 0); rows before its first bar or after its last
@@ -76,108 +242,95 @@ def _align(
     S&P 500 "ever members" universe) therefore keeps every date, and a strategy
     never sees a price from before a listing or after a delisting.
 
+    The grid is built from row indices (one ``gather``), not one join per symbol.
+
     Returns:
-        ``(aligned frames, symbol -> bool mask of the rows that are real bars)``.
+        ``(grid, real, calendar)``: the aligned bars of every symbol stacked
+        symbol-major (``len(symbols) * len(calendar)`` rows), a bool mask of the
+        grid rows that are real bars, and the calendar (``int64`` ns).
     """
-    calendar = (
-        pl.concat([f.select(pl.col("ts_init")) for f in frames.values()]).unique().sort("ts_init")
-    )
-    aligned: dict[str, pl.DataFrame] = {}
-    real: dict[str, np.ndarray] = {}
-    for symbol, frame in frames.items():
-        frame = frame.sort("ts_init")
-        values = [c for c in frame.columns if c != "ts_init"]
-        joined = calendar.join(
-            frame.with_columns(pl.lit(True).alias("__bar")), on="ts_init", how="left"
+    n_sym = len(panel.symbols)
+    # polars: numpy 2's hash-based np.unique takes seconds on a large panel's closes.
+    calendar = pl.Series(panel.ts).unique().sort().to_numpy()
+    t_n = calendar.size
+    lengths = np.diff(panel.starts)
+    block = np.repeat(np.arange(n_sym), lengths)
+    pos = block_searchsorted(calendar, panel.ts, panel.starts)
+    src = np.full((n_sym, t_n), -1, np.int64)
+    src[block, pos] = np.arange(panel.ts.size)
+    real = src >= 0
+    filled = np.maximum.accumulate(src, axis=1) if t_n else src  # last bar at or before
+    last = np.full(n_sym, -1, np.int64)
+    listed = lengths > 0
+    last[listed] = pos[panel.starts[1:][listed] - 1]
+    alive = (filled >= 0) & (np.arange(t_n)[None, :] <= last[:, None])
+    idx = pl.Series(np.where(alive, filled, -1).ravel())
+    idx = pl.select(pl.when(idx >= 0).then(idx)).to_series()
+    ts_dtype = panel.bars.schema["ts_init"]
+    calendar_col = pl.Series("ts_init", np.tile(calendar, n_sym))
+    if ts_dtype != pl.Int64:
+        calendar_col = calendar_col.cast(pl.Datetime("ns", "UTC")).cast(ts_dtype)
+    real_col, alive_col = pl.Series(real.ravel()), pl.Series(alive.ravel())
+    grid = panel.bars.select(pl.col(c).gather(idx) for c in panel.columns)
+    grid = grid.with_columns(calendar_col)
+    if "volume" in grid.columns:
+        grid = grid.with_columns(
+            pl.when(real_col).then(pl.col("volume")).when(alive_col).then(0.0).alias("volume")
         )
-        has_bar = joined["__bar"].fill_null(False)  # noqa: FBT003
-        if frame.height:
-            first, last = frame["ts_init"][0], frame["ts_init"][-1]
-            alive = pl.col("ts_init").is_between(first, last)
-            fills = [
-                pl.when(alive)
-                .then(pl.lit(0.0) if c == "volume" else pl.col(c).forward_fill())
-                .otherwise(None)
-                .alias(c)
-                for c in values
-            ]
-            # Real bars keep their own values (volume included); gaps are filled.
-            joined = joined.with_columns(
-                pl.when(pl.col("__bar")).then(pl.col(c)).otherwise(f).alias(c)
-                for c, f in zip(values, fills, strict=True)
+    return grid, real.ravel(), calendar
+
+
+def panel_targets(
+    research: Strategy | MultiAssetStrategy, panel: Panel, *, exits: bool = True
+) -> Targets:
+    """Run *research* on every symbol of *panel* and keep a target per real bar.
+
+    A :class:`MultiAssetStrategy` sees the symbols aligned on the union of their
+    bar closes (see :func:`_align`); targets are kept only on each symbol's real
+    bars. A single-asset strategy sees each symbol's bars alone, through
+    :meth:`~snippy_scales.strategies.trend.Strategy.generate_signals_panel` (one
+    query for the whole universe when the strategy overrides it). With several
+    symbols, one whose bars end before the others' is flattened on its last bar
+    (unless *exits* is false).
+    """
+    if isinstance(research, MultiAssetStrategy):
+        grid, real, calendar = _align(panel)
+        values = research.generate_signals_panel(grid, panel.symbols)
+        if values.len() != grid.height:
+            raise ValueError(
+                f"generate_signals_panel returned {values.len()} values for {grid.height} rows"
             )
-        aligned[symbol] = joined.select(frame.columns)
-        real[symbol] = has_bar.to_numpy()
-    return aligned, real
+        ts = np.tile(calendar, len(panel.symbols))[real]
+        counts = real.reshape(len(panel.symbols), calendar.size).sum(axis=1)
+        starts = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+        out = Targets(panel.symbols, starts, ts, _finite(values)[real])
+    else:
+        values = research.generate_signals_panel(panel.bars)
+        if values.len() != panel.bars.height:
+            raise ValueError(
+                f"generate_signals_panel returned {values.len()} values "
+                f"for {panel.bars.height} bars"
+            )
+        out = Targets(panel.symbols, panel.starts, panel.ts, _finite(values))
+    return out.exit_delisted() if exits else out
 
 
-def _exit_delisted(
-    frames: Mapping[str, pl.DataFrame], targets: dict[str, dict[int, float]]
-) -> None:
-    """Flatten a symbol on its last bar when its data ends before the universe's.
-
-    A symbol whose bars stop early (delisted, merged, dropped from the data
-    source) would otherwise keep its position, marked at a stale price, for the
-    rest of the run. It is closed at its last close instead.
-    """
-    if len(frames) < 2:  # noqa: PLR2004
-        return
-    ends = {s: int(_ts_ns(f).max()) for s, f in frames.items() if f.height}
-    if not ends:
-        return
-    horizon = max(ends.values())
-    for symbol, end in ends.items():
-        if end < horizon and end in targets[symbol]:
-            targets[symbol][end] = 0.0
-
-
-def _clean(values: pl.Series, n: int, symbol: str) -> np.ndarray:
-    """Signal values as float64 with null/NaN read as flat; checks the length."""
-    if values.len() != n:
-        raise ValueError(
-            f"generate_signals returned {values.len()} values for {n} bars of {symbol}"
-        )
-    arr = values.cast(pl.Float64).fill_null(0.0).to_numpy()
-    return np.where(np.isfinite(arr), arr, 0.0)
+def target_frame(
+    research: Strategy | MultiAssetStrategy, frames: Mapping[str, pl.DataFrame]
+) -> pl.DataFrame:
+    """:func:`panel_targets` on *frames*, as a :data:`TARGET_SCHEMA` frame."""
+    return panel_targets(research, stack_frames(frames)).frame()
 
 
 def compute_targets(
     research: Strategy | MultiAssetStrategy, frames: Mapping[str, pl.DataFrame]
 ) -> dict[str, dict[int, float]]:
-    """Run *research* on *frames* and key each target position by bar close.
+    """:func:`panel_targets` keyed by bar close: ``symbol -> {ts_init ns: target}``.
 
-    A :class:`MultiAssetStrategy` sees the frames aligned on the union of their
-    bar closes (see :func:`_align`: null before a symbol's first bar and after
-    its last); targets are kept only on each symbol's real bars. A single-asset
-    strategy runs on each frame independently. With several symbols, one whose
-    bars end before the others' is flattened on its last bar.
-
-    Args:
-        research: The research strategy.
-        frames: ``symbol -> bars`` with at least ``ts_init`` and ``close``.
-
-    Returns:
-        ``symbol -> {ts_init ns: target position in units of equity}``.
+    The per-bar lookup :class:`SignalStrategy` trades from; array engines use
+    :func:`panel_targets` directly and skip building these dicts.
     """
-    if not frames:
-        raise ValueError("frames must not be empty")
-    targets: dict[str, dict[int, float]] = {}
-    if isinstance(research, MultiAssetStrategy):
-        aligned, real = _align(frames)
-        signals = research.generate_signals(aligned)
-        for symbol, frame in aligned.items():
-            values = _clean(signals[symbol], frame.height, symbol)
-            mask = real[symbol]
-            targets[symbol] = dict(
-                zip(_ts_ns(frame)[mask].tolist(), values[mask].tolist(), strict=True)
-            )
-    else:
-        for symbol, frame in frames.items():
-            frame = frame.sort("ts_init")
-            values = _clean(research.generate_signals(frame), frame.height, symbol)
-            targets[symbol] = dict(zip(_ts_ns(frame).tolist(), values.tolist(), strict=True))
-    _exit_delisted(frames, targets)
-    return targets
+    return panel_targets(research, stack_frames(frames)).dicts()
 
 
 class SignalStrategy(NautilusStrategy):

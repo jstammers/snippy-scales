@@ -47,7 +47,7 @@ from snippy_scales.evaluation.statistics import (
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
 )
-from snippy_scales.execution import ENGINES, Costs
+from snippy_scales.execution import ENGINES, Costs, vector
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -266,8 +266,15 @@ class WalkForward:
             raise ValueError(f"engine must be one of {sorted(ENGINES)}, got {self.engine!r}")
 
     def run_folds(self, research: Strategy | MultiAssetStrategy) -> list[BacktestRun]:
-        """Backtest *research* on every fold's test window."""
+        """Backtest *research* on every fold's test window.
+
+        On the vector engine a single-asset strategy's targets are computed once
+        for all folds (:func:`~snippy_scales.execution.vector.precompute_targets`).
+        """
         run_backtest = ENGINES[self.engine]
+        extra: dict[str, Any] = {}
+        if self.engine == "vector":
+            extra["targets"] = vector.precompute_targets(research, self.data)
         return [
             run_backtest(
                 research,
@@ -278,6 +285,7 @@ class WalkForward:
                 costs=self.costs,
                 rebalance_band=self.rebalance_band,
                 leverage=self.leverage,
+                **extra,
             )
             for fold in self.folds
         ]

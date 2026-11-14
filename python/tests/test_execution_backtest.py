@@ -210,6 +210,29 @@ def test_run_backtest_reads_catalog(tmp_path: Path) -> None:
     assert from_catalog.returns.height > 0
 
 
+def test_load_market_data_batches_many_symbols(tmp_path: Path) -> None:
+    """One query for all symbols returns what loading each symbol alone does."""
+    catalog = cat.open_catalog(tmp_path)
+    symbols = ["X", "Y", "Z"]
+    catalog.write_instruments([_future(s) for s in symbols])
+    for i, s in enumerate(symbols):
+        bt = cat.bar_type(s, "SIM", "ohlcv-1d")
+        frame = _frame(40 + 10 * i, seed=20 + i)
+        cat.write_bars(
+            catalog, cat.frame_to_bars(frame, bar_type=bt, price_precision=2, interval_ns=_DAY)
+        )
+    together = load_market_data(symbols, catalog_path=tmp_path)
+    assert together.symbols == symbols
+    for s in symbols:
+        alone = load_market_data(s, catalog_path=tmp_path)
+        iid = f"{s}.SIM"
+        assert together.frames[s].equals(alone.frames[s])
+        assert together.frames[s].equals(cat.load_bars(s, "ohlcv-1d", catalog_path=tmp_path))
+        assert [str(b) for b in together.bars[iid]] == [str(b) for b in alone.bars[iid]]
+        assert together.instruments[iid] == alone.instruments[iid]
+        assert together.bar_types[iid] == alone.bar_types[iid]
+
+
 def test_run_backtest_missing_instrument(tmp_path: Path) -> None:
     catalog = cat.open_catalog(tmp_path)
     bt = cat.bar_type("X", "SIM", "ohlcv-1d")

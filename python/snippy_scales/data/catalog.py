@@ -60,7 +60,7 @@ from nautilus_trader.persistence import BarDataWrangler, ParquetDataCatalog
 from snippy_scales.data.paths import CATALOG_DIR
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 #: Databento OHLCV schema name -> (Nautilus bar step-aggregation, bar length in ns).
@@ -266,6 +266,46 @@ def load_bars(
         .select(BAR_COLUMNS)
         .sort("ts_event")
     )
+
+
+def load_bars_many(
+    bar_types: Mapping[str, str], *, catalog_path: Path | None = None
+) -> dict[str, pl.DataFrame]:
+    """Load many bar series in **one** catalog query, as :func:`load_bars` loads one.
+
+    A catalog query costs about the same for one series as for hundreds, so a
+    large universe loaded symbol by symbol spends almost all its time on query
+    overhead.
+
+    Args:
+        bar_types: ``symbol -> BarType`` string (e.g. from :func:`resolve_bar_type`).
+        catalog_path: Catalog root. Defaults to ``CATALOG_DIR``.
+
+    Returns:
+        ``symbol -> frame`` with the columns and order :func:`load_bars` returns;
+        a series with no bars is an empty frame.
+    """
+    root = catalog_path if catalog_path is not None else CATALOG_DIR
+    if not root.is_dir():
+        raise FileNotFoundError(f"No catalog at {root}. Run `algo data sync` first.")
+    if not bar_types:
+        return {}
+    payload = ParquetDataCatalog(str(root)).query_data_arrow_bytes(
+        NautilusDataType.Bar, list(dict.fromkeys(bar_types.values())), display=True
+    )
+    df = pl.from_arrow(pa.ipc.open_stream(payload).read_all())
+    assert isinstance(df, pl.DataFrame)  # noqa: S101 — from_arrow(Table) is always a DataFrame
+    parts = df.partition_by("bar_type", as_dict=True) if df.height else {}
+    empty = df.head(0)
+    frames: dict[str, pl.DataFrame] = {}
+    for symbol, bt in bar_types.items():
+        part = parts.get((bt,), empty)
+        frames[symbol] = (
+            part.with_columns(pl.lit(symbol, dtype=pl.Utf8).alias("symbol"))
+            .select(BAR_COLUMNS)
+            .sort("ts_event")
+        )
+    return frames
 
 
 # ---------------------------------------------------------------------------
