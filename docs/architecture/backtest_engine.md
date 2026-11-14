@@ -10,7 +10,7 @@ stores were removed in [migration](nautilus_migration.md) phase 3.
 | Module | Owns | Must not contain |
 |---|---|---|
 | `strategies/`, `research/` | `generate_signals(bars) -> target positions` (pure polars) | Any `nautilus_trader` import |
-| `execution/` | `SignalStrategy`, `MarketData`, `run_backtest` | Folds, sweeps, aggregation |
+| `execution/` | `SignalStrategy`, `MarketData`, `run_backtest`, `vector.run_backtest` | Folds, sweeps, aggregation |
 | `evaluation/` | Folds, Optuna studies, DSR/PSR/PBO, tearsheets | Orders or engine details (it calls `run_backtest`) |
 
 ## From signals to fills
@@ -132,3 +132,45 @@ Measured on Alpaca daily bars (Apple M-series, single process): one AAPL backtes
 2018–2026 takes about 0.1–0.7 s. A 9-trial × 5-fold grid on AAPL takes 2.0 s. A 4-trial ×
 5-fold cross-sectional momentum study on 8 equities takes 3.4 s. Order handling dominates,
 so a rebalance band speeds runs up as well as cutting costs.
+
+## Screening engine (`execution/vector.py`)
+
+`vector.run_backtest` has `run_backtest`'s signature and returns the same `BacktestRun`.
+It replays `SignalStrategy`'s decisions on a numba kernel:
+
+- **Sizing.** All symbols are sized from one equity figure per close, rounded half-even
+  to the size increment.
+- **Fills** happen at the close.
+- **Rolls** are triggered by the held contract and pay costs on both legs, ignoring the
+  band.
+- **Band.** Trades below the rebalance band are skipped.
+- **Non-positive closes** are neither marked nor traded.
+
+`returns` and `stats_returns` are built exactly as Nautilus builds them: daily post-fee
+equity over **calendar** days, with the same 11 return statistics. Fold Sharpes are
+therefore comparable across engines. `tests/test_vector_parity.py` checks equity,
+returns, statistics, order counts and rolls against Nautilus. That covers leverage,
+shorts, multipliers, both fee types, slippage, the band, windows and rolled outrights.
+
+Choose it with `WalkForward(..., engine="vector")`, `execution.ENGINES["vector"]` or
+`--engine vector` on `algo backtest run` and `algo eval run | sweep | run-all`. The
+study records its engine as a user attribute.
+
+| One run, warm | Nautilus | `vector` |
+|---|---|---|
+| AAPL TrendFollowing, 2,690 daily bars | ~187 ms | ~4 ms (kernel 0.03 ms) |
+
+The remaining ~4 ms is target generation (`compute_targets`, ~0.9 ms), Nautilus's
+statistics analyzer (~1.5 ms) and the fills frame. Making target generation
+vectorisable is the next step (see the spike report).
+
+What it does **not** model, so validate the trials you keep on Nautilus:
+
+- **Liquidity.** Nautilus fills a thin bar's volume at worse prices; this engine fills
+  everything at the close.
+- **Slippage** is charged at its expected cost rather than drawn at random.
+- **Margin.** There are no margin checks, so `leverage` is ignored and no rejections
+  are reported.
+- **Position statistics.** `stats_pnls`, `stats_general` and `positions` are empty.
+
+Background and benchmarks: [vectorised engines spike](../research/vectorised_engines_spike.md).
