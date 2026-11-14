@@ -48,14 +48,19 @@ import polars as pl
 from numba import njit
 
 from snippy_scales.data import catalog as cat
-from snippy_scales.execution.backtest import BacktestRun, Costs, _ts_column
-from snippy_scales.execution.strategy import compute_targets
+from snippy_scales.execution.backtest import BacktestRun, Costs
+from snippy_scales.execution.strategy import (
+    Panel,
+    Targets,
+    panel_targets,
+    stack_frames,
+)
+from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from snippy_scales.execution.backtest import MarketData, TimeBound
-    from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
     from snippy_scales.strategies.trend import Strategy
 
 _DAY = 86_400_000_000_000
@@ -139,10 +144,91 @@ def _prices(data: MarketData) -> _Prices:
     return prices
 
 
+_PANELS: dict[int, tuple[weakref.ref[MarketData], Panel]] = {}
+
+
+def _panel(data: MarketData) -> Panel:
+    """*data*'s frames stacked into one :class:`Panel`, cached for as long as *data* is alive."""
+    key = id(data)
+    hit = _PANELS.get(key)
+    if hit is not None and hit[0]() is data:
+        return hit[1]
+    panel = stack_frames(data.frames)
+    _PANELS[key] = (weakref.ref(data, lambda _: _PANELS.pop(key, None)), panel)
+    return panel
+
+
+def _active_columns(prices: _Prices, data: MarketData) -> np.ndarray:
+    """``[T, S]``: column of each symbol's active contract at every price row."""
+    symbols = list(data.schedules)
+    cols = np.empty((prices.ts.size, len(symbols)), np.int64)
+    for s, symbol in enumerate(symbols):
+        schedule = data.schedules[symbol]
+        if len(schedule.instrument_ids) == 1:
+            cols[:, s] = prices.column[schedule.instrument_ids[0]]
+        else:
+            cols[:, s] = [prices.column[schedule.active(int(t))] for t in prices.ts]
+    return cols
+
+
+@dataclass
+class _ActiveCache:
+    columns: np.ndarray  # [T, S] active contract column at every price row
+    windows: dict[tuple[int, int], np.ndarray]  # (lo, hi) -> active, -1 where no bar
+
+
+#: The active-contract panel of each window depends on the data alone, so every
+#: trial of a study reuses it.
+_ACTIVE: dict[int, tuple[weakref.ref[MarketData], _ActiveCache]] = {}
+
+
+def _active(prices: _Prices, data: MarketData, lo: int, hi: int) -> np.ndarray:
+    """``[T, S]`` over rows ``lo:hi``: symbol *s*'s active column where it has a bar, else -1."""
+    key = id(data)
+    hit = _ACTIVE.get(key)
+    if hit is None or hit[0]() is not data:
+        cache = _ActiveCache(_active_columns(prices, data), {})
+        _ACTIVE[key] = (weakref.ref(data, lambda _: _ACTIVE.pop(key, None)), cache)
+    else:
+        cache = hit[1]
+    if (lo, hi) not in cache.windows:
+        cols = cache.columns[lo:hi]
+        rows = np.arange(hi - lo)[:, None]
+        live = np.isfinite(prices.close[lo:hi][rows, cols])
+        cache.windows[(lo, hi)] = np.ascontiguousarray(np.where(live, cols, -1))
+    return cache.windows[(lo, hi)]
+
+
+@njit(cache=True)
+def _scatter_targets(  # noqa: PLR0913
+    ts: np.ndarray,
+    active: np.ndarray,
+    t_ts: np.ndarray,
+    t_starts: np.ndarray,
+    t_value: np.ndarray,
+    column: np.ndarray,
+    weight: np.ndarray,
+    out: np.ndarray,
+) -> None:
+    """``out[i, column[b]] = value * weight[b]`` for every target row of block *b* whose
+    bar close is ``ts[i]`` and whose symbol is live there (one merge pass per block)."""
+    for b in range(t_starts.size - 1):
+        s = column[b]
+        j = 0
+        for k in range(t_starts[b], t_starts[b + 1]):
+            t = t_ts[k]
+            while j < ts.size and ts[j] < t:
+                j += 1
+            if j == ts.size:
+                break
+            if ts[j] == t and active[j, s] >= 0:
+                out[j, s] = t_value[k] * weight[b]
+
+
 def _symbol_panel(
     prices: _Prices,
     data: MarketData,
-    targets: Mapping[str, Mapping[int, float]],
+    targets: Targets,
     weights: Mapping[str, float],
     lo: int,
     hi: int,
@@ -152,29 +238,15 @@ def _symbol_panel(
     ``active[i, s]`` is the column of symbol *s*'s active contract when it has a
     bar at row *i* (else -1); ``target[i, s]`` is ``target * weight`` (NaN = none).
     """
-    ts = prices.ts[lo:hi]
-    has_bar = np.isfinite(prices.close[lo:hi])
     symbols = list(data.schedules)
-    active = np.full((ts.size, len(symbols)), -1, np.int64)
-    target = np.full((ts.size, len(symbols)), np.nan)
-    for s, symbol in enumerate(symbols):
-        schedule = data.schedules[symbol]
-        if len(schedule.instrument_ids) == 1:
-            cols = np.full(ts.size, prices.column[schedule.instrument_ids[0]], np.int64)
-        else:
-            cols = np.array([prices.column[schedule.active(int(t))] for t in ts], np.int64)
-        live = has_bar[np.arange(ts.size), cols] if ts.size else np.zeros(0, bool)
-        active[live, s] = cols[live]
-        tmap = targets[symbol]
-        if not tmap:
-            continue
-        keys = np.fromiter(tmap.keys(), np.int64, len(tmap))
-        vals = np.fromiter(tmap.values(), np.float64, len(tmap))
-        order = np.argsort(keys)
-        keys, vals = keys[order], vals[order]
-        pos = np.minimum(np.searchsorted(keys, ts), keys.size - 1)
-        hit = live & (keys[pos] == ts)
-        target[hit, s] = vals[pos[hit]] * weights[symbol]
+    active = _active(prices, data, lo, hi)
+    target = np.full(active.shape, np.nan)
+    index = {s: k for k, s in enumerate(symbols)}
+    column = np.array([index[s] for s in targets.symbols], np.int64)
+    weight = np.array([weights[s] for s in targets.symbols], np.float64)
+    _scatter_targets(
+        prices.ts[lo:hi], active, targets.ts, targets.starts, targets.target, column, weight, target
+    )
     return active, target
 
 
@@ -322,7 +394,7 @@ def _fills(prices: _Prices, ts: np.ndarray, rec: tuple[np.ndarray, ...], n: int)
     row, col, qty, px, fee = (a[:n] for a in rec)
     return pd.DataFrame(
         {
-            "instrument_id": [prices.instruments[j] for j in col],
+            "instrument_id": np.array(prices.instruments, dtype=object)[col],
             "order_side": np.where(qty > 0, "BUY", "SELL"),
             "last_qty": np.abs(qty),
             "last_px": px,
@@ -330,6 +402,21 @@ def _fills(prices: _Prices, ts: np.ndarray, rec: tuple[np.ndarray, ...], n: int)
             "ts_event": pd.to_datetime(ts[row], utc=True),
         }
     )
+
+
+def precompute_targets(research: Strategy | MultiAssetStrategy, data: MarketData) -> Targets | None:
+    """*research*'s targets on all of *data*, to pass as ``run_backtest(targets=...)``.
+
+    A single-asset strategy's target on a bar depends only on that symbol's
+    bars up to it (``tests/test_strategy_causality.py``), so targets computed
+    once on the whole history equal those computed on any window's history,
+    and walk-forward folds can share them. A cross-sectional strategy's
+    targets near a window's end depend on which symbols have bars there, so
+    it returns ``None`` (recompute per window).
+    """
+    if isinstance(research, MultiAssetStrategy):
+        return None
+    return panel_targets(research, _panel(data), exits=False)
 
 
 def run_backtest(
@@ -343,11 +430,18 @@ def run_backtest(
     rebalance_band: float = 0.0,
     weights: Mapping[str, float] | None = None,
     leverage: float = 10.0,  # noqa: ARG001 — accepted for signature parity; margin not modelled
+    targets: Targets | None = None,
+    reports: bool = True,
 ) -> BacktestRun:
     """Backtest *research* on *data* with the vectorised kernel.
 
     Arguments are those of :func:`snippy_scales.execution.run_backtest`;
     *leverage* is accepted but not modelled (no margin checks).
+
+    Args:
+        targets: *research*'s targets on all of *data*, from
+            :func:`precompute_targets`, to reuse across windows. Only valid for a
+            single-asset strategy, which is causal per symbol.
     """
     costs = costs if costs is not None else Costs()
     if rebalance_band < 0.0:
@@ -358,15 +452,14 @@ def run_backtest(
     lo_ns, hi_ns = cat.to_ns(start), cat.to_ns(end)
     lo = 0 if lo_ns is None else int(np.searchsorted(prices.ts, lo_ns, "left"))
     hi = prices.ts.size if hi_ns is None else int(np.searchsorted(prices.ts, hi_ns, "right"))
-    # Signals see every bar up to *end* (as MarketData.window); filtering the frames
-    # directly avoids window()'s per-bar work on the Nautilus bar lists.
-    frames = (
-        data.frames
-        if hi_ns is None
-        else {s: f.filter(_ts_column(f) <= hi_ns) for s, f in data.frames.items()}
-    )
-    targets = compute_targets(research, frames)
-    active, target = _symbol_panel(prices, data, targets, weights, lo, hi)
+    # Signals see every bar up to *end* (as MarketData.window).
+    if targets is None:
+        window = panel_targets(research, _panel(data).until(hi_ns))
+    else:
+        if isinstance(research, MultiAssetStrategy):
+            raise ValueError("precomputed targets are only valid for single-asset strategies")
+        window = targets.until(hi_ns).exit_delisted()
+    active, target = _symbol_panel(prices, data, window, weights, lo, hi)
 
     ts = prices.ts[lo:hi]
     close = np.ascontiguousarray(prices.close[lo:hi])
@@ -407,7 +500,7 @@ def run_backtest(
         equity=pl.DataFrame({"ts": ts, "equity": eq_pre}).with_columns(
             pl.col("ts").cast(pl.Datetime("ns", "UTC"))
         ),
-        fills=_fills(prices, ts, rec, n_orders),
+        fills=_fills(prices, ts, rec, n_orders) if reports else pd.DataFrame(),
         positions=pd.DataFrame(),
         rejections=(),
         total_orders=int(n_orders),

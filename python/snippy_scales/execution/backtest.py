@@ -17,12 +17,14 @@ slippage on bar data, applied with that probability).
 from __future__ import annotations
 
 import bisect
+import functools
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 import polars as pl
 from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.common import LoggerConfig, LogLevel
@@ -42,10 +44,9 @@ from snippy_scales.execution.strategy import SignalStrategy
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
-    import pandas as pd
     from nautilus_trader.model import Bar, Currency, FuturesContract
 
     from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
@@ -127,6 +128,12 @@ class MarketData:
         instruments: ``instrument_id -> Nautilus instrument``, all at one venue.
         bar_types: ``instrument_id -> BarType`` string.
         schedules: ``symbol -> RollSchedule``.
+        source: Rebuilds this data from the catalog (set by
+            :func:`load_market_data`, kept by :meth:`select`, :meth:`window`
+            and :meth:`merge`). Nautilus instruments cannot be pickled, so this
+            recipe is what pickling sends — a worker process reloads the data
+            (:mod:`snippy_scales.execution.pool`). ``None`` for data built from
+            frames, which then cannot be sent to another process.
     """
 
     frames: dict[str, pl.DataFrame]
@@ -134,6 +141,23 @@ class MarketData:
     instruments: dict[str, Any] = field(repr=False)
     bar_types: dict[str, str] = field(repr=False)
     schedules: dict[str, RollSchedule]
+    source: Callable[[], MarketData] | None = field(default=None, repr=False, compare=False)
+
+    def __reduce__(self) -> tuple[Callable[..., MarketData], tuple[Any, ...]]:
+        if self.source is None:
+            raise TypeError(
+                "MarketData built from frames cannot be pickled (Nautilus instruments "
+                "are not picklable); load it with load_market_data to send it to "
+                "another process"
+            )
+        return _rebuild, (self.source, self.signature())
+
+    def signature(self) -> tuple[tuple[str, int, int], ...]:
+        """``(instrument, bar count, last bar close)`` per instrument: a cheap identity check."""
+        return tuple(
+            (iid, len(bars), bars[-1].ts_init if bars else -1)
+            for iid, bars in sorted(self.bars.items())
+        )
 
     @classmethod
     def from_frames(
@@ -224,12 +248,18 @@ class MarketData:
         """Both datasets together (symbols must not overlap)."""
         if set(self.frames) & set(other.frames):
             raise ValueError("symbols overlap")
+        source = (
+            functools.partial(_merged, self.source, other.source)
+            if self.source is not None and other.source is not None
+            else None
+        )
         return MarketData(
             {**self.frames, **other.frames},
             {**self.bars, **other.bars},
             {**self.instruments, **other.instruments},
             {**self.bar_types, **other.bar_types},
             {**self.schedules, **other.schedules},
+            source,
         )
 
     def select(self, symbols: Sequence[str]) -> MarketData:
@@ -241,6 +271,7 @@ class MarketData:
             {i: self.instruments[i] for i in ids},
             {i: self.bar_types[i] for i in ids},
             {s: self.schedules[s] for s in symbols},
+            None if self.source is None else functools.partial(_selected, self.source, symbols),
         )
 
     def window(self, start: TimeBound, end: TimeBound) -> MarketData:
@@ -268,7 +299,34 @@ class MarketData:
                 bars[iid] = series[
                     bisect.bisect_left(keys, first) : bisect.bisect_right(keys, last)
                 ]
-        return MarketData(frames, bars, self.instruments, self.bar_types, self.schedules)
+        source = (
+            None if self.source is None else functools.partial(_windowed, self.source, start, end)
+        )
+        return MarketData(frames, bars, self.instruments, self.bar_types, self.schedules, source)
+
+
+def _rebuild(
+    source: Callable[[], MarketData], signature: tuple[tuple[str, int, int], ...]
+) -> MarketData:
+    data = source()
+    if data.signature() != signature:
+        raise RuntimeError(
+            "market data reloaded from the catalog differs from the original "
+            "(the catalog changed since it was loaded)"
+        )
+    return data
+
+
+def _merged(a: Callable[[], MarketData], b: Callable[[], MarketData]) -> MarketData:
+    return a().merge(b())
+
+
+def _selected(source: Callable[[], MarketData], symbols: Sequence[str]) -> MarketData:
+    return source().select(symbols)
+
+
+def _windowed(source: Callable[[], MarketData], start: TimeBound, end: TimeBound) -> MarketData:
+    return source().window(start, end)
 
 
 def _frame_bars(
@@ -348,32 +406,93 @@ def load_market_data(
         FileNotFoundError: If a series or instrument is missing from the catalog.
     """
     names = [symbols] if isinstance(symbols, str) else list(symbols)
+    if not names:
+        raise ValueError("no symbols given")
+    data = _load(names, schema, venue, roll, catalog_path)
+    source = functools.partial(
+        load_market_data, names, schema, venue=venue, roll=roll, catalog_path=catalog_path
+    )
+    return replace(data, source=source)
+
+
+def _load(
+    names: Sequence[str],
+    schema: str,
+    venue: str | None,
+    roll: RollRule | None,
+    catalog_path: Path | None,
+) -> MarketData:
     catalog = cat.open_catalog(catalog_path)
+    singles = [s for s in names if not futures.is_parent(s)]
+    loaded = _load_singles(catalog, singles, schema, venue, catalog_path) if singles else None
+    if loaded is not None and len(singles) == len(names):
+        return loaded
     data: MarketData | None = None
     for symbol in names:
         if futures.is_parent(symbol):
             part = _load_parent(catalog, symbol, schema, venue, catalog_path, roll)
         else:
-            bt = cat.resolve_bar_type(symbol, schema, venue=venue, catalog_path=catalog_path)
-            iid = str(BarType.from_str(bt).instrument_id)
-            found = catalog.instruments(instrument_ids=[iid])
-            if not found:
-                raise FileNotFoundError(
-                    f"No instrument definition for {iid} in the catalog. "
-                    "Run `algo data sync <config> --instruments-only` first."
-                )
-            frame = cat.load_bars(symbol, schema, venue=venue, catalog_path=catalog_path)
-            part = MarketData(
-                frames={symbol: frame},
-                bars={iid: _query_bars(catalog, bt)},
-                instruments={iid: found[-1]},
-                bar_types={iid: bt},
-                schedules={symbol: RollSchedule.single(symbol, iid)},
-            )
+            assert loaded is not None  # noqa: S101 — singles holds every non-parent symbol
+            part = loaded.select([symbol])
         data = part if data is None else data.merge(part)
-    if data is None:
-        raise ValueError("no symbols given")
+    assert data is not None  # noqa: S101 — names is not empty
     return data
+
+
+def _load_singles(
+    catalog: Any,  # noqa: ANN401
+    symbols: Sequence[str],
+    schema: str,
+    venue: str | None,
+    catalog_path: Path | None,
+) -> MarketData:
+    """Load single-instrument symbols with one query each for instruments, frames and bars.
+
+    Each catalog query has a fixed cost (~40 ms) that barely grows with the number
+    of series it reads, so an 800-symbol universe queried symbol by symbol spends
+    over a minute on overhead alone.
+    """
+    if venue is not None:
+        bts = {s: cat.bar_type(s, venue, schema) for s in symbols}
+    else:
+        venues: dict[str, list[str]] = {}
+        for s, v in cat.list_bar_series(schema, catalog_path):
+            venues.setdefault(s, []).append(v)
+        bts = {}
+        for s in symbols:
+            found = venues.get(s, [])
+            if len(found) != 1:  # resolve_bar_type raises the right error
+                cat.resolve_bar_type(s, schema, catalog_path=catalog_path)
+            bts[s] = cat.bar_type(s, found[0], schema)
+    iids = {s: str(BarType.from_str(bt).instrument_id) for s, bt in bts.items()}
+    by_id = {str(i.id): i for i in catalog.instruments(instrument_ids=list(iids.values()))}
+    missing = [i for i in iids.values() if i not in by_id]
+    if missing:
+        raise FileNotFoundError(
+            f"No instrument definition for {', '.join(missing)} in the catalog. "
+            "Run `algo data sync <config> --instruments-only` first."
+        )
+    frames = cat.load_bars_many(bts, catalog_path=catalog_path)
+    bars = _query_bars_many(catalog, list(bts.values()))
+    return MarketData(
+        frames=frames,
+        bars={iids[s]: bars.get(bt, []) for s, bt in bts.items()},
+        instruments={iids[s]: by_id[iids[s]] for s in symbols},
+        bar_types={iids[s]: bt for s, bt in bts.items()},
+        schedules={s: RollSchedule.single(s, iids[s]) for s in symbols},
+    )
+
+
+def _query_bars_many(catalog: Any, bar_types: Sequence[str]) -> dict[str, list[Bar]]:  # noqa: ANN401
+    """``bar type -> bars sorted by ts_init`` from one catalog query."""
+    grouped: dict[Any, list[Bar]] = {}
+    for bar in catalog.query(NautilusDataType.Bar, list(dict.fromkeys(bar_types))):
+        bt = bar.bar_type
+        series = grouped.get(bt)
+        if series is None:
+            grouped[bt] = series = []
+        series.append(bar)
+    return {str(bt): sorted(s, key=lambda b: b.ts_init) for bt, s in grouped.items()}
 
 
 @dataclass(frozen=True)
@@ -446,6 +565,7 @@ def run_backtest(
     rebalance_band: float = 0.0,
     weights: Mapping[str, float] | None = None,
     leverage: float = 10.0,
+    reports: bool = True,
 ) -> BacktestRun:
     """Backtest *research* on *data* between *start* and *end*.
 
@@ -459,6 +579,9 @@ def run_backtest(
         rebalance_band: Skip trades below this fraction of equity.
         weights: ``symbol -> capital weight``. Defaults to equal weights.
         leverage: Venue default leverage for margin checks.
+        reports: Build the fills and positions reports. ``False`` leaves them
+            empty: on a large universe they take seconds and hundreds of MB,
+            and walk-forward statistics don't need them.
 
     Returns:
         The :class:`BacktestRun`.
@@ -509,8 +632,8 @@ def run_backtest(
             stats_general=dict(result.stats_general),
             returns=_series_frame(result.returns_series, "return"),
             equity=_series_frame(dict(sorted(strategy.equity.items())), "equity"),
-            fills=engine.generate_fills_report(),
-            positions=engine.generate_positions_report(),
+            fills=engine.generate_fills_report() if reports else pd.DataFrame(),
+            positions=engine.generate_positions_report() if reports else pd.DataFrame(),
             rejections=tuple(strategy.rejections),
             total_orders=result.total_orders,
             rolls=tuple(strategy.rolls),

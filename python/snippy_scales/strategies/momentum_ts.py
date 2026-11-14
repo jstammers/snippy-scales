@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+from numba import njit
 
-from snippy_scales.strategies.trend import Strategy
+from snippy_scales.strategies.trend import SYMBOL, Strategy
 
 
 class TimeSeriesMomentum(Strategy):
@@ -112,8 +113,19 @@ class TimeSeriesMomentum(Strategy):
             Float :class:`polars.Series` named ``"position"``, same length as
             *bars*.  Values are zero during the warmup period.
         """
-        close = bars["close"]
+        positions = bars.select(self._positions(pl.col("close")).alias("position"))["position"]
+        return self._carry(positions, np.zeros(1, np.int64))
 
+    def generate_signals_panel(self, bars: pl.DataFrame) -> pl.Series:
+        """All symbols in one query (``.over(symbol)``); equals :meth:`generate_signals`."""
+        positions = bars.select(self._positions(pl.col("close")).over(SYMBOL).alias("position"))[
+            "position"
+        ]
+        symbols = bars[SYMBOL]
+        starts = np.flatnonzero(symbols.ne_missing(symbols.shift(1)).fill_null(True).to_numpy())  # noqa: FBT003
+        return self._carry(positions, starts.astype(np.int64))
+
+    def _positions(self, close: pl.Expr) -> pl.Expr:
         # ── Momentum return ────────────────────────────────────────────────────
         # Return from (t - skip_recent - lookback) to (t - skip_recent).
         recent_close = close.shift(self.skip_recent) if self.skip_recent > 0 else close
@@ -127,15 +139,27 @@ class TimeSeriesMomentum(Strategy):
         rv = (daily_ret.rolling_std(self.vol_lookback) * (252**0.5)).clip(lower_bound=1e-6)
         vol_scalar = (self.vol_target / rv).clip(upper_bound=self.max_leverage)
 
-        positions = direction * vol_scalar
+        return direction * vol_scalar
 
-        # ── Rebalancing frequency ──────────────────────────────────────────────
-        # Between rebalance dates, carry forward the last position.
-        if self.rebal_freq > 1:
-            pos_arr = positions.to_numpy().copy()
-            for i in range(1, len(pos_arr)):
-                if i % self.rebal_freq != 0 and not np.isnan(pos_arr[i - 1]):
-                    pos_arr[i] = pos_arr[i - 1]
-            positions = pl.Series(pos_arr)
+    def _carry(self, positions: pl.Series, starts: np.ndarray) -> pl.Series:
+        """Between rebalance dates, carry forward the last position (per symbol)."""
+        if self.rebal_freq <= 1:
+            return positions.fill_null(0.0).rename("position")
+        values = positions.cast(pl.Float64).to_numpy().copy()
+        _carry_forward(values, starts, self.rebal_freq)
+        return pl.Series("position", values)
 
-        return positions.fill_null(0.0).rename("position")
+
+@njit(cache=True)
+def _carry_forward(values: np.ndarray, starts: np.ndarray, freq: int) -> None:
+    """In place: ``values[i] = values[i-1]`` off rebalance bars, ``i`` counted per symbol.
+
+    *starts* are the first rows of each symbol's contiguous block.
+    """
+    n = values.size
+    for b in range(starts.size):
+        lo = starts[b]
+        hi = starts[b + 1] if b + 1 < starts.size else n
+        for i in range(lo + 1, hi):
+            if (i - lo) % freq != 0 and not np.isnan(values[i - 1]):
+                values[i] = values[i - 1]

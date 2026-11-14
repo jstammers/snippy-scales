@@ -28,11 +28,15 @@ the multi-asset analogue of the single-asset
 
 from __future__ import annotations
 
-import warnings
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
+from numba import njit, prange
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class MultiAssetStrategy(ABC):
@@ -71,6 +75,35 @@ class MultiAssetStrategy(ABC):
             zero indicates flat.
         """
         ...
+
+    def generate_signals_panel(self, grid: pl.DataFrame, symbols: Sequence[str]) -> pl.Series:
+        """Targets for the aligned universe in one series: :meth:`generate_signals`, stacked.
+
+        Args:
+            grid: Every symbol's aligned bars stacked symbol-major: rows
+                ``k * T : (k + 1) * T`` are ``symbols[k]``'s, with
+                ``T = grid.height // len(symbols)`` rows each, one per bar close
+                of the universe (null where the symbol is not listed).
+            symbols: The symbols, in grid order.
+
+        Returns:
+            One target per grid row. The default slices the grid into the frames
+            :meth:`generate_signals` takes; override it to work on the grid
+            directly (``grid["close"].to_numpy().reshape(N, T).T`` is the
+            ``[T, N]`` close matrix).
+        """
+        t_n = grid.height // len(symbols) if symbols else 0
+        frames = {s: grid.slice(k * t_n, t_n) for k, s in enumerate(symbols)}
+        signals = self.generate_signals(frames)
+        parts = []
+        for s in symbols:
+            values = signals[s]
+            if values.len() != t_n:
+                raise ValueError(
+                    f"generate_signals returned {values.len()} values for {t_n} bars of {s}"
+                )
+            parts.append(values.cast(pl.Float64).rename("position"))
+        return pl.concat(parts) if parts else pl.Series("position", [], pl.Float64)
 
 
 class CrossSectionalMomentum(MultiAssetStrategy):
@@ -181,25 +214,36 @@ class CrossSectionalMomentum(MultiAssetStrategy):
         if len(set(lengths.values())) != 1:
             raise ValueError(f"All bar DataFrames must have the same length.  Got: {lengths}")
 
-        n = next(iter(lengths.values()))
-
-        # ── Step 1: build close matrix and momentum returns ────────────────────
         close_matrix = np.column_stack(
             [multi_bars[sym]["close"].to_numpy().astype(np.float64) for sym in symbols]
         )  # shape (n, n_assets)
+        positions_matrix = self.positions(close_matrix)
 
+        return {
+            sym: pl.Series(positions_matrix[:, j]).rename("position")
+            for j, sym in enumerate(symbols)
+        }
+
+    def generate_signals_panel(self, grid: pl.DataFrame, symbols: Sequence[str]) -> pl.Series:
+        """:meth:`generate_signals` on the grid's ``[T, N]`` close matrix, without slicing it."""
+        if len(symbols) < 2:  # noqa: PLR2004
+            raise ValueError(f"CrossSectionalMomentum requires ≥ 2 assets, got {len(symbols)}")
+        t_n = grid.height // len(symbols)
+        close = grid["close"].cast(pl.Float64).to_numpy().reshape(len(symbols), t_n).T
+        return pl.Series("position", self.positions(np.ascontiguousarray(close)).T.ravel())
+
+    def positions(self, close_matrix: np.ndarray) -> np.ndarray:
+        """Target positions ``[n_bars, n_assets]`` from same-shaped closes (NaN = unlisted)."""
+        n = close_matrix.shape[0]
+
+        # ── Step 1: momentum returns ───────────────────────────────────────────
         mom_ret = self._compute_momentum_returns(close_matrix)  # (n, n_assets)
 
         # ── Step 2: compute rolling realised volatility per asset ──────────────
         vol_matrix = self._compute_vol_matrix(close_matrix)  # (n, n_assets)
 
         # ── Step 3: cross-sectional ranking and position assignment ────────────
-        positions_matrix = self._assign_positions(n, mom_ret, vol_matrix)  # (n, n_assets)
-
-        return {
-            sym: pl.Series(positions_matrix[:, j]).rename("position")
-            for j, sym in enumerate(symbols)
-        }
+        return self._assign_positions(n, mom_ret, vol_matrix)  # (n, n_assets)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -222,12 +266,11 @@ class CrossSectionalMomentum(MultiAssetStrategy):
         if n <= warmup:
             return mom_ret
 
-        # close[t - skip_recent] / close[t - skip_recent - lookback] - 1
-        for t in range(warmup, n):
-            recent_idx = t - self.skip_recent if self.skip_recent > 0 else t
-            past_idx = recent_idx - self.lookback
-            with np.errstate(invalid="ignore", divide="ignore"):
-                mom_ret[t] = close_matrix[recent_idx] / close_matrix[past_idx] - 1.0
+        # close[t - skip_recent] / close[t - skip_recent - lookback] - 1, for t >= warmup
+        recent = close_matrix[self.lookback : n - self.skip_recent]
+        past = close_matrix[: n - self.skip_recent - self.lookback]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mom_ret[warmup:] = recent / past - 1.0
 
         return mom_ret
 
@@ -254,13 +297,10 @@ class CrossSectionalMomentum(MultiAssetStrategy):
         with np.errstate(invalid="ignore", divide="ignore"):
             daily_ret = np.diff(close_matrix, axis=0) / close_matrix[:-1]
 
-        with warnings.catch_warnings():
-            # Symbols not listed over a whole window (null closes) give an all-NaN slice.
-            warnings.simplefilter("ignore", RuntimeWarning)
-            for t in range(self.vol_lookback, n):
-                window = daily_ret[t - self.vol_lookback : t]
-                vol = np.nanstd(window, axis=0) * (252**0.5)
-                vol_matrix[t] = np.maximum(vol, 1e-6)
+        # nanstd of daily_ret[t - vol_lookback : t] for every t >= vol_lookback; a
+        # window with no finite return (a symbol not listed over it) is NaN.
+        vol = _rolling_nanstd(np.ascontiguousarray(daily_ret), self.vol_lookback) * (252**0.5)
+        vol_matrix[self.vol_lookback :] = np.maximum(vol, 1e-6)
 
         return vol_matrix
 
@@ -307,18 +347,42 @@ class CrossSectionalMomentum(MultiAssetStrategy):
             upper_threshold = float(np.percentile(valid_mom, (1.0 - self.top_quantile) * 100.0))
             lower_threshold = float(np.percentile(valid_mom, self.bottom_quantile * 100.0))
 
-            new_pos = np.zeros(_n_assets)
-            for j in range(_n_assets):
-                if not valid_mask[j]:
-                    continue
-                vol_scalar = min(self.vol_target / vol_matrix[t, j], self.max_leverage)
-                if mom_at_t[j] >= upper_threshold:
-                    new_pos[j] = vol_scalar  # long
-                elif mom_at_t[j] <= lower_threshold:
-                    new_pos[j] = -vol_scalar  # short
-                # else: flat (leave as 0.0)
+            vol_scalar = np.minimum(self.vol_target / vol_matrix[t], self.max_leverage)
+            long = valid_mask & (mom_at_t >= upper_threshold)
+            short = valid_mask & ~long & (mom_at_t <= lower_threshold)
+            new_pos = np.where(long, vol_scalar, np.where(short, -vol_scalar, 0.0))
 
             positions[t] = new_pos
             prev_rebal_pos = new_pos
 
         return positions
+
+
+@njit(cache=True, parallel=True)
+def _rolling_nanstd(values: np.ndarray, window: int) -> np.ndarray:
+    """``out[k, j] = np.nanstd(values[k : k + window, j])`` (population std, NaNs skipped).
+
+    ``out`` has ``len(values) - window + 1`` rows; an all-NaN window gives NaN.
+    """
+    n, m = values.shape
+    rows = n - window + 1
+    out = np.full((max(rows, 0), m), np.nan)
+    for j in prange(m):
+        for k in range(rows):
+            total = 0.0
+            count = 0
+            for i in range(k, k + window):
+                v = values[i, j]
+                if not np.isnan(v):
+                    total += v
+                    count += 1
+            if count == 0:
+                continue
+            mean = total / count
+            sq = 0.0
+            for i in range(k, k + window):
+                v = values[i, j]
+                if not np.isnan(v):
+                    sq += (v - mean) * (v - mean)
+            out[k, j] = np.sqrt(sq / count)
+    return out

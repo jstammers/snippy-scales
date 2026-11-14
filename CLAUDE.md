@@ -220,6 +220,11 @@ Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.
 Every strategy must pass `tests/test_strategy_causality.py` (add new ones to its lists)
 and be registered in `cli/_common.py:registry()` to be usable from the CLI.
+Targets for a whole universe come from `execution.panel_targets` (array `Targets`, no
+per-symbol dicts). For large universes, override `generate_signals_panel` with
+`.over("symbol")` window expressions and add the strategy to
+`tests/test_strategy_panel.py`. Load universes with one `load_market_data([...])` call:
+it reads every symbol in one catalog query.
 Synthetic data for tests: `tests/conftest.py` (`synthetic_data`, the `backtest` fixture).
 
 ### Metrics
@@ -245,6 +250,9 @@ report.best_params, report.sharpe, report.dsr, report.pbo
 
 Each trial's value is its mean fold Sharpe; the report is computed on the best trial's
 stitched out-of-sample returns and deflated for the number of trials.
+`WalkForward(..., workers=n)` runs Nautilus folds in `n` processes (`execution/pool.py`;
+workers reload `MarketData` from the catalog via `MarketData.source`, so scripts that use it
+need an `if __name__ == "__main__":` guard); `run_study(..., n_jobs=k)` runs trials at once.
 `WalkForward(..., engine="vector")` (CLI `--engine vector`) screens on the numba kernel in
 `execution/vector.py` (~50× faster end to end); validate kept trials on Nautilus.
 CLI: `algo eval run | sweep | run-all | list | report | tearsheet`, `algo backtest run`.

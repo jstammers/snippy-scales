@@ -121,7 +121,40 @@ print(signals)
   `generate_signals(bars[:k]) == generate_signals(bars)[:k]`; the test checks that.
 - Never import `nautilus_trader` from a strategy.
 
-### 5. Run a Backtest
+### 5. (Optional) Make it fast on large universes
+
+Backtests compute targets for every symbol at once through
+`Strategy.generate_signals_panel(bars)`. `bars` is one long frame of every symbol's
+bars, with the symbol in a `symbol` column, each symbol's rows contiguous and sorted.
+The default implementation calls `generate_signals` once per symbol, which costs about
+0.3 ms of Python per symbol per call. On an 800-name universe screened over many
+trials, that per-symbol cost dominates.
+
+If your signal is polars expressions, write it once over `pl.Expr` and run it with
+`.over("symbol")`. Polars then evaluates every symbol in one query:
+
+```python
+from snippy_scales.strategies.trend import SYMBOL
+
+def _signal(self, close: pl.Expr) -> pl.Expr:
+    return (close - close.rolling_mean(self.ma_period)).sign()
+
+def generate_signals(self, bars: pl.DataFrame) -> pl.Series:
+    return bars.select(self._signal(pl.col("close")))["close"].fill_null(0.0)
+
+def generate_signals_panel(self, bars: pl.DataFrame) -> pl.Series:
+    return bars.select(self._signal(pl.col("close")).over(SYMBOL))["close"].fill_null(0.0)
+```
+
+A `MultiAssetStrategy` can override `generate_signals_panel(grid, symbols)` the same
+way. It receives every symbol's aligned bars stacked symbol-major, so
+`grid["close"].to_numpy().reshape(N, T).T` is the `[T, N]` close matrix (see
+`CrossSectionalMomentum`).
+
+Add an override to `_SINGLE` or `_MULTI` in `python/tests/test_strategy_panel.py`.
+That test checks the override against the per-symbol default.
+
+### 6. Run a Backtest
 
 ```bash
 uv run algo backtest run my-strategy -s ES.c.0 --start 2020-01-01 --end 2024-12-31 \

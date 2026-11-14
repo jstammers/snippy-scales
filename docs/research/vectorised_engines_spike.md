@@ -260,6 +260,32 @@ on targets and about 9 s simulating. Where that time goes:
 4. **`CrossSectionalMomentum` is slow even at 8 symbols** (52 ms). This hasn't been
    profiled.
 
+**Update (issue #19).** Points 1, 2 and 4 are fixed:
+
+- `execution.panel_targets` returns array targets (`Targets`), and the vector engine
+  scatters them straight into its matrix, so there are no dicts.
+- Single-asset strategies run once over a stacked `Panel` with `.over("symbol")`.
+- Cross-sectional strategies use a union-calendar grid built from row indices instead
+  of one join per symbol. `CrossSectionalMomentum`'s per-date `nanstd` loop and
+  per-asset ranking loop are vectorised.
+- On the vector engine, a single-asset strategy's targets are computed once per trial
+  and shared by every fold.
+
+Targets are bit-identical to the old path. The new `panel_targets` and `scatter` columns
+of `signals.py`, in ms:
+
+| Workload | `compute_targets` (dicts) | `panel_targets` | scatter | kernel |
+|---|---|---|---|---|
+| 19 futures TSMOM | 15.0 | 2.2 | 1.7 | 0.65 |
+| 100 equities TrendFollowing | 51.8 | 4.5 | 5.3 | 1.6 |
+| 400 equities TrendFollowing | 217 | 20.5 | 22.4 | 9.0 |
+| 400 equities CSMOM | 236 | 48.6 | 21.8 | 4.4 |
+
+(The scatter column was measured before its per-window cache and numba merge, which
+make repeated folds cheaper still.) On the 814-name S&P 500 reports, one 5-fold
+screening trial now takes 0.19 s for TSMOM (was 6.4 s) and 0.55 s for CSMOM (was 8.6 s).
+Point 3, sharing indicators across parameter sets, is still open.
+
 ## Implications for `execution/vector.py`
 
 - **Kernel.** Copy `_simulate` and keep the panel semantics: per-symbol `RollSchedule`,
