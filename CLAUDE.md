@@ -60,6 +60,7 @@ it.
 │   │   ├── reporting/          ← Strategy research reports (marimo template → reports/<name>/)
 │   │   │   ├── config.py       ← ReportConfig (config.yaml), fingerprint
 │   │   │   ├── pipeline.py     ← screening (vector) → Nautilus validation → full backtest, checks
+│   │   ├── log.py          ← strategy log: every report's result, config and commit (algo report log)
 │   │   │   └── scaffold.py     ← new_report, export_html (marimo export)
 │   │   └── cli/                ← Typer CLI (entry point: algo) — see `algo data --help`
 │   │       ├── data.py         ← sync, coverage, consolidate, update-universe, backfill-sp500
@@ -226,6 +227,11 @@ its contracts are re-listed on GLBX (`IFEU_<raw>.GLBX`) so one USD account trade
 and ICE together, and non-USD contracts are converted settlement-by-settlement at the
 CME FX future's rate (`futures.to_usd`, `6B.c.0` for GBP: sync it).
 
+A rolled symbol's signal frame also has a `carry` column: the curve's annualised roll
+yield, `(F1/F2 - 1) × 12/months` (`futures.roll_yield`; null where the second month did
+not trade). Per-bar features reach strategies only if listed in
+`execution/strategy.py:FEATURE_COLUMNS`. `TrendCarry` (`trend-carry`) uses it.
+
 Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.
 Every strategy must pass `tests/test_strategy_causality.py` (add new ones to its lists)
@@ -285,6 +291,12 @@ data/derived/experiments/
 │                                  as trial user attrs, study config as study user attrs
 └── <study>/trial_<n>.parquet      each trial's stitched OOS daily returns (ts, return)
 ```
+
+Every study records its provenance: study attrs `runs` (one per `run_study` call: start
+time, git commit, branch, dirty flag, sampler, seed) and `config` (a report's full
+config), trial attrs `commit` and `dirty`. `algo report log [--also <reports dir>]`
+turns every report's studies, config and `notes.md` verdict into
+`reports/STRATEGY_LOG.md` (generated, git-ignored: never edit it by hand).
 
 Query with `optuna.load_study(...).trials_dataframe()` (→ polars/DuckDB for ad-hoc SQL)
 or `optuna-dashboard sqlite:///data/derived/experiments/optuna.db`. Tests pass
