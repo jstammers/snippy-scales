@@ -37,6 +37,7 @@ conforms new bars to the precision already stored for the series, and raises
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -578,6 +579,47 @@ def continuous_instrument(contract: FuturesContract, symbol: str) -> FuturesCont
         expiration_ns=2**63 - 1,
     )
     return FuturesContract.from_dict(spec)
+
+
+def _symbology_path(symbol: str, venue: str, catalog_path: Path | None) -> Path:
+    root = catalog_path if catalog_path is not None else CATALOG_DIR
+    return root / "symbology" / venue / f"{symbol}.json"
+
+
+def write_symbology(
+    symbol: str,
+    venue: str,
+    spans: Sequence[tuple[str, str, str]],
+    catalog_path: Path | None = None,
+) -> None:
+    """Store a continuous symbol's contract mapping: ``(first date, end date, raw symbol)``.
+
+    Dates are ISO days, the end exclusive (Databento's symbology convention).
+    The file sits beside the catalog's ``data/`` tree and is replaced whole.
+    """
+    path = _symbology_path(symbol, venue, catalog_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"d0": d0, "d1": d1, "raw_symbol": raw} for d0, d1, raw in spans]
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rows, indent=1))
+    tmp.replace(path)
+
+
+def read_symbology(
+    symbol: str, venue: str, catalog_path: Path | None = None
+) -> list[tuple[str, str, str]]:
+    """The mapping stored by :func:`write_symbology`.
+
+    Raises:
+        FileNotFoundError: If it was never synced.
+    """
+    path = _symbology_path(symbol, venue, catalog_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No contract mapping for {symbol}.{venue}: run `algo data sync` on a config "
+            "listing it (the mapping is a free Databento symbology lookup)."
+        )
+    return [(r["d0"], r["d1"], r["raw_symbol"]) for r in json.loads(path.read_text())]
 
 
 def write_instruments(catalog: ParquetDataCatalog, instruments: Sequence[object]) -> None:
