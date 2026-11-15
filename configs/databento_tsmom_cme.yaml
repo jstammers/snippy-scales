@@ -1,0 +1,111 @@
+# ---------------------------------------------------------------------------
+# Databento sync: CME Globex futures, 2010 onward
+# ---------------------------------------------------------------------------
+# Front (.c.0) and second (.c.1) calendar-roll continuous series, daily bars,
+# for the multi-asset time-series momentum replication
+# (docs/research/tsmom_replication.md). Each bar carries the instrument_id of
+# the contract it came from, so the pair gives exact roll ratios without paying
+# for parent (.FUT) chains, whose spreads/strips cost ~50x more.
+#
+#   algo data sync configs/databento_tsmom_cme.yaml --dry-run
+#   algo data sync configs/databento_tsmom_cme.yaml
+# ---------------------------------------------------------------------------
+
+dataset: "GLBX.MDP3"
+schemas: ["1d"]
+start: "2010-06-06"
+stype_in: "continuous"
+
+asset_classes:
+  equity_index:
+    symbols:
+      - ES.c.0    # E-mini S&P 500
+      - ES.c.1
+      - NQ.c.0    # E-mini Nasdaq-100
+      - NQ.c.1
+      - YM.c.0    # E-mini Dow
+      - YM.c.1
+      - RTY.c.0   # E-mini Russell 2000
+      - RTY.c.1
+      - NKD.c.0   # Nikkei 225 (USD)
+      - NKD.c.1
+      - EMD.c.0   # E-mini S&P MidCap 400
+      - EMD.c.1
+  rates:
+    symbols:
+      - ZT.c.0    # 2-Year T-Note
+      - ZT.c.1
+      - ZF.c.0    # 5-Year T-Note
+      - ZF.c.1
+      - ZN.c.0    # 10-Year T-Note
+      - ZN.c.1
+      - TN.c.0    # Ultra 10-Year T-Note
+      - TN.c.1
+      - ZB.c.0    # 30-Year T-Bond
+      - ZB.c.1
+      - UB.c.0    # Ultra T-Bond
+      - UB.c.1
+      - GE.c.0    # Eurodollar (delisted 2023)
+      - GE.c.1
+      - SR3.c.0   # 3-Month SOFR (from 2018)
+      - SR3.c.1
+  fx:
+    symbols:
+      - 6A.c.0    # AUD/USD
+      - 6A.c.1
+      - 6B.c.0    # GBP/USD
+      - 6B.c.1
+      - 6C.c.0    # CAD/USD
+      - 6C.c.1
+      - 6E.c.0    # EUR/USD
+      - 6E.c.1
+      - 6J.c.0    # JPY/USD
+      - 6J.c.1
+      - 6S.c.0    # CHF/USD
+      - 6S.c.1
+      - 6N.c.0    # NZD/USD
+      - 6N.c.1
+      - 6M.c.0    # MXN/USD
+      - 6M.c.1
+  energy:
+    symbols:
+      - CL.c.0    # WTI crude
+      - CL.c.1
+      - HO.c.0    # Heating oil
+      - HO.c.1
+      - RB.c.0    # RBOB gasoline
+      - RB.c.1
+      - NG.c.0    # Natural gas
+      - NG.c.1
+  metals:
+    symbols:
+      - GC.c.0    # Gold
+      - GC.c.1
+      - SI.c.0    # Silver
+      - SI.c.1
+      - HG.c.0    # Copper
+      - HG.c.1
+      - PL.c.0    # Platinum
+      - PL.c.1
+      - PA.c.0    # Palladium
+      - PA.c.1
+  agriculture:
+    symbols:
+      - ZC.c.0    # Corn
+      - ZC.c.1
+      - ZS.c.0    # Soybeans
+      - ZS.c.1
+      - ZW.c.0    # Chicago wheat
+      - ZW.c.1
+      - KE.c.0    # KC HRW wheat
+      - KE.c.1
+      - ZL.c.0    # Soybean oil
+      - ZL.c.1
+      - ZM.c.0    # Soybean meal
+      - ZM.c.1
+      - LE.c.0    # Live cattle
+      - LE.c.1
+      - HE.c.0    # Lean hogs
+      - HE.c.1
+      - GF.c.0    # Feeder cattle
+      - GF.c.1

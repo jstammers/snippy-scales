@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Databento sync: ICE Futures Europe commodities, Dec 2018 onward
+# ---------------------------------------------------------------------------
+# Front (.c.0) and second (.c.1) calendar-roll continuous series, daily bars,
+# for the multi-asset time-series momentum replication
+# (docs/research/tsmom_replication.md). Each bar carries the instrument_id of
+# the contract it came from, so the pair gives exact roll ratios without paying
+# for parent (.FUT) chains, whose spreads/strips cost ~50x more.
+#
+#   algo data sync configs/databento_tsmom_ifeu.yaml --dry-run
+#   algo data sync configs/databento_tsmom_ifeu.yaml
+# ---------------------------------------------------------------------------
+
+dataset: "IFEU.IMPACT"
+schemas: ["1d"]
+start: "2018-12-23"
+stype_in: "continuous"
+
+asset_classes:
+  energy:
+    symbols:
+      - BRN.c.0   # Brent crude
+      - BRN.c.1
+      - G.c.0     # Low sulphur gasoil
+      - G.c.1
+      - T.c.0     # WTI crude (ICE)
+      - T.c.1
+  softs:
+    symbols:
+      - C.c.0     # London cocoa
+      - C.c.1
+      - RC.c.0    # Robusta coffee
+      - RC.c.1
+      - W.c.0     # White sugar
+      - W.c.1

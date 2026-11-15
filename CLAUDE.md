@@ -215,6 +215,16 @@ Futures: `-s ES.FUT` / `load_market_data("ES.FUT", roll=RollRule("volume"))` tra
 outrights through a `RollSchedule`; signals use a backward-**ratio**-adjusted splice, so
 strategies on rolled symbols must be scale-invariant (returns, vol, MA signs).
 `ES.c.0` (Databento continuous) is unadjusted and untradable — prefer `ES.FUT`.
+`ES.ROLL` is the cheap alternative: real contracts recovered from `ES.c.0` + `ES.c.1` bars
+and the contract mapping `algo data sync` stores in `data/catalog/symbology/` (free),
+rolled 5 trading days before the front switches (`futures.calendar_roll`); weekend bars
+are dropped, and so are one-day price-scale errors (`futures.drop_scale_glitches`). It
+needs both continuous series synced, and a front month that trades nearly every day
+(PL, PA, 6M, TN, ICE WTI/Gilt/US softs fail); a series starts at the first contract
+whose roll can be priced. `BRN.IFEU.ROLL` names the venue; loaded with `venue="GLBX"`
+its contracts are re-listed on GLBX (`IFEU_<raw>.GLBX`) so one USD account trades CME
+and ICE together, and non-USD contracts are converted settlement-by-settlement at the
+CME FX future's rate (`futures.to_usd`, `6B.c.0` for GBP: sync it).
 
 Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.

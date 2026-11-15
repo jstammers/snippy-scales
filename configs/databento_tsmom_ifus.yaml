@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Databento sync: ICE Futures US, Dec 2018 onward
+# ---------------------------------------------------------------------------
+# Front (.c.0) and second (.c.1) calendar-roll continuous series, daily bars,
+# for the multi-asset time-series momentum replication
+# (docs/research/tsmom_replication.md). Each bar carries the instrument_id of
+# the contract it came from, so the pair gives exact roll ratios without paying
+# for parent (.FUT) chains, whose spreads/strips cost ~50x more.
+#
+#   algo data sync configs/databento_tsmom_ifus.yaml --dry-run
+#   algo data sync configs/databento_tsmom_ifus.yaml
+# ---------------------------------------------------------------------------
+
+dataset: "IFUS.IMPACT"
+schemas: ["1d"]
+start: "2018-12-23"
+stype_in: "continuous"
+
+asset_classes:
+  softs:
+    symbols:
+      - SB.c.0    # Sugar No. 11
+      - SB.c.1
+      - KC.c.0    # Coffee C
+      - KC.c.1
+      - CC.c.0    # Cocoa
+      - CC.c.1
+      - CT.c.0    # Cotton No. 2
+      - CT.c.1
+  fx:
+    symbols:
+      - DX.c.0    # US Dollar Index
+      - DX.c.1
+  equity_index:
+    symbols:
+      - MME.c.0   # MSCI Emerging Markets
+      - MME.c.1
+      - MFS.c.0   # MSCI EAFE
+      - MFS.c.1
