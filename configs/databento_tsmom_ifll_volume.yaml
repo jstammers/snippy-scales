@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Databento sync: ICE Long Gilt, volume-roll series, Dec 2018 onward
+# ---------------------------------------------------------------------------
+# The two most traded Long Gilt contracts (.v.0, .v.1): the calendar front month
+# (databento_tsmom_ifll.yaml) is too sparse to price rolls. Loads as
+# `R.IFLL.VROLL` (GBP: converted at the CME GBP/USD future, sync 6B.c.0).
+#
+#   algo data sync configs/databento_tsmom_ifll_volume.yaml --dry-run
+# ---------------------------------------------------------------------------
+
+dataset: "IFLL.IMPACT"
+schemas: ["1d"]
+start: "2018-12-23"
+stype_in: "continuous"
+
+asset_classes:
+  rates:
+    symbols:
+      - R.v.0     # Long Gilt
+      - R.v.1

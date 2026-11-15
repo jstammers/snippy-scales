@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Databento sync: ICE Futures US softs, volume-roll series, Dec 2018 onward
+# ---------------------------------------------------------------------------
+# The two most traded contracts (.v.0, .v.1) of the ICE US softs. Their calendar
+# front month (.c.0, in databento_tsmom_ifus.yaml) trades on under 10% of days,
+# too few to price rolls, so `<ROOT>.IFUS.ROLL` fails for them. The volume
+# series load as `<ROOT>.IFUS.VROLL`.
+#
+#   algo data sync configs/databento_tsmom_ifus_volume.yaml --dry-run
+#   algo data sync configs/databento_tsmom_ifus_volume.yaml
+# ---------------------------------------------------------------------------
+
+dataset: "IFUS.IMPACT"
+schemas: ["1d"]
+start: "2018-12-23"
+stype_in: "continuous"
+
+asset_classes:
+  softs:
+    symbols:
+      - SB.v.0    # Sugar No. 11
+      - SB.v.1
+      - KC.v.0    # Coffee C
+      - KC.v.1
+      - CC.v.0    # Cocoa
+      - CC.v.1
+      - CT.v.0    # Cotton No. 2
+      - CT.v.1

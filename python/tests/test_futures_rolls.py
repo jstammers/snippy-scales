@@ -614,7 +614,8 @@ def test_calendar_roll_skips_closes_where_either_contract_did_not_trade() -> Non
         ("CLZ9", "CLF0", 1),  # one-digit years wrap at the decade
         ("BRN FMG0019!", "BRN FMH0019!", 1),
         ("Z   FMZ0026!", "Z   FMH0027!", 3),
-        ("ESH7", "ESZ6", 117),  # the far contract is taken to deliver later (next decade)
+        ("FGBL SI 20260908 PS", "FGBL SI 20261208 PS", 3),
+        ("ESH7", "ESZ6", None),  # a wrapped year digit: the far contract delivers first
         ("ESZ6", "ESZ6", None),
         ("ESZ6", "BRN FMG0019!", None),
         ("AAPL", "ESZ6", None),
@@ -674,3 +675,39 @@ def test_rolled_symbol_frame_has_carry(tmp_path: Path) -> None:
     frame = load_market_data("ES.ROLL", catalog_path=tmp_path).frames["ES.ROLL"]
     assert "carry" in frame.columns
     assert frame["carry"].drop_nulls().len() > frame.height // 2
+
+
+def test_volume_rolled_symbols_name_the_volume_series() -> None:
+    assert futures.is_rolled("SB.IFUS.VROLL") and futures.is_rolled("ES.ROLL")
+    assert not futures.is_rolled("ES.c.0")
+    assert futures.rolled_rule("SB.IFUS.VROLL") == "v" and futures.rolled_rule("ES.ROLL") == "c"
+    assert futures.rolled_root("SB.IFUS.VROLL") == "SB"
+    assert futures.rolled_venue("SB.IFUS.VROLL") == "IFUS"
+    assert futures.rolled_venue("SB.VROLL") is None
+
+
+def test_repair_prices_fixes_zero_lows_and_drops_zero_closes() -> None:
+    frame = pl.DataFrame(
+        {
+            "open": [10.0, 0.0, 10.0],
+            "high": [11.0, 9.0, 11.0],
+            "low": [0.0, 0.0, 9.0],
+            "close": [10.5, 9.5, 0.0],
+            "volume": [1.0, 1.0, 1.0],
+        }
+    )
+    out = futures.repair_prices(frame)
+    assert out.height == 2  # the zero close is dropped
+    assert out["low"].to_list() == [10.0, 9.5]  # the lower of open and close
+    assert out["open"].to_list() == [10.0, 9.5]  # a zero open becomes the close
+    assert out["high"].to_list() == [11.0, 9.5]
+
+
+def test_forward_only_confirms_switches_and_never_goes_back() -> None:
+    h, k, n = "SB  FMH0025!_2024", "SB  FMK0025!_2024", "SB  FMN0025!_2025"
+    #        a far contract for one day, a flip back, then a confirmed switch
+    seen = [h, n, h, k, h, k, k, k, h, k]
+    assert futures._forward_only(seen, confirm=3) == [h, h, h, h, h, h, h, k, k, k]  # noqa: SLF001
+    assert futures._forward_only([], confirm=3) == []  # noqa: SLF001
+    # One-digit CME years are completed from the listing year (Z9 then F0: a decade on).
+    assert futures._delivery("CLF0_2019") > futures._delivery("CLZ9_2019")  # noqa: SLF001

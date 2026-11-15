@@ -186,15 +186,16 @@ def load_universe(cfg: ReportConfig, catalog_path: Path | None = None) -> Market
     d = cfg.data
     series = cat.list_bar_series(d.schema_, catalog_path)
     available = {s for s, v in series if d.venue is None or v == d.venue}
-    # A rolled symbol (ES.ROLL, or BRN.IFEU.ROLL on any venue) is available when both
-    # of its continuous series are.
+    # A rolled symbol (ES.ROLL, BRN.IFEU.ROLL on any venue, or SB.IFUS.VROLL from the
+    # volume series) is available when both of its continuous series are.
     pairs = set(series)
-    for s, v in pairs:
-        root = s.removesuffix(".c.0")
-        if s.endswith(".c.0") and (f"{root}.c.1", v) in pairs:
-            available.add(f"{root}.{v}.ROLL")
-            if d.venue is None or v == d.venue:
-                available.add(f"{root}.ROLL")
+    for suffix, rule in futures.ROLL_RULES.items():
+        for s, v in pairs:
+            root = s.removesuffix(f".{rule}.0")
+            if s.endswith(f".{rule}.0") and (f"{root}.{rule}.1", v) in pairs:
+                available.add(f"{root}.{v}{suffix}")
+                if d.venue is None or v == d.venue:
+                    available.add(f"{root}{suffix}")
     symbols = d.resolve_symbols(available)
     if not symbols:
         raise FileNotFoundError(f"none of the configured symbols has {d.schema_} bars")

@@ -43,14 +43,23 @@ from snippy_scales.strategies.momentum_cs import MultiAssetStrategy
 
 #: Asset class of each futures root, the peer group of the relative carry signal.
 ASSET_CLASSES: dict[str, str] = {
-    **dict.fromkeys(("ES", "NQ", "YM", "RTY", "NKD", "EMD", "Z", "MME", "MFS"), "equity"),
-    **dict.fromkeys(("ZT", "ZF", "ZN", "ZB", "UB", "TN"), "bond"),
+    **dict.fromkeys(
+        ("ES", "NQ", "YM", "RTY", "NKD", "EMD", "Z", "MME", "MFS", "FESX", "FDAX"), "equity"
+    ),
+    **dict.fromkeys(
+        ("ZT", "ZF", "ZN", "ZB", "UB", "TN", "R", "FGBS", "FGBM", "FGBL", "FGBX"), "bond"
+    ),
     **dict.fromkeys(("6A", "6B", "6C", "6E", "6J", "6S", "6N", "6M"), "fx"),
     **dict.fromkeys(("CL", "HO", "RB", "NG", "BRN", "G"), "energy"),
     **dict.fromkeys(("GC", "SI", "HG", "PL", "PA"), "metal"),
     **dict.fromkeys(
-        ("ZC", "ZS", "ZW", "KE", "ZL", "ZM", "LE", "HE", "GF", "C", "RC", "W"), "agriculture"
+        (
+            *("ZC", "ZS", "ZW", "KE", "ZL", "ZM", "LE", "HE", "GF"),
+            *("C", "RC", "W", "SB", "KC", "CC", "CT"),
+        ),
+        "agriculture",
     ),
+    "VX": "volatility",
 }
 
 _MIN_GROUP = 2  # a relative signal needs a peer

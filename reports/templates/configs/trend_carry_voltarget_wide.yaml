@@ -1,0 +1,106 @@
+# The lead futures configuration (tranched trend, 10% portfolio volatility target) on
+# 47 futures: the 42 of `trend_carry_voltarget_global.yaml` plus ICE sugar, coffee,
+# cocoa, cotton and the Long Gilt, loaded from their volume-roll series.
+#   algo data sync configs/databento_tsmom_ifus_volume.yaml
+#   algo data sync configs/databento_tsmom_ifll_volume.yaml
+#   algo report new trend-carry-voltarget-wide --from reports/templates/configs/trend_carry_voltarget_wide.yaml
+#   algo report build trend-carry-voltarget-wide
+name: trend-carry-voltarget-wide
+title: Trend with a portfolio volatility target on 47 CME and ICE futures
+strategy: trend-carry
+question: >-
+  Does adding ICE sugar, coffee, cocoa, cotton and the Long Gilt to the 42 CME and ICE
+  futures raise the out-of-sample Sharpe ratio of tranched trend with a 10% portfolio
+  volatility target, with and without carry?
+data:
+  symbols:
+    # Equity indices
+    - ES.ROLL
+    - NQ.ROLL
+    - YM.ROLL
+    - RTY.ROLL
+    - NKD.ROLL
+    - EMD.ROLL
+    # Government bonds
+    - ZT.ROLL
+    - ZF.ROLL
+    - ZN.ROLL
+    - ZB.ROLL
+    - UB.ROLL
+    # Currencies
+    - 6A.ROLL
+    - 6B.ROLL
+    - 6C.ROLL
+    - 6E.ROLL
+    - 6J.ROLL
+    - 6S.ROLL
+    - 6N.ROLL
+    # Energy
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    # Metals
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    # Agriculture and livestock
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+    # ICE Futures Europe (USD, except London cocoa in GBP)
+    - BRN.IFEU.ROLL    # Brent crude
+    - G.IFEU.ROLL      # Low sulphur gasoil
+    - C.IFEU.ROLL      # London cocoa (GBP)
+    - RC.IFEU.ROLL     # Robusta coffee
+    - W.IFEU.ROLL      # White sugar
+    # ICE Futures Europe financials (GBP)
+    - Z.IFLL.ROLL      # FTSE 100
+    # ICE Futures US equity indices (USD, from mid-2020)
+    - MME.IFUS.ROLL    # MSCI Emerging Markets
+    - MFS.IFUS.ROLL    # MSCI EAFE
+    # ICE US softs and Long Gilt, on the volume roll (their calendar front month is too
+    # sparse): configs/databento_tsmom_ifus_volume.yaml, databento_tsmom_ifll_volume.yaml
+    - SB.IFUS.VROLL    # Sugar No. 11
+    - KC.IFUS.VROLL    # Coffee C
+    - CC.IFUS.VROLL    # Cocoa
+    - CT.IFUS.VROLL    # Cotton No. 2
+    - R.IFLL.VROLL     # Long Gilt (GBP)
+  venue: GLBX
+  schema: ohlcv-1d
+  start: "2019-01-01"           # ICE data begins Dec 2018; earlier CME bars warm up
+  benchmark: ES.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 x 15% of ~2,050 weekday closes: OOS from ~2021
+  min_train: 252
+  # Large capital so whole-contract rounding is negligible at 1/42 weight per root.
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0   # ~exchange + broker fees per contract per side
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0                 # bond legs run at 10-25x their 1/N capital
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    lookback: [189, 252]
+    carry_weight: [0.0, 0.5]
+    portfolio_vol_target: [0.10]        # compare with trend-carry-voltarget-global
+    carry_smooth: [252]
+    vol_target: [0.40]
+    vol_lookback: [63]
+    max_leverage: [50.0]
+    rebal_freq: [21]
+    cov_lookback: [126]
+    max_portfolio_scale: [2.0]
+validation:
+  top_k: 4

@@ -274,22 +274,41 @@ def back_adjust(
     return out.with_columns(pl.lit(symbol or schedule.symbol).alias("symbol"))
 
 
-def is_rolled(symbol: str) -> bool:
-    """Whether *symbol* is a front-month roll stitched from ``.c.0``/``.c.1`` (``ES.ROLL``).
+#: Suffix of a rolled symbol -> the Databento continuous rule its bars come from.
+ROLL_RULES = {".ROLL": "c", ".VROLL": "v"}
 
-    ``<ROOT>.<VENUE>.ROLL`` (``BRN.IFEU.ROLL``) names the venue the bars come from.
+
+def is_rolled(symbol: str) -> bool:
+    """Whether *symbol* is a roll stitched from a continuous pair (``ES.ROLL``, ``SB.VROLL``).
+
+    ``ES.ROLL`` uses the calendar series ``ES.c.0``/``ES.c.1``; ``SB.VROLL`` the
+    volume series ``SB.v.0``/``SB.v.1`` (the two most traded contracts), for roots
+    whose calendar front month rarely trades. ``<ROOT>.<VENUE>.ROLL``
+    (``BRN.IFEU.ROLL``) names the venue the bars come from.
     """
-    return symbol.endswith(".ROLL")
+    return symbol.endswith(tuple(ROLL_RULES))
+
+
+def _roll_stem(symbol: str) -> str:
+    for suffix in ROLL_RULES:
+        if symbol.endswith(suffix):
+            return symbol.removesuffix(suffix)
+    raise ValueError(f"{symbol} is not a rolled symbol")
+
+
+def rolled_rule(symbol: str) -> str:
+    """The continuous rule of a rolled symbol: ``ES.ROLL`` -> ``c``; ``SB.VROLL`` -> ``v``."""
+    return next(rule for suffix, rule in ROLL_RULES.items() if symbol.endswith(suffix))
 
 
 def rolled_root(symbol: str) -> str:
     """``ES.ROLL`` -> ``ES``; ``BRN.IFEU.ROLL`` -> ``BRN``."""
-    return symbol.removesuffix(".ROLL").split(".")[0]
+    return _roll_stem(symbol).split(".")[0]
 
 
 def rolled_venue(symbol: str) -> str | None:
     """``BRN.IFEU.ROLL`` -> ``IFEU``; ``None`` if *symbol* names no venue (``ES.ROLL``)."""
-    parts = symbol.removesuffix(".ROLL").split(".")
+    parts = _roll_stem(symbol).split(".")
     return parts[1] if len(parts) > 1 else None
 
 
@@ -309,6 +328,24 @@ def drop_scale_glitches(frame: pl.DataFrame, factor: float = 3.0) -> pl.DataFram
         | ((up > 0) & (up < 1 / factor) & (down > 0) & (down < 1 / factor))
     )
     return frame.sort("ts_init").filter(~glitch.fill_null(value=False))
+
+
+def repair_prices(frame: pl.DataFrame) -> pl.DataFrame:
+    """Drop bars without a positive close and repair non-positive opens and lows.
+
+    ICE's daily bars sometimes carry a low (less often an open) of zero on a day
+    with normal trading. A zero close can't be traded or used in a return, so the
+    bar is dropped; a zero open becomes the close and a zero low the lower of open
+    and close, the tightest range consistent with the prices that are known.
+    """
+    out = frame.filter(pl.col("close") > 0).with_columns(
+        open=pl.when(pl.col("open") > 0).then(pl.col("open")).otherwise(pl.col("close"))
+    )
+    floor = pl.min_horizontal("open", "close")
+    return out.with_columns(
+        low=pl.when(pl.col("low") > 0).then(pl.col("low")).otherwise(floor),
+        high=pl.max_horizontal("high", "open", "close"),
+    )
 
 
 #: CME FX futures (``<root>.c.0`` on GLBX) quoted in USD per unit of each currency.
@@ -405,15 +442,23 @@ _CME_MONTH = re.compile(rf"([{MONTH_CODES}])(\d{{1,2}})$")  # ESZ6, CLF27
 _ICE_MONTH = re.compile(rf"FM([{MONTH_CODES}])00(\d{{2}})!$")  # "BRN FMG0019!"
 
 
+_EUREX_MONTH = re.compile(r"\s(20\d{2})(0[1-9]|1[0-2])\d{2}\s")  # "FGBL SI 20260908 PS"
+_MAX_MONTHS_APART = 60
+
+
 def contract_month(raw: str) -> tuple[int, int, int] | None:
     """Delivery month of a raw contract symbol: ``(month 1-12, year, year modulus)``.
 
     The year is as written in the symbol: one digit on CME (``ESZ6``, modulus 10),
-    two on ICE (``BRN FMG0019!``, modulus 100). ``None`` if the symbol has neither form.
+    two on ICE (``BRN FMG0019!``, modulus 100), four on Eurex (``FGBL SI 20260908
+    PS``, modulus 10000). ``None`` if the symbol has none of these forms.
     """
     match = _ICE_MONTH.search(raw)
     if match is not None:
         return MONTH_CODES.index(match.group(1)) + 1, int(match.group(2)), 100
+    match = _EUREX_MONTH.search(raw)
+    if match is not None:
+        return int(match.group(2)), int(match.group(1)), 10000
     match = _CME_MONTH.search(raw)
     if match is None:
         return None
@@ -423,13 +468,16 @@ def contract_month(raw: str) -> tuple[int, int, int] | None:
 def months_between(near: str, far: str) -> int | None:
     """Whole months from the delivery month of *near* to that of *far* (raw symbols).
 
-    ``None`` if either symbol can't be parsed or *far* does not deliver later.
+    ``None`` if either symbol can't be parsed or *far* does not deliver later (or
+    only more than five years later, which a wrapped year digit looks like).
     """
     a, b = contract_month(near), contract_month(far)
     if a is None or b is None or a[2] != b[2]:
         return None
     months = ((b[1] - a[1]) % a[2]) * 12 + b[0] - a[0]
-    return months if months > 0 else None
+    # A gap of years means *far* delivers before *near* and the year wrapped (the
+    # second most traded contract of a volume series can be the nearer one).
+    return months if 0 < months <= _MAX_MONTHS_APART else None
 
 
 def roll_yield(
@@ -520,6 +568,42 @@ def _unique_contracts(
     ]
 
 
+def _delivery(name: str) -> int:
+    """Sortable delivery month of a contract named by :func:`_unique_contracts`."""
+    raw, _, listed = name.rpartition("_")
+    month = contract_month(raw)
+    if month is None:
+        raise ValueError(f"can't read a delivery month from {raw!r}")
+    year = month[1]
+    if month[2] == 10:  # noqa: PLR2004 — a one-digit year: complete it from the listing year
+        year = int(listed) // month[2] * month[2] + month[1]
+        year += month[2] if year < int(listed) else 0
+    return year * 12 + month[0]
+
+
+def _forward_only(sequence: Sequence[str], confirm: int) -> list[str]:
+    """*sequence* with every switch delayed until confirmed, and none going back.
+
+    The held contract changes to a later-delivering one only once the sequence has
+    shown that contract *confirm* times in a row.
+    """
+    if not sequence:
+        return []
+    out: list[str] = []
+    held, run = sequence[0], 0
+    candidate: str | None = None
+    for name in sequence:
+        if name != held and _delivery(name) > _delivery(held):
+            run = run + 1 if name == candidate else 1
+            candidate = name
+            if run >= confirm:
+                held, candidate, run = name, None, 0
+        else:
+            candidate, run = None, 0
+        out.append(held)
+    return out
+
+
 def calendar_roll(
     symbol: str,
     front: pl.DataFrame,
@@ -529,8 +613,16 @@ def calendar_roll(
     venue: str,
     *,
     days_before: int = 5,
+    forward_only: bool = False,
+    confirm: int = 3,
 ) -> tuple[dict[str, pl.DataFrame], RollSchedule]:
     """Split front/second-month continuous bars into contracts and schedule the rolls.
+
+    With *forward_only* (for volume series, ``SB.v.0``/``SB.v.1``) the front series
+    is first made monotone: the most traded contract flips back and forth around a
+    crossover and can jump to a far contract for a day, so a switch counts only once
+    the series has shown the same later-delivering contract for *confirm* bars in a
+    row, and a switch to an earlier-delivering contract never counts.
 
     Databento's calendar continuous series (``ES.c.0``, ``ES.c.1``) switch
     contract at expiry; *front_spans* / *second_spans* say which contract each
@@ -574,9 +666,10 @@ def calendar_roll(
     front_tagged = _tag_contracts(front, front_spans).sort("ts_init")
     order: list[str] = []
     switch: dict[str, int] = {}
-    for raw, ts in zip(
-        front_tagged["contract"].to_list(), _ts_ns(front_tagged).tolist(), strict=True
-    ):
+    sequence = front_tagged["contract"].to_list()
+    if forward_only:
+        sequence = _forward_only(sequence, confirm)
+    for raw, ts in zip(sequence, _ts_ns(front_tagged).tolist(), strict=True):
         if raw not in switch:  # never roll back to a contract already held
             order.append(raw)
             switch[raw] = ts
