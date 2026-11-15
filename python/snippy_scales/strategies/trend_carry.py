@@ -111,6 +111,11 @@ class TrendCarry(MultiAssetStrategy):
             target.
         groups: ``symbol -> peer group`` for the relative carry signal. Defaults to
             the asset class of each futures root (:func:`asset_class`).
+        long_only: Peer groups (asset classes by default) whose trend signal is
+            long-or-flat, comma-separated (``"equity"``, ``"equity,bond"``): a negative
+            trend holds no position instead of a short one. Assets that pay a risk
+            premium tend to lose on the short side of a trend rule. Empty (default)
+            trades every group both ways. The carry signal is not affected.
         portfolio_vol_target: Annualised volatility the whole book is scaled to,
             assuming capital is split equally over the symbols (the engines'
             default). ``0`` (default) leaves the book unscaled.
@@ -136,6 +141,7 @@ class TrendCarry(MultiAssetStrategy):
         max_leverage: float = 50.0,
         rebal_freq: int = 21,
         groups: dict[str, str] | None = None,
+        long_only: str = "",
         portfolio_vol_target: float = 0.0,
         cov_lookback: int = 126,
         max_portfolio_scale: float = 2.0,
@@ -172,6 +178,7 @@ class TrendCarry(MultiAssetStrategy):
         self.max_leverage = max_leverage
         self.rebal_freq = rebal_freq
         self.groups = groups
+        self.long_only = long_only
         self.portfolio_vol_target = portfolio_vol_target
         self.cov_lookback = cov_lookback
         self.max_portfolio_scale = max_portfolio_scale
@@ -198,7 +205,13 @@ class TrendCarry(MultiAssetStrategy):
 
         close = self._matrix(multi_bars, "close")
         listed = np.isfinite(close)
-        signal = (1.0 - self.carry_weight) * self._trend(close)
+        trend = self._trend(close)
+        flat_shorts = {g.strip() for g in self.long_only.split(",") if g.strip()}
+        if flat_shorts:
+            groups = self.groups or {}
+            held_long = np.array([groups.get(s, asset_class(s)) in flat_shorts for s in symbols])
+            trend = np.where(held_long[None, :], np.maximum(trend, 0.0), trend)
+        signal = (1.0 - self.carry_weight) * trend
         if self.carry_weight > 0.0:
             carry = self._matrix(multi_bars, "carry")
             signal = signal + self.carry_weight * self._relative_carry(carry, listed, symbols)

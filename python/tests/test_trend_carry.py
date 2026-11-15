@@ -170,6 +170,27 @@ def test_portfolio_vol_target_sets_the_books_ex_ante_volatility() -> None:
         np.testing.assert_allclose(scaled[symbol][:30].to_numpy(), plain[symbol][:30].to_numpy())
 
 
+def test_long_only_groups_hold_no_shorts() -> None:
+    bars = {
+        "ES.ROLL": _bars(0, drift=-0.004, carry=False),  # equity, falling
+        "NQ.ROLL": _bars(1, drift=0.004, carry=False),  # equity, rising
+        "CL.ROLL": _bars(2, drift=-0.004, carry=False),  # energy, falling
+    }
+    both = _fast(carry_weight=0.0).generate_signals(bars)
+    flat = _fast(carry_weight=0.0, long_only="equity").generate_signals(bars)
+    assert both["ES.ROLL"][-1] < 0
+    assert np.all(flat["ES.ROLL"].to_numpy() >= 0.0) and flat["ES.ROLL"][-1] == 0.0
+    np.testing.assert_allclose(flat["NQ.ROLL"].to_numpy(), both["NQ.ROLL"].to_numpy())
+    np.testing.assert_allclose(flat["CL.ROLL"].to_numpy(), both["CL.ROLL"].to_numpy())
+    # Several groups, and custom groups, are honoured.
+    many = _fast(carry_weight=0.0, long_only="equity, energy").generate_signals(bars)
+    assert many["CL.ROLL"][-1] == 0.0
+    custom = _fast(carry_weight=0.0, long_only="mine", groups={"CL.ROLL": "mine"}).generate_signals(
+        bars
+    )
+    assert custom["CL.ROLL"][-1] == 0.0 and custom["ES.ROLL"][-1] < 0
+
+
 def test_portfolio_scale_is_capped() -> None:
     bars = _universe()
     plain = _fast(carry_weight=0.0).generate_signals(bars)

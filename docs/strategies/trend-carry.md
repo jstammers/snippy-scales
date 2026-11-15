@@ -58,6 +58,16 @@ it falls on, and for slow signals on a few dozen instruments that choice alone c
 move a decade's Sharpe ratio by several tenths. Tranching earns the average over
 the possible rebalance days and removes the luck.
 
+## Long-or-flat groups
+
+`long_only` names asset classes whose trend signal is clipped at zero: a negative
+trend holds no position instead of a short one. Equity indices and bonds pay a risk
+premium for being held, so a short position gives that premium up, and equity
+sell-offs tend to reverse faster than a slow trend signal can follow. The carry signal
+is unchanged. With `long_only = "equity"` the strategy is long equities in an uptrend
+and out of them in a downtrend, while still trading currencies and commodities both
+ways.
+
 ## Portfolio volatility target
 
 Sizing each position to 40% volatility fixes every position's risk but not the
@@ -89,6 +99,7 @@ scale, so the mix of positions is unchanged.
 | `max_leverage` | 50 | Cap on `vol_target / volatility` |
 | `rebal_freq` | 21 | Holding period $H$ in bars (number of tranches) |
 | `groups` | asset class | Peer group of each symbol for the carry signal |
+| `long_only` | "" | Asset classes traded long-or-flat, comma-separated |
 | `portfolio_vol_target` | 0 (off) | Annualised volatility the whole book is scaled to |
 | `cov_lookback` | 126 | Bars of returns behind the book's ex-ante volatility |
 | `max_portfolio_scale` | 2 | Cap on the book-level scale $k_{\max}$ |
