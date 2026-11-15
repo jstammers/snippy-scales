@@ -180,6 +180,52 @@ class TestBars:
         # ts_event normalised back to the bar open.
         assert (df["ts_init"] - df["ts_event"]).dt.total_nanoseconds().unique().to_list() == [_DAY]
 
+    def test_bars_from_another_venue_are_dropped(
+        self, catalog: ParquetDataCatalog, tmp_path: Path
+    ) -> None:
+        # ICE datasets publish each daily bar twice: from the exchange (IFEU) and
+        # from its off-exchange/block feed (XOFF), often at a different precision.
+        class TwoVenueClient(FakeClient):
+            async def get_range_bars(self, dataset, instrument_ids, *args, **kwargs):
+                bars = await super().get_range_bars(dataset, instrument_ids, *args, **kwargs)
+                off = BarType.from_str(f"{instrument_ids[0].symbol}.XOFF-1-DAY-LAST-EXTERNAL")
+                px = Price(4500, 0)
+                return [
+                    *bars,
+                    *(
+                        Bar(off, px, px, px, px, Quantity(1, 0), b.ts_event, b.ts_init)
+                        for b in bars
+                    ),
+                ]
+
+        sync = _sync(catalog, TwoVenueClient())
+        assert sync.sync("ES.c.0", "ohlcv-1d", _T0, _T0 + 5 * _DAY) == 5
+        df = cat.load_bars("ES.c.0", "ohlcv-1d", catalog_path=tmp_path / "catalog")
+        assert df.height == df["ts_init"].n_unique() == 5
+        assert df["close"].to_list()[0] == 4500.0
+        assert df["volume"].to_list() == [10.0] * 5
+
+    def test_bars_with_undefined_prices_are_dropped(
+        self, catalog: ParquetDataCatalog, tmp_path: Path
+    ) -> None:
+        # Databento sends a bar with every price undefined (Nautilus raw i128::MAX,
+        # precision 0) for an ICE session with no trades (BRN.c.0, 2019-12-30).
+        class UndefinedPriceClient(FakeClient):
+            async def get_range_bars(self, dataset, instrument_ids, *args, **kwargs):
+                bars = await super().get_range_bars(dataset, instrument_ids, *args, **kwargs)
+                b = bars[2]
+                undef = Price.from_raw(2**127 - 1, 0)
+                bars[2] = Bar(
+                    b.bar_type, undef, undef, undef, undef, Quantity(6, 0), b.ts_event, b.ts_init
+                )
+                return bars
+
+        sync = _sync(catalog, UndefinedPriceClient())
+        assert sync.sync("ES.c.0", "ohlcv-1d", _T0, _T0 + 5 * _DAY) == 4
+        df = cat.load_bars("ES.c.0", "ohlcv-1d", catalog_path=tmp_path / "catalog")
+        assert df.height == 4
+        assert all(c < 1e6 for c in df["close"].to_list())
+
     def test_extending_requests_only_head_and_tail(
         self, catalog: ParquetDataCatalog, client: FakeClient, tmp_path: Path
     ) -> None:
@@ -542,3 +588,60 @@ class TestParentSymbols:
         sync = DatabentoSync(catalog, dataset="GLBX.MDP3", client=ParentClient())
         with pytest.raises(ValueError, match="bar schemas only"):
             sync.plan("ES.FUT", "trades", _T0, _T0 + _DAY)
+
+
+class _FakeSymbology:
+    """``databento.Historical().symbology``: continuous -> IDs, IDs -> raw symbols."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def resolve(self, *, symbols: list[str], stype_in: str, stype_out: str, **_: Any) -> dict:
+        self.calls.append((stype_in, stype_out))
+        if stype_in == "continuous":
+            table = {
+                "ES.c.0": [
+                    {"d0": "2024-01-01", "d1": "2024-03-17", "s": "1"},
+                    {"d0": "2024-03-17", "d1": "2024-06-23", "s": "2"},
+                ],
+            }
+        else:  # instrument ID 1 is recycled for another contract later on
+            table = {
+                "1": [
+                    {"d0": "2024-01-01", "d1": "2024-03-20", "s": "ESH4"},
+                    {"d0": "2024-03-20", "d1": "2024-06-23", "s": "NQZ9"},
+                ],
+                "2": [{"d0": "2024-01-01", "d1": "2024-06-23", "s": "ESM4"}],
+            }
+        return {"result": {s: table[s] for s in symbols if s in table}}
+
+
+def test_sync_symbology_maps_continuous_to_contracts_by_date(
+    catalog: ParquetDataCatalog, client: FakeClient, tmp_path: Path
+) -> None:
+    hist = FakeHistorical(end=_T0 + 200 * _DAY)
+    hist.symbology = _FakeSymbology()  # ty: ignore[unresolved-attribute]
+    sync = DatabentoSync(
+        catalog,
+        dataset="GLBX.MDP3",
+        client=client,
+        historical=hist,
+        catalog_path=tmp_path / "catalog",
+    )
+    assert sync.sync_symbology(["ES.c.0", "ES.FUT", "AAPL"], _T0, _T0 + 170 * _DAY) == 1
+    assert cat.read_symbology("ES.c.0", "GLBX", tmp_path / "catalog") == [
+        ("2024-01-01", "2024-03-17", "ESH4"),
+        ("2024-03-17", "2024-06-23", "ESM4"),
+    ]
+    assert hist.symbology.calls == [  # ty: ignore[unresolved-attribute]
+        ("continuous", "instrument_id"),
+        ("instrument_id", "raw_symbol"),
+    ]
+
+
+def test_sync_symbology_offline_or_nothing_continuous(
+    catalog: ParquetDataCatalog, client: FakeClient
+) -> None:
+    sync = DatabentoSync(catalog, dataset="GLBX.MDP3", client=client)
+    assert sync.sync_symbology(["ES.c.0"], _T0, _T0 + _DAY) == 0  # no API key
+    assert sync.sync_symbology(["ES.FUT"], _T0, _T0 + _DAY) == 0

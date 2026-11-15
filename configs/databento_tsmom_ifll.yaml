@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Databento sync: ICE Futures Europe financials, Dec 2018 onward
+# ---------------------------------------------------------------------------
+# Front (.c.0) and second (.c.1) calendar-roll continuous series, daily bars,
+# for the multi-asset time-series momentum replication
+# (docs/research/tsmom_replication.md). Each bar carries the instrument_id of
+# the contract it came from, so the pair gives exact roll ratios without paying
+# for parent (.FUT) chains, whose spreads/strips cost ~50x more.
+#
+#   algo data sync configs/databento_tsmom_ifll.yaml --dry-run
+#   algo data sync configs/databento_tsmom_ifll.yaml
+# ---------------------------------------------------------------------------
+
+dataset: "IFLL.IMPACT"
+schemas: ["1d"]
+start: "2018-12-23"
+stype_in: "continuous"
+
+asset_classes:
+  equity_index:
+    symbols:
+      - Z.c.0     # FTSE 100
+      - Z.c.1
+  rates:
+    symbols:
+      - R.c.0     # Long Gilt
+      - R.c.1
+      - I.c.0     # 3-Month Euribor
+      - I.c.1
+      - SO3.c.0   # 3-Month SONIA
+      - SO3.c.1

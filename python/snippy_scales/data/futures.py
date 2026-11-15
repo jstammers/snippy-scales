@@ -31,6 +31,7 @@ have that property).
 from __future__ import annotations
 
 import bisect
+import datetime as dt
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -270,6 +271,277 @@ def back_adjust(
     ]
     out = pl.concat(adjusted).sort("ts_init")
     return out.with_columns(pl.lit(symbol or schedule.symbol).alias("symbol"))
+
+
+def is_rolled(symbol: str) -> bool:
+    """Whether *symbol* is a front-month roll stitched from ``.c.0``/``.c.1`` (``ES.ROLL``).
+
+    ``<ROOT>.<VENUE>.ROLL`` (``BRN.IFEU.ROLL``) names the venue the bars come from.
+    """
+    return symbol.endswith(".ROLL")
+
+
+def rolled_root(symbol: str) -> str:
+    """``ES.ROLL`` -> ``ES``; ``BRN.IFEU.ROLL`` -> ``BRN``."""
+    return symbol.removesuffix(".ROLL").split(".")[0]
+
+
+def rolled_venue(symbol: str) -> str | None:
+    """``BRN.IFEU.ROLL`` -> ``IFEU``; ``None`` if *symbol* names no venue (``ES.ROLL``)."""
+    parts = symbol.removesuffix(".ROLL").split(".")
+    return parts[1] if len(parts) > 1 else None
+
+
+def drop_scale_glitches(frame: pl.DataFrame, factor: float = 3.0) -> pl.DataFrame:
+    """*frame* without bars whose close is off by a price-scale error.
+
+    A bar is dropped when its close is more than *factor* times, or less than
+    1/*factor* of, both the previous and the next close (positive prices only).
+    A one-day move of that size that reverses the next day is a decimal error in
+    the feed, not a market move: ICE's MSCI futures print a tenth of their price
+    on 2021-08-13 in Databento's data.
+    """
+    close = pl.col("close")
+    up, down = close / close.shift(1), close / close.shift(-1)
+    glitch = (close > 0) & (
+        ((up > factor) & (down > factor))
+        | ((up > 0) & (up < 1 / factor) & (down > 0) & (down < 1 / factor))
+    )
+    return frame.sort("ts_init").filter(~glitch.fill_null(value=False))
+
+
+#: CME FX futures (``<root>.c.0`` on GLBX) quoted in USD per unit of each currency.
+FX_FUTURES = {
+    "AUD": "6A",
+    "GBP": "6B",
+    "CAD": "6C",
+    "EUR": "6E",
+    "JPY": "6J",
+    "NZD": "6N",
+    "CHF": "6S",
+}
+FX_VENUE = "GLBX"
+
+
+def to_usd(frame: pl.DataFrame, fx: pl.DataFrame) -> pl.DataFrame:
+    """One contract's bars, priced in a foreign currency, as a USD-quoted contract.
+
+    A futures position has no notional to convert: it is settled daily, and each
+    day's variation margin, ``(close_t - close_{t-1}) * multiplier``, is paid in the
+    contract's currency. A USD account converts it at that day's rate ``x_t``. The
+    USD price is built so its daily change is exactly that converted settlement:
+
+        usd_t = usd_{t-1} + (close_t - close_{t-1}) * x_t,   usd_0 = close_0 * x_0,
+
+    so holding it for one day earns the local return times ``x_t / x_{t-1}``, not
+    the local return plus the currency's move (which an unhedged notional would).
+    Open, high and low are moved from the previous USD close the same way.
+
+    Args:
+        frame: Bars with ``ts_event`` and OHLC in the contract's currency.
+        fx: ``ts_event``, ``close``: USD per unit of that currency; the last rate
+            on or before each bar's date is used.
+
+    Raises:
+        ValueError: If there is no rate before the first bar, or a USD price is not
+            positive.
+    """
+    rates = (
+        fx.select(
+            pl.col("ts_event").cast(pl.Datetime("ns", "UTC")).dt.date().alias("__date"),
+            pl.col("close").cast(pl.Float64).alias("__x"),
+        )
+        .unique("__date", keep="last")
+        .sort("__date")
+    )
+    dated = frame.sort("ts_event").with_columns(
+        pl.col("ts_event").cast(pl.Datetime("ns", "UTC")).dt.date().alias("__date")
+    )
+    out = dated.join_asof(rates, on="__date", strategy="backward")
+    if out["__x"].null_count():
+        raise ValueError("no FX rate on or before the first bar")
+    prev_local = pl.col("close").shift(1)
+    usd_close = (
+        pl.when(prev_local.is_null())
+        .then(pl.col("close") * pl.col("__x"))
+        .otherwise((pl.col("close") - prev_local) * pl.col("__x"))
+        .cum_sum()
+    )
+    out = out.with_columns(__usd=usd_close).with_columns(
+        [
+            pl.when(prev_local.is_null())
+            .then(pl.col(c) * pl.col("__x"))
+            .otherwise(pl.col("__usd").shift(1) + (pl.col(c) - prev_local) * pl.col("__x"))
+            .alias(c)
+            for c in ("open", "high", "low")
+        ]
+    )
+    out = out.with_columns(close=pl.col("__usd")).drop("__date", "__x", "__usd")
+    if (out.select(pl.min_horizontal("open", "high", "low", "close").min()).item() or 0) <= 0:
+        raise ValueError("a USD price is not positive")
+    return out
+
+
+def _tag_contracts(frame: pl.DataFrame, spans: Sequence[tuple[str, str, str]]) -> pl.DataFrame:
+    """*frame* plus a ``contract`` column from date spans ``(d0, d1 exclusive, raw)``."""
+    if not spans:
+        return frame.head(0).with_columns(contract=pl.lit(None, pl.String))
+    mapping = pl.DataFrame(
+        {
+            "d0": [dt.date.fromisoformat(s[0]) for s in spans],
+            "d1": [dt.date.fromisoformat(s[1]) for s in spans],
+            "contract": [s[2] for s in spans],
+        }
+    ).sort("d0")
+    dated = frame.with_columns(
+        __date=pl.col("ts_event").cast(pl.Datetime("ns", "UTC")).dt.date()
+    ).sort("__date")
+    joined = dated.join_asof(mapping, left_on="__date", right_on="d0", strategy="backward")
+    return joined.filter(pl.col("__date") < pl.col("d1")).drop("__date", "d0", "d1")
+
+
+#: A raw symbol that reappears after this long is a different contract (``ESZ6``
+#: is Dec 2016 and Dec 2026: CME symbols carry one year digit).
+_SYMBOL_REUSE_DAYS = 3 * 365
+
+
+def _unique_contracts(
+    *span_lists: Sequence[tuple[str, str, str]],
+) -> list[list[tuple[str, str, str]]]:
+    """Rename contracts so a reused raw symbol gets a distinct name per listing.
+
+    Each contract becomes ``<raw>_<year of its first span>`` (``ESZ6_2016``).
+    """
+    events = sorted(
+        (dt.date.fromisoformat(d0), dt.date.fromisoformat(d1), raw, i, j)
+        for i, spans in enumerate(span_lists)
+        for j, (d0, d1, raw) in enumerate(spans)
+    )
+    current: dict[str, tuple[str, dt.date]] = {}  # raw -> (name, last end date)
+    names: dict[tuple[int, int], str] = {}
+    for d0, d1, raw, i, j in events:
+        seen = current.get(raw)
+        if seen is None or (d0 - seen[1]).days > _SYMBOL_REUSE_DAYS:
+            seen = (f"{raw}_{d0.year}", d1)
+        current[raw] = (seen[0], max(seen[1], d1))
+        names[(i, j)] = seen[0]
+    return [
+        [(d0, d1, names[(i, j)]) for j, (d0, d1, _) in enumerate(spans)]
+        for i, spans in enumerate(span_lists)
+    ]
+
+
+def calendar_roll(
+    symbol: str,
+    front: pl.DataFrame,
+    second: pl.DataFrame,
+    front_spans: Sequence[tuple[str, str, str]],
+    second_spans: Sequence[tuple[str, str, str]],
+    venue: str,
+    *,
+    days_before: int = 5,
+) -> tuple[dict[str, pl.DataFrame], RollSchedule]:
+    """Split front/second-month continuous bars into contracts and schedule the rolls.
+
+    Databento's calendar continuous series (``ES.c.0``, ``ES.c.1``) switch
+    contract at expiry; *front_spans* / *second_spans* say which contract each
+    one maps to on each date (:func:`snippy_scales.data.catalog.read_symbology`).
+    A contract's bars come from both series: while it is the second month, then
+    while it is the front month. The schedule rolls from the front contract to
+    the next one at the ``days_before``-th last close, before the front series
+    switches, at which both traded (a bar with volume; the earliest such close if
+    there are fewer), so no position is held into expiry.
+
+    Returns:
+        ``instrument_id -> bars`` per contract (``<raw symbol>.<venue>``) and the
+        roll schedule.
+
+    The series starts at the first contract that can be rolled into the next one:
+    leading contracts whose roll can't be priced (the second month has no bars yet
+    when the data begins) are dropped.
+
+    Raises:
+        ValueError: If a contract never shares a close with the next one before
+            the switch (the roll can't be priced) after the series has started, if
+            fewer than half the contracts are left, or there are no bars.
+    """
+    if days_before < 1:
+        raise ValueError("days_before must be at least 1")
+    front_spans, second_spans = _unique_contracts(front_spans, second_spans)
+    tagged = pl.concat(
+        [_tag_contracts(front, front_spans), _tag_contracts(second, second_spans)],
+        how="vertical_relaxed",
+    )
+    if tagged.is_empty():
+        raise ValueError(f"no bars for {symbol}")
+    frames = {
+        f"{raw}.{venue}": part.drop("contract")
+        .unique("ts_init", keep="first")
+        .sort("ts_init")
+        .with_columns(pl.lit(raw).alias("symbol"))
+        for (raw,), part in tagged.partition_by("contract", as_dict=True).items()
+    }
+    # Contracts in the order they are the front month, with the date each starts.
+    front_tagged = _tag_contracts(front, front_spans).sort("ts_init")
+    order: list[str] = []
+    switch: dict[str, int] = {}
+    for raw, ts in zip(
+        front_tagged["contract"].to_list(), _ts_ns(front_tagged).tolist(), strict=True
+    ):
+        if raw not in switch:  # never roll back to a contract already held
+            order.append(raw)
+            switch[raw] = ts
+    ids = [f"{raw}.{venue}" for raw in order]
+    kept, starts = ids[:1], [-(2**63)]
+
+    def traded(frame: pl.DataFrame) -> np.ndarray:  # Nautilus can't fill on a 0-volume bar
+        return _ts_ns(frame.filter(pl.col("volume") > 0))
+
+    for old, new, new_raw in zip(ids, ids[1:], order[1:], strict=False):
+        common = np.intersect1d(traded(frames[old]), traded(frames[new]))
+        common = common[(common < switch[new_raw]) & (common > starts[-1])]
+        if common.size == 0:
+            if len(kept) == 1:  # the series starts before its second month has bars:
+                kept = [new]  # begin at the first contract that can be rolled into
+                continue
+            raise ValueError(f"{symbol}: {old} and {new} share no close before the roll")
+        kept.append(new)
+        starts.append(int(common[max(common.size - days_before, 0)]))
+    if 2 * len(kept) < len(ids):
+        raise ValueError(
+            f"{symbol}: only the last {len(kept)} of {len(ids)} contracts can be rolled "
+            "(the second month is too sparse)"
+        )
+    return frames, RollSchedule(symbol, tuple(kept), tuple(starts))
+
+
+def synthetic_outright(
+    source: FuturesContract,
+    raw_symbol: str,
+    venue: str,
+    frame: pl.DataFrame,
+    *,
+    currency: str | None = None,
+) -> FuturesContract:
+    """A definition for one contract of a rolled series, cloned from *source*.
+
+    Only the continuous series' definition is stored, so tick size, multiplier
+    and currency come from it (they are the same for every contract of a root);
+    activation and expiry span the contract's bars. A *currency* other than the
+    source's re-quotes the contract (prices from :func:`to_usd`): its tick becomes
+    ``0.01``, since converted prices are off the exchange's tick grid.
+    """
+    ts = _ts_ns(frame)
+    spec = source.to_dict()
+    spec.update(
+        id=f"{raw_symbol}.{venue}",
+        raw_symbol=raw_symbol,
+        activation_ns=int(ts[0]) - _DAY_NS,
+        expiration_ns=int(ts[-1]) + _DAY_NS,
+    )
+    if currency is not None and currency != spec["currency"]:
+        spec.update(currency=currency, price_precision=2, price_increment="0.01")
+    return FuturesContract.from_dict(spec)
 
 
 def _close_at(frame: pl.DataFrame, ts: int) -> float:

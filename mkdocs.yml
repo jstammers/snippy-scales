@@ -47,12 +47,14 @@ nav:
       - Strategy Reports: guides/strategy_reports.md
   - Strategies:
       - Time-series momentum: strategies/momentum-ts.md
+      - Time-series momentum on futures (MOP 2012): strategies/momentum-ts-futures.md
       - Moving-average trend following: strategies/trend-following.md
       - Cross-sectional momentum: strategies/momentum-cs.md
   - Research:
       - SDEs and Neural SDEs: research/sde_market_dynamics.md
       - raptorbt Defects (historical): research/raptorbt_defects.md
       - "Spike: vectorbt vs raptorbt": research/vectorised_engines_spike.md
+      - "Replicating MOP (2012)": research/tsmom_replication.md
   - API Reference:
       - Python: api/python/index.md
       - Data: api/python/data.md

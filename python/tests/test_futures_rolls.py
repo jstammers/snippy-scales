@@ -317,3 +317,288 @@ def test_load_parent_symbol_from_catalog(tmp_path: Path) -> None:
     assert run.rejections == ()
     with pytest.raises(FileNotFoundError, match="NQ outright"):
         load_market_data("NQ.FUT", catalog_path=tmp_path)
+
+
+# ── Rolled continuous series (ES.ROLL from ES.c.0 / ES.c.1) ───────────────────
+
+
+def _day(d: int) -> str:
+    return (_BASE + dt.timedelta(days=d)).date().isoformat()
+
+
+def _continuous(
+    frames: dict[str, pl.DataFrame], rank: int
+) -> tuple[pl.DataFrame, list[tuple[str, str, str]]]:
+    """A calendar continuous series (rank 0 = front) and its contract mapping.
+
+    Like Databento's ``.c.N``: on day *d* it holds the contract with the
+    ``rank``-th nearest expiry still ahead, switching at expiry.
+    """
+    spans, pieces = [], []
+    for i, expiry in enumerate(_EXPIRY_DAYS):
+        j = i + rank
+        lo = 0 if i == 0 else _EXPIRY_DAYS[i - 1]
+        if j >= len(_CODES) or lo >= _N:
+            break
+        spans.append((_day(lo), _day(expiry), f"ES{_CODES[j]}"))
+        f = frames[f"ES{_CODES[j]}.GLBX"]
+        day = (pl.col("ts_event").dt.epoch("ns") - _BASE_NS) // _DAY
+        pieces.append(f.filter((day >= lo) & (day < expiry)))
+    return pl.concat(pieces).sort("ts_init"), spans
+
+
+def test_calendar_roll_recovers_contracts_and_rolls_before_the_switch() -> None:
+    _, frames = _market(carry=0.001)
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    out, schedule = futures.calendar_roll(
+        "ES.ROLL", front, second, front_spans, second_spans, "GLBX", days_before=5
+    )
+    assert schedule.instrument_ids[:3] == ("ESH0_2020.GLBX", "ESM0_2020.GLBX", "ESU0_2020.GLBX")
+    # Each roll is the 5th last close the two contracts share before the front switches.
+    for (ts, _old, _new), expiry in zip(schedule.rolls, _EXPIRY_DAYS, strict=False):
+        assert ts == _close_ns(expiry - 5)
+    # Bars of a contract are its own prices, from both series.
+    m0 = out["ESM0_2020.GLBX"]
+    src = frames["ESM0.GLBX"].join(m0.select("ts_init", "close"), on="ts_init")
+    assert src.height == m0.height
+    np.testing.assert_array_equal(src["close"], src["close_right"])
+    # The back-adjusted series earns exactly the held contract's returns.
+    adjusted = back_adjust(schedule, out)["close"].to_numpy()
+    np.testing.assert_allclose(
+        adjusted[1:] / adjusted[:-1] - 1.0, _held_returns(schedule, out), rtol=1e-10
+    )
+
+
+def test_calendar_roll_names_reused_symbols_apart() -> None:
+    a, b = futures._unique_contracts(
+        [("2016-09-01", "2016-12-16", "ESZ6"), ("2026-09-01", "2026-12-18", "ESZ6")],
+        [("2016-06-01", "2016-09-01", "ESZ6")],
+    )
+    assert [s[2] for s in a] == ["ESZ6_2016", "ESZ6_2026"]
+    assert b[0][2] == "ESZ6_2016"
+
+
+def _expiry_period(k: int) -> pl.Expr:
+    """Bars while the k-th contract is the front month."""
+    day = (pl.col("ts_event").dt.epoch("ns") - _BASE_NS) // _DAY
+    lo = 0 if k == 0 else _EXPIRY_DAYS[k - 1]
+    return (day >= lo) & (day < _EXPIRY_DAYS[k])
+
+
+def test_calendar_roll_needs_a_shared_close() -> None:
+    _, frames = _market()
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    with pytest.raises(ValueError, match="share no close"):
+        futures.calendar_roll(  # the second month is missing while M0 is the front
+            "ES.ROLL", front, second.filter(~_expiry_period(1)), front_spans, second_spans, "GLBX"
+        )
+
+
+def test_calendar_roll_starts_at_the_first_contract_it_can_roll_into() -> None:
+    _, frames = _market()
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    # The data begins before the second month has bars: H0 can't be rolled out of.
+    _, schedule = futures.calendar_roll(
+        "ES.ROLL", front, second.filter(~_expiry_period(0)), front_spans, second_spans, "GLBX"
+    )
+    assert schedule.instrument_ids[0] == f"ES{_CODES[1]}_{_BASE.year}.GLBX"
+    assert len(schedule.instrument_ids) == len(front_spans) - 1
+
+
+def test_calendar_roll_refuses_a_series_left_with_few_contracts() -> None:
+    _, frames = _market()
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    sparse = second.filter(
+        ~pl.any_horizontal([_expiry_period(k) for k in range(len(front_spans) - 1)])
+    )
+    with pytest.raises(ValueError, match="too sparse"):
+        futures.calendar_roll("ES.ROLL", front, sparse, front_spans, second_spans, "GLBX")
+
+
+def test_load_rolled_symbol_from_catalog(tmp_path: Path) -> None:
+    contracts, frames = _market(carry=0.001)
+    catalog = cat.open_catalog(tmp_path)
+    for rank in (0, 1):
+        sym = f"ES.c.{rank}"
+        series, spans = _continuous(frames, rank)
+        cat.write_bars(
+            catalog,
+            cat.frame_to_bars(
+                series,
+                bar_type=cat.bar_type(sym, "GLBX", "ohlcv-1d"),
+                price_precision=2,
+                interval_ns=_DAY,
+            ),
+        )
+        cat.write_symbology(sym, "GLBX", spans, tmp_path)
+    cat.write_instruments(catalog, [cat.continuous_instrument(contracts[0], "ES.c.0")])
+
+    data = load_market_data("ES.ROLL", catalog_path=tmp_path)
+    schedule = data.schedules["ES.ROLL"]
+    adjusted = data.frames["ES.ROLL"]
+    # Weekend bars are dropped (one bar per trading day for every root).
+    assert set(adjusted["ts_event"].dt.weekday().to_list()) <= {1, 2, 3, 4, 5}
+    assert schedule.instrument_ids[0] == "ESH0_2020.GLBX"
+    held = data.instruments["ESM0_2020.GLBX"]
+    assert float(held.multiplier) == _MULT
+    run = run_backtest(_Fixed(1.0), data, initial_capital=1e8, leverage=100.0)
+    assert run.rejections == ()
+    assert [r[0] for r in run.rolls] == [r[0] for r in schedule.rolls]
+
+
+def test_rolled_symbol_can_name_its_venue() -> None:
+    assert futures.rolled_root("BRN.IFEU.ROLL") == "BRN"
+    assert futures.rolled_venue("BRN.IFEU.ROLL") == "IFEU"
+    assert futures.rolled_root("ES.ROLL") == "ES"
+    assert futures.rolled_venue("ES.ROLL") is None
+
+
+def test_to_usd_converts_each_days_settlement_at_that_days_rate() -> None:
+    days = [_BASE + dt.timedelta(days=d) for d in range(3)]
+    local = pl.DataFrame(
+        {
+            "ts_event": days,
+            "open": [99.0, 104.0, 108.0],
+            "high": [101.0, 111.0, 110.0],
+            "low": [98.0, 103.0, 104.0],
+            "close": [100.0, 110.0, 105.0],
+        }
+    )
+    fx = pl.DataFrame({"ts_event": days[:2], "close": [1.0, 2.0]})  # day 2 reuses day 1's
+    usd = futures.to_usd(local, fx)
+    # 100 * 1, then + (110 - 100) * 2, then + (105 - 110) * 2: no move on the notional.
+    assert usd["close"].to_list() == [100.0, 120.0, 110.0]
+    assert usd["open"].to_list() == [99.0, 100.0 + 4 * 2, 120.0 - 2 * 2]
+    assert usd["high"].to_list()[1:] == [122.0, 120.0]
+    assert usd["low"].to_list()[1:] == [106.0, 108.0]
+    with pytest.raises(ValueError, match="no FX rate"):
+        futures.to_usd(local, fx.tail(1))
+
+
+def test_drop_scale_glitches_removes_one_day_decimal_errors_only() -> None:
+    days = [_BASE + dt.timedelta(days=d) for d in range(7)]
+    closes = [100.0, 101.0, 10.1, 102.0, -2.0, 40.0, 41.0]  # a tenth; a negative print
+    frame = pl.DataFrame(
+        {"ts_event": days, "ts_init": [d + dt.timedelta(days=1) for d in days], "close": closes}
+    )
+    kept = futures.drop_scale_glitches(frame)["close"].to_list()
+    # 10.1 reverts next day: an error. -2.0 is negative and 40 doesn't revert: real moves.
+    assert kept == [100.0, 101.0, 102.0, -2.0, 40.0, 41.0]
+
+
+def test_load_rolled_symbol_from_another_venue_in_usd(tmp_path: Path) -> None:
+    """A GBP contract on IFLL is listed on the USD account's venue, converted."""
+    contracts, frames = _market(carry=0.001)
+    catalog = cat.open_catalog(tmp_path)
+    rate = 1.25
+    for rank in (0, 1):
+        series, spans = _continuous(frames, rank)
+        sym = f"Z.c.{rank}"
+        cat.write_bars(
+            catalog,
+            cat.frame_to_bars(
+                series.with_columns(pl.lit(sym).alias("symbol")),
+                bar_type=cat.bar_type(sym, "IFLL", "ohlcv-1d"),
+                price_precision=2,
+                interval_ns=_DAY,
+            ),
+        )
+        ice_spans = [(d0, d1, raw.replace("ES", "Z   FM") + "!") for d0, d1, raw in spans]
+        cat.write_symbology(sym, "IFLL", ice_spans, tmp_path)
+        if rank == 0:  # GBP/USD at a constant rate, from the CME future
+            cat.write_bars(
+                catalog,
+                cat.frame_to_bars(
+                    series.with_columns(
+                        pl.lit(rate).alias(c) for c in ("open", "high", "low", "close")
+                    ),
+                    bar_type=cat.bar_type("6B.c.0", "GLBX", "ohlcv-1d"),
+                    price_precision=4,
+                    interval_ns=_DAY,
+                ),
+            )
+    spec = cat.continuous_instrument(contracts[0], "Z.c.0").to_dict()
+    spec.update(id="Z.c.0.IFLL", currency="GBP", exchange="IFLL")
+    cat.write_instruments(catalog, [FuturesContract.from_dict(spec)])
+
+    local = load_market_data("Z.IFLL.ROLL", catalog_path=tmp_path)
+    data = load_market_data("Z.IFLL.ROLL", venue="GLBX", catalog_path=tmp_path)
+    first = data.schedules["Z.IFLL.ROLL"].instrument_ids[0]
+    assert first == "IFLL_Z_FMH0_2020.GLBX"
+    held = data.instruments[first]
+    assert str(held.quote_currency) == "USD"
+    assert str(local.instruments["Z   FMH0!_2020.IFLL"].quote_currency) == "GBP"
+    # At a constant rate the USD price is the GBP price times the rate.
+    np.testing.assert_allclose(
+        data.frames["Z.IFLL.ROLL"]["close"].to_numpy(),
+        rate * local.frames["Z.IFLL.ROLL"]["close"].to_numpy(),
+        rtol=1e-6,
+    )
+    run = run_backtest(_Fixed(1.0), data, initial_capital=1e8, leverage=100.0)
+    assert run.rejections == ()
+    assert len(run.rolls) == len(data.schedules["Z.IFLL.ROLL"].rolls)
+
+
+def test_missing_mapping_says_how_to_get_it(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="algo data sync"):
+        cat.read_symbology("ES.c.0", "GLBX", tmp_path)
+
+
+def test_report_loads_rolled_symbols_and_benchmark(tmp_path: Path) -> None:
+    from snippy_scales.reporting import ReportConfig  # noqa: PLC0415
+    from snippy_scales.reporting import pipeline as rp  # noqa: PLC0415
+
+    contracts, frames = _market(carry=0.001)
+    catalog = cat.open_catalog(tmp_path)
+    for rank in (0, 1):
+        series, spans = _continuous(frames, rank)
+        sym = f"ES.c.{rank}"
+        bars = cat.frame_to_bars(
+            series,
+            bar_type=cat.bar_type(sym, "GLBX", "ohlcv-1d"),
+            price_precision=2,
+            interval_ns=_DAY,
+        )
+        cat.write_bars(catalog, bars)
+        cat.write_symbology(sym, "GLBX", spans, tmp_path)
+    cat.write_instruments(catalog, [cat.continuous_instrument(contracts[0], "ES.c.0")])
+    cfg = ReportConfig.model_validate(
+        {
+            "name": "unit",
+            "title": "t",
+            "strategy": "momentum-ts",
+            "data": {"symbols": ["ES.ROLL", "NQ.ROLL"], "venue": "GLBX", "benchmark": "ES.ROLL"},
+        }
+    )
+    data = rp.load_universe(cfg, tmp_path)
+    assert list(data.frames) == ["ES.ROLL"]  # NQ has no continuous series
+    assert rp.missing_symbols(cfg, data) == ["NQ.ROLL"]
+    bench = rp.benchmark_bars(cfg, tmp_path)
+    assert bench is not None
+    assert bench["close"].to_list() == data.frames["ES.ROLL"]["close"].to_list()
+    # A rolled symbol that names its venue is available whatever the account venue.
+    other = cfg.model_copy(
+        update={"data": cfg.data.model_copy(update={"symbols": ["ES.GLBX.ROLL"], "venue": "SIM"})}
+    )
+    moved = rp.load_universe(other, tmp_path)
+    assert moved.schedules["ES.GLBX.ROLL"].instrument_ids[0] == "GLBX_ESH0_2020.SIM"
+
+
+def test_calendar_roll_skips_closes_where_either_contract_did_not_trade() -> None:
+    _, frames = _market()
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    quiet = _close_ns(_EXPIRY_DAYS[0] - 5)  # the default roll close for H0 -> M0
+    second = second.with_columns(
+        volume=pl.when(pl.col("ts_init").dt.epoch("ns") == quiet)
+        .then(0.0)
+        .otherwise(pl.col("volume"))
+    )
+    _, schedule = futures.calendar_roll(
+        "ES.ROLL", front, second, front_spans, second_spans, "GLBX", days_before=5
+    )
+    assert schedule.rolls[0][0] == _close_ns(_EXPIRY_DAYS[0] - 6)

@@ -176,15 +176,27 @@ def sync(
     from snippy_scales.data.databento import DatabentoSync  # noqa: PLC0415
 
     syncer = DatabentoSync(
-        catalog, dataset=cfg.dataset, venue=cfg.effective_venue, stype_in=cfg.stype_in
+        catalog,
+        dataset=cfg.dataset,
+        venue=cfg.effective_venue,
+        stype_in=cfg.stype_in,
+        catalog_path=catalog_path,
     )
     start, end = syncer.resolve_window(raw_start, raw_end)
     _print_window(start, end)
     if instruments_only:
         count = syncer.sync_instruments(symbols, start, end)
         console.print(f"[green]New instrument definitions: {count}[/]")
+        _sync_symbology(syncer, symbols, start, end)
         return
     _sync_databento(syncer, cfg, symbols, schemas, start, end, instruments, dry_run, yes)
+
+
+def _sync_symbology(syncer: DatabentoSync, symbols: list[str], start: int, end: int) -> None:
+    """Refresh continuous symbols' contract mappings (free; needed by ``<ROOT>.ROLL``)."""
+    count = syncer.sync_symbology(symbols, start, end)
+    if count:
+        console.print(f"[dim]Contract mappings refreshed: {count}[/]")
 
 
 def _sync_databento(
@@ -235,6 +247,7 @@ def _sync_databento(
     if instruments:
         count = syncer.sync_instruments(symbols, start, end)
         console.print(f"[dim]New instrument definitions: {count}[/]")
+        _sync_symbology(syncer, symbols, start, end)
     results = []
     for sym, sch in todo:
         try:

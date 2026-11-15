@@ -1,0 +1,103 @@
+# Moskowitz, Ooi & Pedersen (2012) on CME and ICE futures together, over the years
+# both have data (ICE from Dec 2018). One USD margin account trades all of them:
+# ICE contracts are listed on the account's venue (`<ROOT>.<VENUE>.ROLL`), and the
+# GBP-quoted ones (FTSE 100, London cocoa) are converted to USD at the CME GBP/USD
+# future's daily rate, settlement by settlement.
+#   algo data sync configs/databento_tsmom_cme.yaml        # includes 6B (GBP/USD)
+#   algo data sync configs/databento_tsmom_ifeu.yaml       # and _ifll, _ifus
+#   algo report new tsmom-futures-global --from reports/templates/configs/tsmom_futures_global.yaml
+#   algo report build tsmom-futures-global
+#
+# Excluded ICE roots: WTI (T), Long Gilt (R), SONIA (SO3), sugar, coffee, cocoa (US),
+# cotton, dollar index (their calendar front or second month is too sparse to price
+# rolls) and Euribor (I, a short-rate future, like GE and SR3 on CME).
+name: tsmom-futures-global
+title: Time-series momentum on CME and ICE futures, 2019-2026 (MOP 2012 replication)
+strategy: momentum-ts
+theory: docs/strategies/momentum-ts-futures.md
+question: >-
+  Does adding ICE's European, UK and emerging-market futures to the 34 CME futures
+  bring the diversified time-series momentum strategy of Moskowitz, Ooi & Pedersen
+  (2012) closer to the Sharpe ratio above one the paper reports, out of sample over
+  the years both exchanges have data and after costs?
+data:
+  symbols:
+    # Equity indices
+    - ES.ROLL
+    - NQ.ROLL
+    - YM.ROLL
+    - RTY.ROLL
+    - NKD.ROLL
+    - EMD.ROLL
+    # Government bonds
+    - ZT.ROLL
+    - ZF.ROLL
+    - ZN.ROLL
+    - ZB.ROLL
+    - UB.ROLL
+    # Currencies
+    - 6A.ROLL
+    - 6B.ROLL
+    - 6C.ROLL
+    - 6E.ROLL
+    - 6J.ROLL
+    - 6S.ROLL
+    - 6N.ROLL
+    # Energy
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    # Metals
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    # Agriculture and livestock
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+    # ICE Futures Europe (USD, except London cocoa in GBP)
+    - BRN.IFEU.ROLL    # Brent crude
+    - G.IFEU.ROLL      # Low sulphur gasoil
+    - C.IFEU.ROLL      # London cocoa (GBP)
+    - RC.IFEU.ROLL     # Robusta coffee
+    - W.IFEU.ROLL      # White sugar
+    # ICE Futures Europe financials (GBP)
+    - Z.IFLL.ROLL      # FTSE 100
+    # ICE Futures US equity indices (USD, from mid-2020)
+    - MME.IFUS.ROLL    # MSCI Emerging Markets
+    - MFS.IFUS.ROLL    # MSCI EAFE
+  venue: GLBX
+  schema: ohlcv-1d
+  start: "2019-01-01"           # ICE data begins Dec 2018; earlier CME bars warm up
+  benchmark: ES.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 x 15% of ~2,050 weekday closes: OOS from ~2021
+  min_train: 252
+  # Large capital so whole-contract rounding is negligible at 1/42 weight per root.
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0   # ~exchange + broker fees per contract per side
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0                 # bond legs run at 10-25x their 1/N capital
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    lookback: [21, 63, 126, 189, 252]   # k = 1, 3, 6, 9, 12 months
+    skip_recent: [0]                    # MOP: no skip
+    vol_target: [0.40]                  # MOP: 40% per instrument
+    vol_lookback: [63]                  # ~EWMA centre of mass 60 days
+    max_leverage: [50.0]                # MOP: no cap (2-year notes need ~27x)
+    rebal_freq: [21]                    # monthly
+validation:
+  top_k: 5

@@ -37,6 +37,7 @@ import polars as pl
 
 from snippy_scales._constants import TRADING_DAYS_PER_YEAR
 from snippy_scales.data import catalog as cat
+from snippy_scales.data import futures
 from snippy_scales.evaluation import (
     WalkForward,
     bar_returns,
@@ -185,6 +186,15 @@ def load_universe(cfg: ReportConfig, catalog_path: Path | None = None) -> Market
     d = cfg.data
     series = cat.list_bar_series(d.schema_, catalog_path)
     available = {s for s, v in series if d.venue is None or v == d.venue}
+    # A rolled symbol (ES.ROLL, or BRN.IFEU.ROLL on any venue) is available when both
+    # of its continuous series are.
+    pairs = set(series)
+    for s, v in pairs:
+        root = s.removesuffix(".c.0")
+        if s.endswith(".c.0") and (f"{root}.c.1", v) in pairs:
+            available.add(f"{root}.{v}.ROLL")
+            if d.venue is None or v == d.venue:
+                available.add(f"{root}.ROLL")
     symbols = d.resolve_symbols(available)
     if not symbols:
         raise FileNotFoundError(f"none of the configured symbols has {d.schema_} bars")
@@ -249,6 +259,11 @@ def benchmark_bars(cfg: ReportConfig, catalog_path: Path | None = None) -> pl.Da
     """Bars of ``cfg.data.benchmark`` (``None`` if not configured)."""
     if not cfg.data.benchmark:
         return None
+    if futures.is_rolled(cfg.data.benchmark):  # its back-adjusted (held-contract) series
+        data = load_market_data(
+            cfg.data.benchmark, cfg.data.schema_, venue=cfg.data.venue, catalog_path=catalog_path
+        )
+        return data.frames[cfg.data.benchmark]
     return cat.load_bars(
         cfg.data.benchmark, cfg.data.schema_, venue=cfg.data.venue, catalog_path=catalog_path
     )

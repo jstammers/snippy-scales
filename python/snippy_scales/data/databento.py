@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 
 _DAY_NS = 86_400_000_000_000
 
+#: Symbols per Databento symbology request.
+_SYMBOLOGY_BATCH = 500
+
 #: How far back from the window end to look for a continuous symbol's latest definition.
 _DEFINITION_LOOKBACK_NS = 7 * _DAY_NS
 
@@ -150,6 +153,15 @@ def _call(fn: Callable[[], Coroutine[Any, Any, Any]]) -> Any:  # noqa: ANN401
     return asyncio.run(runner())
 
 
+#: Nautilus's raw value for an undefined price (``PRICE_UNDEF``, i128::MAX).
+_PRICE_UNDEF_RAW = 2**127 - 1
+
+
+def _has_prices(bar: Bar) -> bool:
+    """Whether every OHLC price of *bar* is defined."""
+    return _PRICE_UNDEF_RAW not in (bar.open.raw, bar.high.raw, bar.low.raw, bar.close.raw)
+
+
 def _normalise_bar(bar: Bar, bar_type: BarType, interval_ns: int) -> Bar:
     """Re-key *bar* to *bar_type* with ``ts_event`` = open and ``ts_init`` = close."""
     ts_init = bar.ts_init
@@ -200,8 +212,10 @@ class DatabentoSync:
         publishers_path: Path = DEFAULT_PUBLISHERS_PATH,
         stype_in: str | None = None,
         historical: Any = None,  # noqa: ANN401
+        catalog_path: Path | None = None,
     ) -> None:
         self.catalog = catalog
+        self.catalog_path = catalog_path
         self.dataset = dataset
         self.venue = venue or default_venue(dataset)
         self.stype_in = stype_in
@@ -215,8 +229,8 @@ class DatabentoSync:
 
     # -- metadata (free endpoints) -----------------------------------------
 
-    def _metadata(self) -> Any:  # noqa: ANN401
-        """``databento.Historical().metadata``, or None when offline."""
+    def _historical_client(self) -> Any:  # noqa: ANN401
+        """``databento.Historical``, or None when offline."""
         if self._historical is None:
             key = self._api_key or os.environ.get("DATABENTO_API_KEY")
             if not key:
@@ -224,7 +238,58 @@ class DatabentoSync:
             import databento as db  # noqa: PLC0415
 
             self._historical = db.Historical(key)
-        return self._historical.metadata
+        return self._historical
+
+    def _metadata(self) -> Any:  # noqa: ANN401
+        """``databento.Historical().metadata``, or None when offline."""
+        hist = self._historical_client()
+        return None if hist is None else hist.metadata
+
+    def sync_symbology(self, symbols: list[str], start: int, end: int) -> int:
+        """Store which outright each continuous symbol maps to, date by date.
+
+        Catalog bars of a continuous symbol (``ES.c.0``) don't record the
+        contract they came from; the mapping (a free symbology lookup) lets
+        :func:`snippy_scales.data.futures.calendar_roll` split them back into
+        contracts. Rewritten in full on each call (see :func:`cat.write_symbology`).
+
+        Returns:
+            Number of continuous symbols written; 0 offline.
+        """
+        cont = [s for s in symbols if ".c." in s]
+        hist = self._historical_client() if cont else None
+        if hist is None:
+            return 0
+        d0 = dt.datetime.fromtimestamp(start / 1e9, dt.UTC).date().isoformat()
+        d1 = dt.datetime.fromtimestamp(end / 1e9, dt.UTC).date().isoformat()
+
+        def resolve(syms: list[str], stype_in: str, stype_out: str) -> dict[str, list[dict]]:
+            out: dict[str, list[dict]] = {}
+            for i in range(0, len(syms), _SYMBOLOGY_BATCH):
+                res = hist.symbology.resolve(
+                    dataset=self.dataset,
+                    symbols=syms[i : i + _SYMBOLOGY_BATCH],
+                    stype_in=stype_in,
+                    stype_out=stype_out,
+                    start_date=d0,
+                    end_date=d1,
+                )
+                out.update(res["result"])
+            return out
+
+        ids = resolve(cont, "continuous", "instrument_id")
+        id_list = sorted({m["s"] for spans in ids.values() for m in spans})
+        raw = resolve(id_list, "instrument_id", "raw_symbol")
+        for symbol in cont:
+            rows = []
+            for m in ids.get(symbol, []):
+                # Instrument IDs are recycled, so intersect the two date ranges.
+                for r in raw.get(m["s"], []):
+                    lo, hi = max(m["d0"], r["d0"]), min(m["d1"], r["d1"])
+                    if lo < hi:
+                        rows.append((lo, hi, r["s"]))
+            cat.write_symbology(symbol, self.venue, sorted(rows), self.catalog_path)
+        return len(cont)
 
     def dataset_range(self) -> tuple[int, int] | None:
         """``(first, last)`` timestamps the dataset holds (UNIX ns), or None offline."""
@@ -501,7 +566,14 @@ class DatabentoSync:
                 if futures.is_parent(symbol):
                     written += self._write_outright_bars(symbol, schema, bars)
                     continue
-                normalised = [_normalise_bar(b, bar_type, interval_ns) for b in bars]
+                # ICE datasets also publish each bar from the off-exchange feed
+                # (venue XOFF); keep only the requested instrument's own bars, and
+                # drop bars Databento sends with undefined prices.
+                normalised = [
+                    _normalise_bar(b, bar_type, interval_ns)
+                    for b in bars
+                    if b.bar_type.instrument_id == iid and _has_prices(b)
+                ]
                 written += cat.write_bars(self.catalog, normalised)
         return written
 
