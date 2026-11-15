@@ -28,12 +28,17 @@ Phase 1 — Baseline, Robust, Low-Dimensional Alpha
 
 :class:`~snippy_scales.strategies.trend.TrendFollowing`
     Moving-average crossover trend strategy (fast MA > slow MA → long).
+
+:class:`~snippy_scales.strategies.trend_carry.TrendCarry`
+    Time-series trend blended with asset-class-relative carry (roll yield) on
+    rolled futures, rebalanced in staggered tranches (a :class:`MultiAssetStrategy`).
 """
 
 from snippy_scales.strategies.mean_reversion import MeanReversion
 from snippy_scales.strategies.momentum_cs import CrossSectionalMomentum, MultiAssetStrategy
 from snippy_scales.strategies.momentum_ts import TimeSeriesMomentum
 from snippy_scales.strategies.trend import Strategy, TrendFollowing
+from snippy_scales.strategies.trend_carry import TrendCarry
 
 __all__ = [
     "CrossSectionalMomentum",
@@ -41,5 +46,6 @@ __all__ = [
     "MultiAssetStrategy",
     "Strategy",
     "TimeSeriesMomentum",
+    "TrendCarry",
     "TrendFollowing",
 ]

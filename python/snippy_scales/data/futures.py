@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -398,6 +399,94 @@ def _tag_contracts(frame: pl.DataFrame, spans: Sequence[tuple[str, str, str]]) -
     ).sort("__date")
     joined = dated.join_asof(mapping, left_on="__date", right_on="d0", strategy="backward")
     return joined.filter(pl.col("__date") < pl.col("d1")).drop("__date", "d0", "d1")
+
+
+_CME_MONTH = re.compile(rf"([{MONTH_CODES}])(\d{{1,2}})$")  # ESZ6, CLF27
+_ICE_MONTH = re.compile(rf"FM([{MONTH_CODES}])00(\d{{2}})!$")  # "BRN FMG0019!"
+
+
+def contract_month(raw: str) -> tuple[int, int, int] | None:
+    """Delivery month of a raw contract symbol: ``(month 1-12, year, year modulus)``.
+
+    The year is as written in the symbol: one digit on CME (``ESZ6``, modulus 10),
+    two on ICE (``BRN FMG0019!``, modulus 100). ``None`` if the symbol has neither form.
+    """
+    match = _ICE_MONTH.search(raw)
+    if match is not None:
+        return MONTH_CODES.index(match.group(1)) + 1, int(match.group(2)), 100
+    match = _CME_MONTH.search(raw)
+    if match is None:
+        return None
+    return MONTH_CODES.index(match.group(1)) + 1, int(match.group(2)), 10 ** len(match.group(2))
+
+
+def months_between(near: str, far: str) -> int | None:
+    """Whole months from the delivery month of *near* to that of *far* (raw symbols).
+
+    ``None`` if either symbol can't be parsed or *far* does not deliver later.
+    """
+    a, b = contract_month(near), contract_month(far)
+    if a is None or b is None or a[2] != b[2]:
+        return None
+    months = ((b[1] - a[1]) % a[2]) * 12 + b[0] - a[0]
+    return months if months > 0 else None
+
+
+def roll_yield(
+    front: pl.DataFrame,
+    second: pl.DataFrame,
+    front_spans: Sequence[tuple[str, str, str]],
+    second_spans: Sequence[tuple[str, str, str]],
+) -> pl.DataFrame:
+    """Annualised roll yield of a futures curve from its front and second month.
+
+    ``carry = (F1 / F2 - 1) * 12 / months``, with ``F1``, ``F2`` the closes of the
+    front and second contracts and ``months`` the gap between their delivery months:
+    the return a long position earns if the curve does not move (Koijen, Moskowitz,
+    Pedersen & Vrugt, 2018). Positive in backwardation, negative in contango. It is a
+    ratio of two prices in one currency, so it needs no currency conversion.
+
+    Only closes at which both contracts traded (``volume > 0``) are used: a stale
+    second-month price would otherwise read as a move in the curve.
+
+    Args:
+        front: Bars of the front-month continuous series (``ES.c.0``).
+        second: Bars of the second-month series (``ES.c.1``).
+        front_spans: Contract mapping of *front* (``(d0, d1 exclusive, raw symbol)``).
+        second_spans: Contract mapping of *second*.
+
+    Returns:
+        ``ts_init``, ``carry`` (Float64), sorted, one row per usable close.
+    """
+    near = _tag_contracts(front.filter(pl.col("volume") > 0), front_spans)
+    far = _tag_contracts(second.filter(pl.col("volume") > 0), second_spans)
+    joined = near.select("ts_init", "close", "contract").join(
+        far.select("ts_init", pl.col("close").alias("far"), pl.col("contract").alias("far_c")),
+        on="ts_init",
+        how="inner",
+    )
+    gaps = {
+        pair: months_between(*pair)
+        for pair in set(zip(joined["contract"].to_list(), joined["far_c"].to_list(), strict=True))
+    }
+    months = pl.Series(
+        "months",
+        [
+            gaps[pair]
+            for pair in zip(joined["contract"].to_list(), joined["far_c"].to_list(), strict=True)
+        ],
+        dtype=pl.Float64,
+    )
+    return (
+        joined.with_columns(months)
+        .filter(pl.col("months").is_not_null() & (pl.col("far") > 0) & (pl.col("close") > 0))
+        .select(
+            "ts_init",
+            ((pl.col("close") / pl.col("far") - 1.0) * 12.0 / pl.col("months")).alias("carry"),
+        )
+        .unique("ts_init", keep="first")
+        .sort("ts_init")
+    )
 
 
 #: A raw symbol that reappears after this long is a different contract (``ESZ6``

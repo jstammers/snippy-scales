@@ -1,0 +1,94 @@
+# Trend plus asset-class-relative carry on the 42 CME and ICE futures of
+# `tsmom_futures_global.yaml` (2019 onward), in 21 staggered tranches. carry_weight 0
+# is the tranched time-series momentum baseline, 1 is carry alone.
+#   algo report new trend-carry-futures-global --from reports/templates/configs/trend_carry_futures_global.yaml
+#   algo report build trend-carry-futures-global
+name: trend-carry-futures-global
+title: Trend and carry on CME and ICE futures, 2019-2026
+strategy: trend-carry
+question: >-
+  Does blending time-series momentum with asset-class-relative carry, rebalanced in
+  staggered tranches, earn a higher out-of-sample Sharpe ratio than momentum alone on
+  42 CME and ICE futures over the years both exchanges have data?
+data:
+  symbols:
+    # Equity indices
+    - ES.ROLL
+    - NQ.ROLL
+    - YM.ROLL
+    - RTY.ROLL
+    - NKD.ROLL
+    - EMD.ROLL
+    # Government bonds
+    - ZT.ROLL
+    - ZF.ROLL
+    - ZN.ROLL
+    - ZB.ROLL
+    - UB.ROLL
+    # Currencies
+    - 6A.ROLL
+    - 6B.ROLL
+    - 6C.ROLL
+    - 6E.ROLL
+    - 6J.ROLL
+    - 6S.ROLL
+    - 6N.ROLL
+    # Energy
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    # Metals
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    # Agriculture and livestock
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+    # ICE Futures Europe (USD, except London cocoa in GBP)
+    - BRN.IFEU.ROLL    # Brent crude
+    - G.IFEU.ROLL      # Low sulphur gasoil
+    - C.IFEU.ROLL      # London cocoa (GBP)
+    - RC.IFEU.ROLL     # Robusta coffee
+    - W.IFEU.ROLL      # White sugar
+    # ICE Futures Europe financials (GBP)
+    - Z.IFLL.ROLL      # FTSE 100
+    # ICE Futures US equity indices (USD, from mid-2020)
+    - MME.IFUS.ROLL    # MSCI Emerging Markets
+    - MFS.IFUS.ROLL    # MSCI EAFE
+  venue: GLBX
+  schema: ohlcv-1d
+  start: "2019-01-01"           # ICE data begins Dec 2018; earlier CME bars warm up
+  benchmark: ES.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 x 15% of ~2,050 weekday closes: OOS from ~2021
+  min_train: 252
+  # Large capital so whole-contract rounding is negligible at 1/42 weight per root.
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0   # ~exchange + broker fees per contract per side
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0                 # bond legs run at 10-25x their 1/N capital
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    lookback: [189, 252]
+    carry_weight: [0.0, 0.5, 1.0]       # trend alone, blend, carry alone
+    carry_smooth: [252]
+    vol_target: [0.40]
+    vol_lookback: [63]
+    max_leverage: [50.0]
+    rebal_freq: [21]                    # 21 staggered monthly tranches
+validation:
+  top_k: 6

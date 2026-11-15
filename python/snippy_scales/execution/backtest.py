@@ -344,6 +344,9 @@ def _load_rolled(
 ) -> MarketData:
     """``ES.ROLL``: real contracts recovered from ``ES.c.0``/``ES.c.1`` and their mapping.
 
+    The signal frame carries a ``carry`` column, the curve's annualised roll yield
+    (:func:`~snippy_scales.data.futures.roll_yield`; null where it can't be measured).
+
     ``BRN.IFEU.ROLL`` reads IFEU's bars. With *venue* set to another venue (the
     account's, e.g. GLBX), its contracts are listed there instead, quoted in USD
     (:func:`~snippy_scales.data.futures.to_usd`, at the CME FX futures' rate), so
@@ -369,15 +372,16 @@ def _load_rolled(
         frame = frame.filter(pl.col("ts_event").dt.weekday() <= 5)  # noqa: PLR2004 — Mon..Fri
         return futures.drop_scale_glitches(frame)
 
+    front = weekdays(cat.load_bars(front_sym, schema, venue=v, catalog_path=catalog_path))
+    second = weekdays(cat.load_bars(second_sym, schema, venue=v, catalog_path=catalog_path))
+    front_spans = cat.read_symbology(front_sym, v, catalog_path)
+    second_spans = cat.read_symbology(second_sym, v, catalog_path)
     frames, schedule = futures.calendar_roll(
-        symbol,
-        weekdays(cat.load_bars(front_sym, schema, venue=v, catalog_path=catalog_path)),
-        weekdays(cat.load_bars(second_sym, schema, venue=v, catalog_path=catalog_path)),
-        cat.read_symbology(front_sym, v, catalog_path),
-        cat.read_symbology(second_sym, v, catalog_path),
-        v,
-        days_before=ROLL_DAYS_BEFORE,
+        symbol, front, second, front_spans, second_spans, v, days_before=ROLL_DAYS_BEFORE
     )
+    # The curve's annualised roll yield, a feature for carry strategies (a price
+    # ratio, so it is the same before and after the conversion to USD below).
+    carry = futures.roll_yield(front, second, front_spans, second_spans)
     if rehome:
         frames, schedule = _rehome(frames, schedule, v, account_venue)
         if currency != "USD":
@@ -392,8 +396,9 @@ def _load_rolled(
         instruments[iid] = contract
         bar_types[iid] = cat.bar_type(raw, account_venue, schema)
         bars[iid] = _frame_bars(frames[iid], contract, bar_types[iid], schema, iid)
+    signal = futures.back_adjust(schedule, frames).join(carry, on="ts_init", how="left")
     return MarketData(
-        frames={symbol: futures.back_adjust(schedule, frames)},
+        frames={symbol: signal},
         bars=bars,
         instruments=instruments,
         bar_types=bar_types,
