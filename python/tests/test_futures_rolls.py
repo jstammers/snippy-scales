@@ -722,9 +722,9 @@ def test_second_nearby_return_follows_one_contract_across_an_expiry() -> None:
     assert out.columns == ["ts_init", "second_return"] and out["ts_init"].is_sorted()
     assert out.height > second.height * 0.9
     # The series itself jumps when it switches contract; the held contract does not.
-    jump = second.sort("ts_init")["close"].pct_change().abs().max()
-    assert jump is not None and jump > 0.07  # noqa: PLR2004
-    assert out["second_return"].abs().max() < 0.06  # noqa: PLR2004
+    jump = float(np.nanmax(np.abs(second.sort("ts_init")["close"].pct_change().to_numpy())))
+    assert jump > 0.07  # noqa: PLR2004
+    assert float(np.abs(out["second_return"].to_numpy()).max()) < 0.06  # noqa: PLR2004
     # On an ordinary day it is the second series' own return.
     plain = second.sort("ts_init").select("ts_init", pl.col("close").pct_change().alias("r"))
     both = out.join(plain, on="ts_init").filter(
