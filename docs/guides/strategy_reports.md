@@ -22,6 +22,9 @@ algo report build tsmom-sp500    # resumes: only missing trials run
 
 # Interactive
 algo report edit tsmom-sp500
+
+# 4. Regenerate the strategy log from every report
+algo report log                  # → reports/STRATEGY_LOG.md
 ```
 
 `build` executes the notebook headlessly (`marimo export html --no-include-code`).
@@ -116,3 +119,31 @@ The template is ordinary marimo. Keep computations in
 layout in the notebook. Run `uv run marimo check reports/templates/strategy_report.py`
 after editing. Existing reports keep their copy until rebuilt with
 `--refresh-template`.
+
+## Provenance and the strategy log
+
+Every study records what produced it, so a result can be traced and rerun:
+
+| Where | What |
+|---|---|
+| Study attribute `config` | The full report config, as run |
+| Study attribute `fingerprint` | Hash of the result-affecting config fields |
+| Study attribute `runs` | One entry per `run_study` call: start time, git commit, branch, whether tracked files had uncommitted changes, sampler, seed |
+| Trial attributes `commit`, `dirty` | The code that ran that trial (a resumed study can span commits) |
+| Study attributes `strategy`, `symbols`, `folds`, `costs`, `space`, … | The walk-forward settings |
+
+`dirty: true` means the commit alone does not reproduce the trial: commit before
+running anything you intend to keep.
+
+`algo report log` reads every report under `reports/` (and any `--also` directory,
+for example another worktree's `reports/`) and writes `reports/STRATEGY_LOG.md`:
+
+* a **timeline** of validated out-of-sample results, oldest first, with the best
+  Sharpe to date per asset group;
+* per report: the question, the verdict (first paragraph of `notes.md`), the result,
+  the selected parameters, the commit and the config;
+* an index of research documents (`docs/research/`, `reports/*.md`).
+
+The log is generated, never edited: conclusions go in a report's `notes.md`. It is
+git-ignored with the rest of `reports/`. Studies stored before commits were recorded
+show the last commit made before they finished, marked *inferred*.

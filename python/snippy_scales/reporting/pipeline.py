@@ -393,6 +393,7 @@ def run_screening(cfg: ReportConfig, data: MarketData, paths: ReportPaths) -> St
             storage=paths.storage,
             returns_dir=paths.trials_dir,
             seed=s.seed,
+            config=cfg.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
     wall = (dt.datetime.now(dt.UTC) - started).total_seconds()
     return StageResult(study, trials_frame(study), summarize_study(study), todo, wall)
@@ -438,6 +439,7 @@ def run_validation(
             storage=paths.storage,
             returns_dir=paths.trials_dir,
             seed=cfg.screening.seed,
+            config=cfg.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
     wall = (dt.datetime.now(dt.UTC) - started).total_seconds()
     report = summarize_study(study, selection=screening.study)

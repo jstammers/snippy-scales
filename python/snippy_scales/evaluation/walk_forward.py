@@ -40,6 +40,7 @@ import polars as pl
 from scipy import stats as sps
 
 from snippy_scales._constants import TRADING_DAYS_PER_YEAR
+from snippy_scales._provenance import git_revision
 from snippy_scales.data.paths import EXPERIMENTS_DIR
 from snippy_scales.evaluation.statistics import (
     deflated_sharpe_ratio,
@@ -304,8 +305,14 @@ def run_study(
     storage: str | None = DEFAULT_STORAGE,
     returns_dir: Path = EXPERIMENTS_DIR,
     seed: int = 42,
+    config: Mapping[str, Any] | None = None,
 ) -> optuna.Study:
     """Search *strategy_cls* parameters by walk-forward Sharpe.
+
+    Every call is recorded on the study (user attribute ``runs``: start time, git
+    commit, branch, whether the tree had uncommitted changes, sampler, seed), and
+    every trial carries the ``commit`` and ``dirty`` flag of the code that ran it,
+    so a study resumed after the code changed shows which trials ran on which.
 
     Args:
         strategy_cls: Research strategy class; trials call ``strategy_cls(**params)``.
@@ -319,6 +326,9 @@ def run_study(
             processes can share one storage (and study name) to run in parallel.
         returns_dir: Where per-trial OOS returns are written.
         seed: Sampler seed.
+        config: The configuration that produced this call (for example a report's
+            config), stored as the study's ``config`` attribute. The settings in
+            *wf* and *space* are stored either way.
 
     Returns:
         The Optuna study.
@@ -351,6 +361,16 @@ def run_study(
     study.set_user_attr("engine", wf.engine)
     study.set_user_attr("space", json.loads(json.dumps(space, default=str)))
     study.set_user_attr("returns_dir", str(trial_dir))
+    if config is not None:
+        study.set_user_attr("config", json.loads(json.dumps(dict(config), default=str)))
+    revision = git_revision()
+    run = {
+        "started": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        **revision,
+        "sampler": sampler,
+        "seed": seed,
+    }
+    study.set_user_attr("runs", [*study.user_attrs.get("runs", []), run])
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest(trial, space)
@@ -361,6 +381,8 @@ def run_study(
         trial.set_user_attr("params", params)
         trial.set_user_attr("folds", folds)
         trial.set_user_attr("returns_path", str(path))
+        trial.set_user_attr("commit", revision["commit"])
+        trial.set_user_attr("dirty", revision["dirty"])
         return float(np.mean([f["sharpe"] for f in folds]))
 
     study.optimize(objective, n_trials=n_trials)

@@ -277,6 +277,87 @@ def test_pipeline_screens_validates_and_resumes(tmp_path: Path) -> None:
     assert run.equity.height > 0 and run.rejections == ()
 
 
+# ── Strategy log ──────────────────────────────────────────────────────────────
+
+
+def test_strategy_log_lists_results_with_config_and_commit(tmp_path: Path) -> None:
+    from snippy_scales._provenance import git_revision
+    from snippy_scales.reporting import log as rl
+
+    cfg = _cfg()
+    data = _ragged()
+    reports = tmp_path / "reports"
+    paths = ReportPaths(reports / "unit")
+    paths.root.mkdir(parents=True)
+    paths.config.write_text(cfg.to_yaml())
+    paths.notes.write_text("<!-- header -->\n\n> **Verdict: fine.** It\n> works.\n\nMore.\n")
+    screening = rp.run_screening(cfg, data, paths)
+    validation = rp.run_validation(cfg, data, screening, paths)
+    unbuilt = ReportPaths(reports / "later")
+    unbuilt.root.mkdir()
+    unbuilt.config.write_text(_cfg(name="later").to_yaml())
+    (reports / "deep-dive.md").write_text("# A deep dive\n")
+    (reports / "README.md").write_text("# Not research\n")
+
+    # The studies carry the report config and the commit of the code that ran them.
+    assert validation.study.user_attrs["config"]["name"] == "unit"
+    commit = str(git_revision()["commit"])
+
+    entries = rl.collect([reports])
+    assert [e.report for e in entries] == ["unit", "later"]  # unbuilt reports last
+    built, later = entries
+    assert later.error == "not built"
+    assert built.error is None and built.engine == "nautilus"
+    assert built.sharpe == pytest.approx(validation.report.sharpe)
+    assert built.n_trials == 3  # the screened trials, not the two validated
+    assert built.best_params == validation.report.best_params
+    assert built.commit == commit and not built.commit_inferred
+    assert built.fingerprint == cfg.fingerprint()
+    assert built.verdict == "**Verdict: fine.** It works."
+    assert built.asset_group == "equities" and built.n_symbols == 5
+
+    output = reports / "STRATEGY_LOG.md"
+    rl.write_log(output, [reports], doc_dirs=[reports])
+    text = output.read_text()
+    assert "| [unit](#unit) | `momentum-ts` | 5 equities |" in text
+    assert "▲" in text and f"`{commit[:10]}`" in text
+    assert "*No result:* not built." in text
+    assert "n_splits: 3" in text  # the config, as run
+    assert "A deep dive" in text and "Not research" not in text
+
+
+def test_strategy_log_infers_the_commit_of_an_unstamped_study(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from snippy_scales.evaluation import walk_forward
+    from snippy_scales.reporting import log as rl
+
+    # As studies were stored before commits were recorded.
+    unknown = {"commit": None, "branch": None, "dirty": None}
+    monkeypatch.setattr(walk_forward, "git_revision", lambda: unknown)
+    cfg = _cfg()
+    paths = ReportPaths(tmp_path / "unit")
+    paths.root.mkdir()
+    paths.config.write_text(cfg.to_yaml())
+    rp.run_screening(cfg, _ragged(), paths)
+
+    found = rl.entry(paths)
+    assert found.error is None and found.engine == "vector"
+    assert found.commit_inferred and found.commit is not None
+    assert "(inferred)" in rl.render([found])
+
+
+def test_asset_group_and_cli_log(tmp_path: Path) -> None:
+    from snippy_scales.cli.report import app
+    from snippy_scales.reporting import log as rl
+
+    assert rl.asset_group(["ES.ROLL", "BRN.IFEU.ROLL", "ZN.c.0"]) == "futures"
+    assert rl.asset_group(["AAPL", "MSFT", "ES.FUT"]) == "equities"
+    result = CliRunner().invoke(app, ["log", "--reports-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    assert (tmp_path / "STRATEGY_LOG.md").read_text().startswith("# Strategy log")
+
+
 def test_calendar_respects_start_and_end() -> None:
     data = _ragged()
     cfg = _cfg(data={"symbols": ["A"], "start": "2020-03-01", "end": "2020-12-31"})
