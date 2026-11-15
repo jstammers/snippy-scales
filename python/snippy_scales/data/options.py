@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -147,7 +148,8 @@ def _month_chunks(start: str, end: str) -> list[tuple[str, str]]:
     return chunks
 
 
-_ATTEMPTS = 4
+_ATTEMPTS = 8
+_BACKOFF_SECONDS = 15.0
 
 
 def sync_option_bars(  # noqa: PLR0913 — one argument per request field
@@ -201,6 +203,7 @@ def sync_option_bars(  # noqa: PLR0913 — one argument per request field
             except db.BentoServerError:  # gateway timeouts are transient
                 if attempt == _ATTEMPTS - 1:
                     raise
+                time.sleep(_BACKOFF_SECONDS * (attempt + 1))
                 continue
             frame = pl.from_pandas(store.to_df().reset_index()).select(
                 "ts_event", "symbol", "open", "high", "low", "close", "volume"
