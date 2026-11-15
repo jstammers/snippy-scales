@@ -17,7 +17,9 @@ slippage on bar data, applied with that probability).
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -329,6 +331,110 @@ def _load_parent(
     )
 
 
+#: Trading days before the front-month series switches contract that a rolled symbol rolls.
+ROLL_DAYS_BEFORE = 5
+
+
+def _load_rolled(
+    catalog: Any,  # noqa: ANN401
+    symbol: str,
+    schema: str,
+    venue: str | None,
+    catalog_path: Path | None,
+) -> MarketData:
+    """``ES.ROLL``: real contracts recovered from ``ES.c.0``/``ES.c.1`` and their mapping.
+
+    ``BRN.IFEU.ROLL`` reads IFEU's bars. With *venue* set to another venue (the
+    account's, e.g. GLBX), its contracts are listed there instead, quoted in USD
+    (:func:`~snippy_scales.data.futures.to_usd`, at the CME FX futures' rate), so
+    one USD margin account trades futures from several exchanges.
+    """
+    root = futures.rolled_root(symbol)
+    source_venue = futures.rolled_venue(symbol) or venue
+    front_sym, second_sym = f"{root}.c.0", f"{root}.c.1"
+    bt = cat.resolve_bar_type(front_sym, schema, venue=source_venue, catalog_path=catalog_path)
+    v = str(BarType.from_str(bt).instrument_id.venue)
+    found = catalog.instruments(instrument_ids=[cat.instrument_id(front_sym, v)])
+    if not found:
+        raise FileNotFoundError(f"No instrument definition for {front_sym}.{v} in the catalog.")
+    account_venue = venue if venue is not None else v
+    currency = str(found[-1].quote_currency)
+    rehome = account_venue != v
+
+    # Globex's Sunday-evening session gets a daily bar of its own; dropping it keeps
+    # one bar per trading day (so lookbacks in bars mean the same time span for every
+    # root) and loses nothing, as Monday's close-to-close return spans it. Bars with a
+    # price-scale error (a tenth of the price for one day) are dropped too.
+    def weekdays(frame: pl.DataFrame) -> pl.DataFrame:
+        frame = frame.filter(pl.col("ts_event").dt.weekday() <= 5)  # noqa: PLR2004 — Mon..Fri
+        return futures.drop_scale_glitches(frame)
+
+    frames, schedule = futures.calendar_roll(
+        symbol,
+        weekdays(cat.load_bars(front_sym, schema, venue=v, catalog_path=catalog_path)),
+        weekdays(cat.load_bars(second_sym, schema, venue=v, catalog_path=catalog_path)),
+        cat.read_symbology(front_sym, v, catalog_path),
+        cat.read_symbology(second_sym, v, catalog_path),
+        v,
+        days_before=ROLL_DAYS_BEFORE,
+    )
+    if rehome:
+        frames, schedule = _rehome(frames, schedule, v, account_venue)
+        if currency != "USD":
+            fx = _fx_rates(currency, schema, catalog_path)
+            frames = {iid: futures.to_usd(f, fx) for iid, f in frames.items()}
+    instruments, bars, bar_types = {}, {}, {}
+    for iid in schedule.instrument_ids:
+        raw = iid.removesuffix(f".{account_venue}")
+        contract = futures.synthetic_outright(
+            found[-1], raw, account_venue, frames[iid], currency="USD" if rehome else None
+        )
+        instruments[iid] = contract
+        bar_types[iid] = cat.bar_type(raw, account_venue, schema)
+        bars[iid] = _frame_bars(frames[iid], contract, bar_types[iid], schema, iid)
+    return MarketData(
+        frames={symbol: futures.back_adjust(schedule, frames)},
+        bars=bars,
+        instruments=instruments,
+        bar_types=bar_types,
+        schedules={symbol: schedule},
+    )
+
+
+def _rehome(
+    frames: dict[str, pl.DataFrame], schedule: RollSchedule, source: str, target: str
+) -> tuple[dict[str, pl.DataFrame], RollSchedule]:
+    """Rename contracts ``<raw>.<source>`` to ``<source>_<raw>.<target>``.
+
+    ICE raw symbols (``Z   FMH0019!``) have spaces and punctuation, so the new
+    symbol keeps only word characters.
+    """
+
+    def rename(iid: str) -> str:
+        raw = re.sub(r"[\W_]+", "_", iid.removesuffix(f".{source}")).strip("_")
+        return f"{source}_{raw}.{target}"
+
+    renamed = {
+        rename(iid): f.with_columns(pl.lit(rename(iid).split(".")[0]).alias("symbol"))
+        for iid, f in frames.items()
+    }
+    ids = tuple(rename(iid) for iid in schedule.instrument_ids)
+    return renamed, dataclasses.replace(schedule, instrument_ids=ids)
+
+
+def _fx_rates(currency: str, schema: str, catalog_path: Path | None) -> pl.DataFrame:
+    """Daily USD per *currency* from the CME FX future's front month."""
+    if currency not in futures.FX_FUTURES:
+        raise ValueError(f"no FX future to convert {currency} to USD")
+    fx_sym = f"{futures.FX_FUTURES[currency]}.c.0"
+    try:
+        return cat.load_bars(fx_sym, schema, venue=futures.FX_VENUE, catalog_path=catalog_path)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"{currency} prices need {fx_sym} bars to convert to USD: sync it first"
+        ) from e
+
+
 def load_market_data(
     symbols: str | Sequence[str],
     schema: str = "ohlcv-1d",
@@ -353,6 +459,8 @@ def load_market_data(
     for symbol in names:
         if futures.is_parent(symbol):
             part = _load_parent(catalog, symbol, schema, venue, catalog_path, roll)
+        elif futures.is_rolled(symbol):
+            part = _load_rolled(catalog, symbol, schema, venue, catalog_path)
         else:
             bt = cat.resolve_bar_type(symbol, schema, venue=venue, catalog_path=catalog_path)
             iid = str(BarType.from_str(bt).instrument_id)
