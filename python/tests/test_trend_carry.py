@@ -61,6 +61,10 @@ def test_asset_class_of_rolled_symbols() -> None:
         {"max_leverage": 0.0},
         {"rebal_freq": 0},
         {"portfolio_vol_target": -0.1},
+        {"trend_weight": -1.0},
+        {"basis_weight": -1.0},
+        {"basis_lookback": 1},
+        {"basis_quantile": 0.6},
         {"cov_lookback": 1},
         {"max_portfolio_scale": 0.0},
     ],
@@ -189,6 +193,74 @@ def test_long_only_groups_hold_no_shorts() -> None:
         bars
     )
     assert custom["CL.ROLL"][-1] == 0.0 and custom["ES.ROLL"][-1] < 0
+
+
+def _curve_bars(seed: int, tilt: float, n: int = _N) -> pl.DataFrame:
+    """A nearby series and a second-nearby return that lags it by *tilt* a day."""
+    rng = np.random.default_rng(seed)
+    ret = rng.normal(0.0, 0.01, n)
+    close = 100.0 * np.exp(np.cumsum(ret))
+    return pl.DataFrame({"close": close, "second_return": np.expm1(ret - tilt)})
+
+
+def test_basis_momentum_buys_the_steepening_curves_and_sells_the_flattening() -> None:
+    tilts = {
+        "CL.ROLL": 0.002,
+        "HO.ROLL": 0.001,
+        "GC.ROLL": 0.0,
+        "ZC.ROLL": -0.001,
+        "ZS.ROLL": -0.002,
+    }
+    bars = {s: _curve_bars(i, tilt) for i, (s, tilt) in enumerate(tilts.items())}
+    bars["ES.ROLL"] = _curve_bars(9, 0.01)  # not a commodity: never ranked
+    out = _fast(
+        trend_weight=0.0, basis_weight=1.0, basis_lookback=30, rebal_freq=1
+    ).generate_signals(bars)
+    last = {s: out[s][-1] for s in bars}
+    assert last["CL.ROLL"] > 0  # nearby outran the second nearby the most
+    assert last["ZS.ROLL"] < 0
+    assert last["GC.ROLL"] == 0.0 and last["HO.ROLL"] == 0.0 and last["ZC.ROLL"] == 0.0  # middle
+    assert np.all(out["ES.ROLL"].to_numpy() == 0.0)
+    assert np.all(out["CL.ROLL"][:24].to_numpy() == 0.0)  # needs 80% of the window first
+
+
+def test_basis_weight_adds_to_the_trend_signal() -> None:
+    tilts = {"CL.ROLL": 0.002, "GC.ROLL": 0.0, "ZS.ROLL": -0.002}
+    bars = {s: _curve_bars(i, tilt) for i, (s, tilt) in enumerate(tilts.items())}
+    kwargs = {"carry_weight": 0.0, "basis_lookback": 30, "rebal_freq": 1}
+    trend = _fast(**kwargs).generate_signals(bars)
+    basis = _fast(trend_weight=0.0, basis_weight=1.0, **kwargs).generate_signals(bars)
+    both = _fast(basis_weight=2.0, **kwargs).generate_signals(bars)
+    for symbol in bars:
+        np.testing.assert_allclose(
+            both[symbol].to_numpy(),
+            trend[symbol].to_numpy() + 2.0 * basis[symbol].to_numpy(),
+            atol=1e-12,
+        )
+
+
+def test_basis_momentum_needs_three_ranked_symbols_and_the_feature() -> None:
+    two = {"CL.ROLL": _curve_bars(0, 0.002), "ZS.ROLL": _curve_bars(1, -0.002)}
+    kwargs = {"trend_weight": 0.0, "basis_weight": 1.0, "basis_lookback": 30}
+    out = _fast(**kwargs).generate_signals(two)
+    assert all(np.all(v.to_numpy() == 0.0) for v in out.values())
+    plain = {s: _bars(i, carry=False) for i, s in enumerate(["CL.ROLL", "GC.ROLL", "ZS.ROLL"])}
+    out = _fast(**kwargs).generate_signals(plain)  # no second_return column
+    assert all(np.all(v.to_numpy() == 0.0) for v in out.values())
+
+
+@settings(max_examples=30, deadline=None)
+@given(seed=st.integers(0, 10_000), k=st.integers(1, _N))
+def test_causal_with_basis_momentum(seed: int, k: int) -> None:
+    names = ["CL.ROLL", "HO.ROLL", "GC.ROLL", "ZC.ROLL", "ZS.ROLL"]
+    universe = {s: _curve_bars(seed + i, 0.001 * (i - 2)) for i, s in enumerate(names)}
+    strategy = _fast(basis_weight=1.0, basis_lookback=15, portfolio_vol_target=0.1, cov_lookback=15)
+    full = strategy.generate_signals(universe)
+    prefix = strategy.generate_signals({s: b.head(k) for s, b in universe.items()})
+    for symbol in universe:
+        np.testing.assert_allclose(
+            prefix[symbol].to_numpy(), full[symbol].head(k).to_numpy(), rtol=1e-12, atol=1e-12
+        )
 
 
 def test_portfolio_scale_is_capped() -> None:

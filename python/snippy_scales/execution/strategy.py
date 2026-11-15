@@ -57,8 +57,9 @@ if TYPE_CHECKING:
 HISTORY_COLUMNS: tuple[str, ...] = ("ts_event", "ts_init", "open", "high", "low", "close", "volume")
 
 #: Optional per-bar features a history frame may carry beside its bars, passed through
-#: to the research strategy: ``carry`` is a rolled future's annualised roll yield.
-FEATURE_COLUMNS: tuple[str, ...] = ("carry",)
+#: to the research strategy: ``carry`` is a rolled future's annualised roll yield and
+#: ``second_return`` the daily return of its second-nearby contract.
+FEATURE_COLUMNS: tuple[str, ...] = ("carry", "second_return")
 
 
 def _history_frame(frame: pl.DataFrame) -> pl.DataFrame:

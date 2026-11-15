@@ -537,6 +537,51 @@ def roll_yield(
     )
 
 
+def second_nearby_return(
+    front: pl.DataFrame,
+    second: pl.DataFrame,
+    front_spans: Sequence[tuple[str, str, str]],
+    second_spans: Sequence[tuple[str, str, str]],
+) -> pl.DataFrame:
+    """Daily return of holding the second-nearby contract of a futures curve.
+
+    On each close of the second-month series, the return since its previous close of
+    the contract that was second nearby **at that previous close**. When the front
+    contract expires in between, that contract has become the front month, so its
+    price today is read from the front series: the return is always one contract's,
+    never the jump between two.
+
+    Together with the held-contract return of a rolled series this gives
+    basis-momentum (Boons & Prado, 2019): the difference between the momentum of the
+    first- and second-nearby contracts.
+
+    Args:
+        front: Bars of the front-month continuous series (``CL.c.0``).
+        second: Bars of the second-month series (``CL.c.1``).
+        front_spans: Contract mapping of *front* (``(d0, d1 exclusive, raw symbol)``).
+        second_spans: Contract mapping of *second*.
+
+    Returns:
+        ``ts_init``, ``second_return`` (Float64), sorted; no row where the contract
+        has no price at either close.
+    """
+    front_spans, second_spans = _unique_contracts(front_spans, second_spans)
+    near = _tag_contracts(front, front_spans).select("ts_init", "contract", "close")
+    far = _tag_contracts(second, second_spans).select("ts_init", "contract", "close")
+    prices = pl.concat([far, near]).filter(pl.col("close") > 0).unique(["ts_init", "contract"])
+    held = far.sort("ts_init").select(
+        "ts_init",
+        pl.col("contract").shift(1).alias("contract"),
+        pl.col("close").shift(1).alias("before"),
+    )
+    return (
+        held.join(prices, on=["ts_init", "contract"], how="inner")
+        .filter(pl.col("before") > 0)
+        .select("ts_init", (pl.col("close") / pl.col("before") - 1.0).alias("second_return"))
+        .sort("ts_init")
+    )
+
+
 #: A raw symbol that reappears after this long is a different contract (``ESZ6``
 #: is Dec 2016 and Dec 2026: CME symbols carry one year digit).
 _SYMBOL_REUSE_DAYS = 3 * 365

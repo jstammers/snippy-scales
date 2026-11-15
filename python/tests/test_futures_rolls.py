@@ -711,3 +711,23 @@ def test_forward_only_confirms_switches_and_never_goes_back() -> None:
     assert futures._forward_only([], confirm=3) == []  # noqa: SLF001
     # One-digit CME years are completed from the listing year (Z9 then F0: a decade on).
     assert futures._delivery("CLF0_2019") > futures._delivery("CLZ9_2019")  # noqa: SLF001
+
+
+def test_second_nearby_return_follows_one_contract_across_an_expiry() -> None:
+    _, frames = _market(carry=0.001)  # a steep curve: contracts 90 days apart differ by ~9%
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    out = futures.second_nearby_return(front, second, front_spans, second_spans)
+
+    assert out.columns == ["ts_init", "second_return"] and out["ts_init"].is_sorted()
+    assert out.height > second.height * 0.9
+    # The series itself jumps when it switches contract; the held contract does not.
+    jump = second.sort("ts_init")["close"].pct_change().abs().max()
+    assert jump is not None and jump > 0.07  # noqa: PLR2004
+    assert out["second_return"].abs().max() < 0.06  # noqa: PLR2004
+    # On an ordinary day it is the second series' own return.
+    plain = second.sort("ts_init").select("ts_init", pl.col("close").pct_change().alias("r"))
+    both = out.join(plain, on="ts_init").filter(
+        (pl.col("r") - pl.col("second_return")).abs() < 1e-12
+    )
+    assert both.height > out.height * 0.9

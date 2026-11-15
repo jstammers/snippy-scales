@@ -345,7 +345,10 @@ def _load_rolled(
     """``ES.ROLL``: real contracts recovered from ``ES.c.0``/``ES.c.1`` and their mapping.
 
     The signal frame carries a ``carry`` column, the curve's annualised roll yield
-    (:func:`~snippy_scales.data.futures.roll_yield`; null where it can't be measured).
+    (:func:`~snippy_scales.data.futures.roll_yield`), and ``second_return``, the daily
+    return of the second-nearby contract
+    (:func:`~snippy_scales.data.futures.second_nearby_return`; null for ``.VROLL``).
+    Both are null where they can't be measured.
 
     ``BRN.IFEU.ROLL`` reads IFEU's bars. With *venue* set to another venue (the
     account's, e.g. GLBX), its contracts are listed there instead, quoted in USD
@@ -390,6 +393,12 @@ def _load_rolled(
     # The curve's annualised roll yield, a feature for carry strategies (a price
     # ratio, so it is the same before and after the conversion to USD below).
     carry = futures.roll_yield(front, second, front_spans, second_spans)
+    # The second-nearby contract's daily return, for basis-momentum. Only for calendar
+    # series: the two most traded contracts of a volume series are not ordered by expiry.
+    features = carry
+    if rule == "c":
+        deferred = futures.second_nearby_return(front, second, front_spans, second_spans)
+        features = carry.join(deferred, on="ts_init", how="full", coalesce=True)
     if rehome:
         frames, schedule = _rehome(frames, schedule, v, account_venue)
         if currency != "USD":
@@ -404,7 +413,9 @@ def _load_rolled(
         instruments[iid] = contract
         bar_types[iid] = cat.bar_type(raw, account_venue, schema)
         bars[iid] = _frame_bars(frames[iid], contract, bar_types[iid], schema, iid)
-    signal = futures.back_adjust(schedule, frames).join(carry, on="ts_init", how="left")
+    signal = futures.back_adjust(schedule, frames).join(features, on="ts_init", how="left")
+    if "second_return" not in signal.columns:
+        signal = signal.with_columns(pl.lit(None, pl.Float64).alias("second_return"))
     return MarketData(
         frames={symbol: signal},
         bars=bars,
