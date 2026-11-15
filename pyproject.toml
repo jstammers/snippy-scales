@@ -41,6 +41,9 @@ dev = [
     "pytest-cov>=5",
     "hypothesis>=6",
 ]
+options = [
+    "jax>=0.12.0.1",
+]
 
 [project.scripts]
 algo = "snippy_scales.cli.main:app"
