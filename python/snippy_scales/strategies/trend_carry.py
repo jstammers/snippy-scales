@@ -24,6 +24,13 @@ combined instrument by instrument:
 The position is the average of the last *H* = ``rebal_freq`` daily targets. That is
 the book of *H* tranches, each rebalanced every *H* bars on a different day, so
 the result does not depend on which day of the month the rebalance falls on.
+
+With ``portfolio_vol_target`` set, the whole book is then scaled each bar so that its
+**ex-ante** volatility (today's positions applied to the last ``cov_lookback`` bars
+of returns, so correlations between positions count) equals the target. Per-instrument
+sizing fixes each position's risk but not the book's: when trends line up across
+markets the positions become correlated and the book's risk rises. The scale takes
+that back out.
 """
 
 from __future__ import annotations
@@ -95,6 +102,12 @@ class TrendCarry(MultiAssetStrategy):
             target.
         groups: ``symbol -> peer group`` for the relative carry signal. Defaults to
             the asset class of each futures root (:func:`asset_class`).
+        portfolio_vol_target: Annualised volatility the whole book is scaled to,
+            assuming capital is split equally over the symbols (the engines'
+            default). ``0`` (default) leaves the book unscaled.
+        cov_lookback: Bars of returns the book's ex-ante volatility is measured on.
+        max_portfolio_scale: Cap on the book-level scale, so a quiet, uncorrelated
+            spell cannot lever the book without limit.
 
     Frames without a ``carry`` column (or with null carry) get a zero carry signal,
     as does a symbol with no peer that has carry on that date.
@@ -114,6 +127,9 @@ class TrendCarry(MultiAssetStrategy):
         max_leverage: float = 50.0,
         rebal_freq: int = 21,
         groups: dict[str, str] | None = None,
+        portfolio_vol_target: float = 0.0,
+        cov_lookback: int = 126,
+        max_portfolio_scale: float = 2.0,
     ) -> None:
         if lookback < 1:
             raise ValueError(f"lookback must be ≥ 1, got {lookback}")
@@ -131,6 +147,12 @@ class TrendCarry(MultiAssetStrategy):
             raise ValueError(f"max_leverage must be positive, got {max_leverage}")
         if rebal_freq < 1:
             raise ValueError(f"rebal_freq must be ≥ 1, got {rebal_freq}")
+        if portfolio_vol_target < 0:
+            raise ValueError(f"portfolio_vol_target must be ≥ 0, got {portfolio_vol_target}")
+        if cov_lookback < 2:  # noqa: PLR2004 — a variance needs two returns
+            raise ValueError(f"cov_lookback must be ≥ 2, got {cov_lookback}")
+        if max_portfolio_scale <= 0:
+            raise ValueError(f"max_portfolio_scale must be positive, got {max_portfolio_scale}")
 
         self.lookback = lookback
         self.carry_weight = carry_weight
@@ -141,6 +163,9 @@ class TrendCarry(MultiAssetStrategy):
         self.max_leverage = max_leverage
         self.rebal_freq = rebal_freq
         self.groups = groups
+        self.portfolio_vol_target = portfolio_vol_target
+        self.cov_lookback = cov_lookback
+        self.max_portfolio_scale = max_portfolio_scale
 
     def generate_signals(self, multi_bars: dict[str, pl.DataFrame]) -> dict[str, pl.Series]:
         """Target positions (units of equity) for every symbol.
@@ -172,6 +197,8 @@ class TrendCarry(MultiAssetStrategy):
         daily = np.where(listed, signal * self._leverage(close), 0.0)
         positions = _rolling_nanmean(daily, self.rebal_freq, 1)
         positions = np.where(listed, positions, 0.0)
+        if self.portfolio_vol_target > 0.0 and symbols:
+            positions = positions * self._portfolio_scale(positions, close)[:, None]
         return {s: pl.Series("position", positions[:, j]) for j, s in enumerate(symbols)}
 
     # ------------------------------------------------------------------
@@ -218,6 +245,28 @@ class TrendCarry(MultiAssetStrategy):
             relative = np.where(valid & (count >= _MIN_GROUP), block - mean, 0.0)
             out[:, cols] = np.sign(relative)
         return out
+
+    def _portfolio_scale(self, positions: np.ndarray, close: np.ndarray) -> np.ndarray:
+        """Per-bar scale taking the book's ex-ante volatility to the target.
+
+        The book at bar *t* is ``positions[t] / n_symbols`` (equal capital weights).
+        Its volatility is that of the returns it would have earned over the last
+        ``cov_lookback`` bars, which is ``sqrt(p' Σ p)`` for the sample covariance
+        ``Σ`` of those bars. The scale is 1 until that many bars exist.
+        """
+        n, m = positions.shape
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ret = close[1:] / close[:-1] - 1.0
+        ret = np.vstack([np.zeros((1, m)), np.where(np.isfinite(ret), ret, 0.0)])
+        book = positions / m
+        scale = np.ones(n)
+        window = self.cov_lookback
+        for t in range(window, n):
+            hypothetical = ret[t - window + 1 : t + 1] @ book[t]
+            vol = float(np.std(hypothetical, ddof=1)) * TRADING_DAYS_PER_YEAR**0.5
+            if vol > 0.0:
+                scale[t] = min(self.portfolio_vol_target / vol, self.max_portfolio_scale)
+        return scale
 
     def _leverage(self, close: np.ndarray) -> np.ndarray:
         """``vol_target / realised volatility`` (floored, capped); zero while it warms up."""

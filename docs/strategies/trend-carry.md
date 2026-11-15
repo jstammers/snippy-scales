@@ -58,6 +58,24 @@ it falls on, and for slow signals on a few dozen instruments that choice alone c
 move a decade's Sharpe ratio by several tenths. Tranching earns the average over
 the possible rebalance days and removes the luck.
 
+## Portfolio volatility target
+
+Sizing each position to 40% volatility fixes every position's risk but not the
+book's. When trends line up across markets (most contracts short in a crash, or
+long in a broad rally) the positions become correlated and the book's risk rises,
+often just before trends reverse. With `portfolio_vol_target` $= \sigma_P^*$ the whole
+book is scaled each bar by
+
+$$
+k_t = \min\!\left(\frac{\sigma_P^*}{\sqrt{p_t^\top \hat\Sigma_t\, p_t}},\ k_{\max}\right),
+$$
+
+where $p_t$ is the book (positions over the number of symbols) and $\hat\Sigma_t$ the
+annualised sample covariance of the last `cov_lookback` bars of returns. The risk
+is **ex ante**: it is that of today's positions, not of the positions held over the
+past months, so it reacts as soon as the book changes. All positions share one
+scale, so the mix of positions is unchanged.
+
 ## Parameters
 
 | Parameter | Default | Meaning |
@@ -71,6 +89,9 @@ the possible rebalance days and removes the luck.
 | `max_leverage` | 50 | Cap on `vol_target / volatility` |
 | `rebal_freq` | 21 | Holding period $H$ in bars (number of tranches) |
 | `groups` | asset class | Peer group of each symbol for the carry signal |
+| `portfolio_vol_target` | 0 (off) | Annualised volatility the whole book is scaled to |
+| `cov_lookback` | 126 | Bars of returns behind the book's ex-ante volatility |
+| `max_portfolio_scale` | 2 | Cap on the book-level scale $k_{\max}$ |
 
 ## What to expect
 

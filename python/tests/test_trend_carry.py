@@ -60,6 +60,9 @@ def test_asset_class_of_rolled_symbols() -> None:
         {"vol_floor": 0.0},
         {"max_leverage": 0.0},
         {"rebal_freq": 0},
+        {"portfolio_vol_target": -0.1},
+        {"cov_lookback": 1},
+        {"max_portfolio_scale": 0.0},
     ],
 )
 def test_invalid_parameters(kwargs: dict[str, float]) -> None:
@@ -146,11 +149,44 @@ def test_volatility_floor_caps_leverage_on_stale_prices() -> None:
     assert np.abs(out["CL.ROLL"].to_numpy()).max() <= 0.4 / 0.02 + 1e-9
 
 
+def test_portfolio_vol_target_sets_the_books_ex_ante_volatility() -> None:
+    bars = _universe()
+    plain = _fast(carry_weight=0.0).generate_signals(bars)
+    scaled = _fast(
+        carry_weight=0.0, portfolio_vol_target=0.10, cov_lookback=30, max_portfolio_scale=1e9
+    ).generate_signals(bars)
+    close = np.column_stack([f["close"].to_numpy() for f in bars.values()])
+    ret = np.vstack([np.zeros((1, 4)), close[1:] / close[:-1] - 1.0])
+    book = np.column_stack([scaled[s].to_numpy() for s in bars]) / 4
+    for t in (60, 90, _N - 1):
+        vol = np.std(ret[t - 29 : t + 1] @ book[t], ddof=1) * np.sqrt(252)
+        assert vol == pytest.approx(0.10)
+    # One scale for the whole book: relative positions are unchanged.
+    a = np.array([plain[s][-1] for s in bars])
+    b = np.array([scaled[s][-1] for s in bars])
+    np.testing.assert_allclose(b / np.abs(b).sum(), a / np.abs(a).sum())
+    # Unscaled until the covariance window exists.
+    for symbol in bars:
+        np.testing.assert_allclose(scaled[symbol][:30].to_numpy(), plain[symbol][:30].to_numpy())
+
+
+def test_portfolio_scale_is_capped() -> None:
+    bars = _universe()
+    plain = _fast(carry_weight=0.0).generate_signals(bars)
+    capped = _fast(
+        carry_weight=0.0, portfolio_vol_target=10.0, cov_lookback=30, max_portfolio_scale=1.5
+    ).generate_signals(bars)
+    for symbol in bars:
+        np.testing.assert_allclose(
+            capped[symbol][40:].to_numpy(), 1.5 * plain[symbol][40:].to_numpy()
+        )
+
+
 @settings(max_examples=40, deadline=None)
 @given(seed=st.integers(0, 10_000), k=st.integers(1, _N))
 def test_causal_with_carry(seed: int, k: int) -> None:
     universe = _universe(seed)
-    strategy = _fast()
+    strategy = _fast(portfolio_vol_target=0.10, cov_lookback=15)
     full = strategy.generate_signals(universe)
     prefix = strategy.generate_signals({s: b.head(k) for s, b in universe.items()})
     for symbol in universe:
