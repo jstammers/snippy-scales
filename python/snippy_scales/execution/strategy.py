@@ -56,6 +56,16 @@ if TYPE_CHECKING:
 #: Columns a history frame must carry, as :func:`~snippy_scales.data.catalog.load_bars` returns.
 HISTORY_COLUMNS: tuple[str, ...] = ("ts_event", "ts_init", "open", "high", "low", "close", "volume")
 
+#: Optional per-bar features a history frame may carry beside its bars, passed through
+#: to the research strategy: ``carry`` is a rolled future's annualised roll yield.
+FEATURE_COLUMNS: tuple[str, ...] = ("carry",)
+
+
+def _history_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    """The bar columns of *frame* plus any feature columns it has, sorted by close."""
+    features = [c for c in FEATURE_COLUMNS if c in frame.columns]
+    return frame.select(*HISTORY_COLUMNS, *features).sort("ts_init")
+
 
 def _ts_ns(frame: pl.DataFrame) -> np.ndarray:
     """``ts_init`` of *frame* as int64 nanoseconds."""
@@ -234,7 +244,7 @@ class SignalStrategy(NautilusStrategy):
             raise ValueError(f"all instruments must share one currency, got {sorted(currencies)}")
 
         self._research = research
-        self._history = {s: history[s].select(HISTORY_COLUMNS).sort("ts_init") for s in symbols}
+        self._history = {s: _history_frame(history[s]) for s in symbols}
         self._schedules = dict(schedules)
         self._instruments = {i: instruments[i] for i in traded}
         self._bar_types = {i: BarType.from_str(bar_types[i]) for i in traded}
@@ -344,8 +354,12 @@ class SignalStrategy(NautilusStrategy):
                     "close": [float(bar.close)],
                     "volume": [float(bar.volume)],
                 }
+            )
+            # Features (e.g. carry) aren't in a live bar: null until the data is reloaded.
+            row = row.with_columns(
+                pl.lit(None).alias(c) for c in frame.columns if c not in row.columns
             ).cast(frame.schema)
-            frame = pl.concat([frame, row])
+            frame = pl.concat([frame, row.select(frame.columns)])
             if self._window is not None:
                 frame = frame.tail(self._window)
             self._history[symbol] = frame

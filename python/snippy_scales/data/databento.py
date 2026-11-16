@@ -256,7 +256,7 @@ class DatabentoSync:
         Returns:
             Number of continuous symbols written; 0 offline.
         """
-        cont = [s for s in symbols if ".c." in s]
+        cont = [s for s in symbols if is_continuous(s)]
         hist = self._historical_client() if cont else None
         if hist is None:
             return 0
@@ -659,7 +659,7 @@ class DatabentoSync:
         for d in sorted(defs, key=lambda d: d.ts_init):
             latest[str(d.id)] = d
         for symbol in todo:
-            if ".c." not in symbol:
+            if not is_continuous(symbol):
                 continue
             cid = str(self._instrument_id(symbol))
             root = symbol.split(".", 1)[0]
@@ -710,8 +710,8 @@ class DatabentoSync:
         return len(new)
 
     def _fetch_definitions(self, symbols: list[str], start: int, end: int) -> list[Any]:
-        continuous = [s for s in symbols if ".c." in s]
-        others = [s for s in symbols if ".c." not in s]
+        continuous = [s for s in symbols if is_continuous(s)]
+        others = [s for s in symbols if not is_continuous(s)]
         defs: list[Any] = []
 
         def fetch(syms: list[str], lo: int) -> list[Any]:
@@ -744,9 +744,18 @@ def _tick_spec(schema: str) -> _TickSpec:
         ) from None
 
 
+def is_continuous(symbol: str) -> bool:
+    """Whether *symbol* is a Databento continuous series.
+
+    ``ES.c.0`` rolls on the calendar, ``ES.v.0`` to the contract with the highest
+    volume and ``ES.n.0`` to the one with the highest open interest.
+    """
+    return any(f".{rule}." in symbol for rule in "cnv")
+
+
 def _stype_for(symbol: str) -> str:
     """Databento ``stype_in`` implied by a symbol's form."""
-    if ".c." in symbol or ".n." in symbol or ".v." in symbol:
+    if is_continuous(symbol):
         return "continuous"
     if symbol.endswith((".FUT", ".OPT")):
         return "parent"

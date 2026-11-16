@@ -11,6 +11,9 @@ Usage examples::
     # Open it in marimo's editor; list reports
     algo report edit tsmom-sp500
     algo report list
+
+    # Regenerate the strategy log (reports/STRATEGY_LOG.md) from every report
+    algo report log
 """
 
 from __future__ import annotations
@@ -115,6 +118,31 @@ def list_(reports_dir: Path = _REPORTS) -> None:
             strategy, title = "?", f"[red]invalid config: {exc.__class__.__name__}[/]"
         table.add_row(paths.root.name, strategy, title, _mtime(paths.html))
     console.print(table)
+
+
+@app.command()
+def log(
+    output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--output",
+        "-o",
+        help="Markdown file to write (default: <reports-dir>/STRATEGY_LOG.md)",
+    ),
+    also: list[Path] = typer.Option(  # noqa: B008
+        [], "--also", help="Further reports directories to include (e.g. another worktree's)"
+    ),
+    reports_dir: Path = _REPORTS,
+) -> None:
+    """Write the strategy log: every report's result, config and commit, in date order."""
+    from snippy_scales.reporting.log import write_log
+
+    target = output if output is not None else reports_dir / "STRATEGY_LOG.md"
+    entries = write_log(target, [reports_dir, *also])
+    built = sum(e.error is None for e in entries)
+    console.print(f"[green]Strategy log:[/] {target}  ({built} of {len(entries)} reports built)")
+    for e in entries:
+        if e.error is not None:
+            console.print(f"[yellow]{e.report}:[/] {e.error}")
 
 
 def _mtime(path: Path) -> str:

@@ -121,6 +121,35 @@ def test_grid_study_runs_every_combination(wf: WalkForward, tmp_path: Path) -> N
     assert load_strategy_class(study.user_attrs["strategy"]) is TrendFollowing
 
 
+def test_study_records_the_code_and_config_that_ran_it(wf: WalkForward, tmp_path: Path) -> None:
+    from snippy_scales._provenance import git_revision
+
+    revision = git_revision()
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    run_study(
+        TrendFollowing,
+        wf,
+        study_name="s",
+        n_trials=1,
+        storage=storage,
+        returns_dir=tmp_path,
+        config={"name": "unit"},
+    )
+    study = run_study(  # resumed
+        TrendFollowing, wf, study_name="s", n_trials=1, storage=storage, returns_dir=tmp_path
+    )
+
+    assert study.user_attrs["config"] == {"name": "unit"}
+    runs = study.user_attrs["runs"]
+    assert len(runs) == 2  # one entry per call, so a resumed study shows every run
+    assert {"started", "commit", "branch", "dirty", "sampler", "seed"} <= set(runs[0])
+    assert runs[0]["commit"] == revision["commit"]
+    assert len(study.trials) == 2
+    for trial in study.trials:
+        assert trial.user_attrs["commit"] == revision["commit"]
+        assert trial.user_attrs["dirty"] == revision["dirty"]
+
+
 def test_report_deflates_for_the_search(wf: WalkForward, tmp_path: Path) -> None:
     space = {"fast_period": [5, 10, 20], "slow_period": [30, 60]}
     study = run_study(

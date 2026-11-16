@@ -1,0 +1,83 @@
+# Trend plus asset-class-relative carry on the 34 CME futures of `tsmom_futures.yaml`,
+# rebalanced in 21 staggered tranches. carry_weight 0 is the tranched time-series
+# momentum baseline, 1 is carry alone, 0.5 the blend.
+#   algo data sync configs/databento_tsmom_cme.yaml
+#   algo report new trend-carry-futures --from reports/templates/configs/trend_carry_futures.yaml
+#   algo report build trend-carry-futures
+name: trend-carry-futures
+title: Trend and carry on diversified CME futures
+strategy: trend-carry
+question: >-
+  Does blending time-series momentum with asset-class-relative carry (roll yield),
+  rebalanced in staggered tranches, earn a higher out-of-sample Sharpe ratio on 34
+  CME futures than momentum alone, after costs and after deflating for the search?
+data:
+  symbols:
+    # Equity indices
+    - ES.ROLL
+    - NQ.ROLL
+    - YM.ROLL
+    - RTY.ROLL
+    - NKD.ROLL
+    - EMD.ROLL
+    # Government bonds
+    - ZT.ROLL
+    - ZF.ROLL
+    - ZN.ROLL
+    - ZB.ROLL
+    - UB.ROLL
+    # Currencies
+    - 6A.ROLL
+    - 6B.ROLL
+    - 6C.ROLL
+    - 6E.ROLL
+    - 6J.ROLL
+    - 6S.ROLL
+    - 6N.ROLL
+    # Energy
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    # Metals
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    # Agriculture and livestock
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+  venue: GLBX
+  schema: ohlcv-1d
+  benchmark: ES.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 x 15% of ~4,270 weekday closes: OOS from ~2014
+  min_train: 252
+  # Large capital so whole-contract rounding is negligible at 1/34 weight per root.
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0   # ~exchange + broker fees per contract per side
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0                 # bond legs run at 10-25x their 1/N capital
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    lookback: [189, 252]                # the two best lookbacks of tsmom-futures
+    carry_weight: [0.0, 0.5, 1.0]       # trend alone, blend, carry alone
+    carry_smooth: [252]                 # one year: removes curve seasonality
+    vol_target: [0.40]
+    vol_lookback: [63]
+    max_leverage: [50.0]
+    rebal_freq: [21]                    # 21 staggered monthly tranches
+validation:
+  top_k: 6

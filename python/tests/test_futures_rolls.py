@@ -602,3 +602,112 @@ def test_calendar_roll_skips_closes_where_either_contract_did_not_trade() -> Non
         "ES.ROLL", front, second, front_spans, second_spans, "GLBX", days_before=5
     )
     assert schedule.rolls[0][0] == _close_ns(_EXPIRY_DAYS[0] - 6)
+
+
+# ── Roll yield (carry) ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("near", "far", "months"),
+    [
+        ("ESZ6", "ESH7", 3),
+        ("CLZ9", "CLF0", 1),  # one-digit years wrap at the decade
+        ("BRN FMG0019!", "BRN FMH0019!", 1),
+        ("Z   FMZ0026!", "Z   FMH0027!", 3),
+        ("FGBL SI 20260908 PS", "FGBL SI 20261208 PS", 3),
+        ("ESH7", "ESZ6", None),  # a wrapped year digit: the far contract delivers first
+        ("ESZ6", "ESZ6", None),
+        ("ESZ6", "BRN FMG0019!", None),
+        ("AAPL", "ESZ6", None),
+    ],
+)
+def test_months_between(near: str, far: str, months: int | None) -> None:
+    assert futures.months_between(near, far) == months
+
+
+def test_roll_yield_is_the_annualised_front_to_second_ratio() -> None:
+    _, frames = _market(carry=0.001)
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    carry = futures.roll_yield(front, second, front_spans, second_spans)
+
+    assert carry.columns == ["ts_init", "carry"]
+    assert carry["ts_init"].is_sorted()
+    joined = (
+        carry.join(front.select("ts_init", "close"), on="ts_init")
+        .join(second.select("ts_init", pl.col("close").alias("far")), on="ts_init")
+        .with_columns(expected=(pl.col("close") / pl.col("far") - 1.0) * 12.0 / 3.0)
+    )
+    assert joined.height == carry.height > 0
+    np.testing.assert_allclose(joined["carry"].to_numpy(), joined["expected"].to_numpy())
+
+
+def test_roll_yield_skips_closes_where_a_contract_did_not_trade() -> None:
+    _, frames = _market(carry=0.001)
+    front, front_spans = _continuous(frames, 0)
+    second, second_spans = _continuous(frames, 1)
+    stale = second["ts_init"][5]
+    second = second.with_columns(
+        volume=pl.when(pl.col("ts_init") == stale).then(0.0).otherwise(pl.col("volume"))
+    )
+    carry = futures.roll_yield(front, second, front_spans, second_spans)
+    assert stale not in set(carry["ts_init"].to_list())
+
+
+def test_rolled_symbol_frame_has_carry(tmp_path: Path) -> None:
+    contracts, frames = _market(carry=0.001)
+    catalog = cat.open_catalog(tmp_path)
+    for rank in (0, 1):
+        sym = f"ES.c.{rank}"
+        series, spans = _continuous(frames, rank)
+        cat.write_bars(
+            catalog,
+            cat.frame_to_bars(
+                series,
+                bar_type=cat.bar_type(sym, "GLBX", "ohlcv-1d"),
+                price_precision=2,
+                interval_ns=_DAY,
+            ),
+        )
+        cat.write_symbology(sym, "GLBX", spans, tmp_path)
+    cat.write_instruments(catalog, [cat.continuous_instrument(contracts[0], "ES.c.0")])
+
+    frame = load_market_data("ES.ROLL", catalog_path=tmp_path).frames["ES.ROLL"]
+    assert "carry" in frame.columns
+    assert frame["carry"].drop_nulls().len() > frame.height // 2
+
+
+def test_volume_rolled_symbols_name_the_volume_series() -> None:
+    assert futures.is_rolled("SB.IFUS.VROLL") and futures.is_rolled("ES.ROLL")
+    assert not futures.is_rolled("ES.c.0")
+    assert futures.rolled_rule("SB.IFUS.VROLL") == "v" and futures.rolled_rule("ES.ROLL") == "c"
+    assert futures.rolled_root("SB.IFUS.VROLL") == "SB"
+    assert futures.rolled_venue("SB.IFUS.VROLL") == "IFUS"
+    assert futures.rolled_venue("SB.VROLL") is None
+
+
+def test_repair_prices_fixes_zero_lows_and_drops_zero_closes() -> None:
+    frame = pl.DataFrame(
+        {
+            "open": [10.0, 0.0, 10.0],
+            "high": [11.0, 9.0, 11.0],
+            "low": [0.0, 0.0, 9.0],
+            "close": [10.5, 9.5, 0.0],
+            "volume": [1.0, 1.0, 1.0],
+        }
+    )
+    out = futures.repair_prices(frame)
+    assert out.height == 2  # the zero close is dropped
+    assert out["low"].to_list() == [10.0, 9.5]  # the lower of open and close
+    assert out["open"].to_list() == [10.0, 9.5]  # a zero open becomes the close
+    assert out["high"].to_list() == [11.0, 9.5]
+
+
+def test_forward_only_confirms_switches_and_never_goes_back() -> None:
+    h, k, n = "SB  FMH0025!_2024", "SB  FMK0025!_2024", "SB  FMN0025!_2025"
+    #        a far contract for one day, a flip back, then a confirmed switch
+    seen = [h, n, h, k, h, k, k, k, h, k]
+    assert futures._forward_only(seen, confirm=3) == [h, h, h, h, h, h, h, k, k, k]  # noqa: SLF001
+    assert futures._forward_only([], confirm=3) == []  # noqa: SLF001
+    # One-digit CME years are completed from the listing year (Z9 then F0: a decade on).
+    assert futures._delivery("CLF0_2019") > futures._delivery("CLZ9_2019")  # noqa: SLF001

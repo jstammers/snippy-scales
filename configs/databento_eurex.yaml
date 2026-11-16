@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------------
+# Databento sync: Eurex bond and equity-index futures, March 2025 onward
+# ---------------------------------------------------------------------------
+# Databento's Eurex history starts on 2025-03-10: too short to backtest a
+# twelve-month trend signal, but it accumulates for later and for live trading.
+# Prices are in EUR: trading them in a USD account needs 6E.c.0 for conversion.
+#
+#   algo data sync configs/databento_eurex.yaml --dry-run
+# ---------------------------------------------------------------------------
+
+dataset: "XEUR.EOBI"
+schemas: ["1d"]
+start: "2025-03-10"
+stype_in: "continuous"
+
+asset_classes:
+  bonds:
+    symbols:
+      - FGBS.c.0  # Euro-Schatz (2y)
+      - FGBS.c.1
+      - FGBM.c.0  # Euro-Bobl (5y)
+      - FGBM.c.1
+      - FGBL.c.0  # Euro-Bund (10y)
+      - FGBL.c.1
+      - FGBX.c.0  # Euro-Buxl (30y)
+      - FGBX.c.1
+  equity_index:
+    symbols:
+      - FESX.c.0  # EURO STOXX 50
+      - FESX.c.1
+      - FDAX.c.0  # DAX
+      - FDAX.c.1

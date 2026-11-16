@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Databento sync: Cboe VIX futures, Nov 2018 onward
+# ---------------------------------------------------------------------------
+# Front (.c.0) and second (.c.1) monthly VIX futures: a volatility asset for the
+# futures trend and carry books. Loads as `VX.XCBF.ROLL`; the curve is usually in
+# contango, so its carry is strongly negative.
+#
+#   algo data sync configs/databento_cfe_vix.yaml --dry-run
+# ---------------------------------------------------------------------------
+
+dataset: "XCBF.PITCH"
+schemas: ["1d"]
+start: "2018-01-01"
+stype_in: "continuous"
+
+asset_classes:
+  volatility:
+    symbols:
+      - VX.c.0    # VIX futures, front month
+      - VX.c.1

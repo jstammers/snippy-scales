@@ -18,7 +18,13 @@ if TYPE_CHECKING:
 
 console = Console()
 
-STRATEGY_NAMES = ("trend-following", "momentum-ts", "momentum-cs", "mean-reversion")
+STRATEGY_NAMES = (
+    "trend-following",
+    "momentum-ts",
+    "momentum-cs",
+    "mean-reversion",
+    "trend-carry",
+)
 
 
 def registry() -> dict[str, type[Strategy] | type[MultiAssetStrategy]]:
@@ -26,6 +32,7 @@ def registry() -> dict[str, type[Strategy] | type[MultiAssetStrategy]]:
         CrossSectionalMomentum,
         MeanReversion,
         TimeSeriesMomentum,
+        TrendCarry,
         TrendFollowing,
     )
 
@@ -34,6 +41,7 @@ def registry() -> dict[str, type[Strategy] | type[MultiAssetStrategy]]:
         "momentum-ts": TimeSeriesMomentum,
         "momentum-cs": CrossSectionalMomentum,
         "mean-reversion": MeanReversion,
+        "trend-carry": TrendCarry,
     }
 
 

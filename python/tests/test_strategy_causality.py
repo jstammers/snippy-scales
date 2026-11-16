@@ -23,6 +23,7 @@ from snippy_scales.strategies import (
     MultiAssetStrategy,
     Strategy,
     TimeSeriesMomentum,
+    TrendCarry,
     TrendFollowing,
 )
 
@@ -37,6 +38,8 @@ _SINGLE: list[Strategy] = [
 _MULTI: list[MultiAssetStrategy] = [
     CrossSectionalMomentum(lookback=20, skip_recent=3, vol_lookback=10, rebal_freq=5),
     CrossSectionalMomentum(lookback=10, skip_recent=0, vol_lookback=5, rebal_freq=1),
+    TrendCarry(lookback=20, carry_weight=0.5, carry_smooth=10, vol_lookback=10, rebal_freq=5),
+    TrendCarry(lookback=10, carry_weight=1.0, carry_smooth=4, vol_lookback=5, rebal_freq=1),
 ]
 
 
