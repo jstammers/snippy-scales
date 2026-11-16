@@ -32,18 +32,25 @@ PRIIPs key-information rules is unsettled in the sources found; check per produc
   Databento sells OPRA history pay-as-you-go by size. A full-chain history is costly;
   ask for the price of the exact request before buying (`metadata.get_cost` is
   free).
-- Options on futures (for example on ES) are part of the CME dataset this project
-  already uses *(from memory: verify the symbology and cost)*. Daily settlement
-  data for one root is the cheapest way to get a real options history.
+- Options on futures are part of the CME dataset this project already uses.
+  `data.options.sync_option_bars` stores the daily bars of a whole chain (parent
+  symbol `ES.OPT`); price the request first with `metadata.get_cost`. The parent
+  symbol covers the quarterly expiries only: weekly and end-of-month options are
+  separate roots. Requests longer than a month time out, so the sync fetches month
+  by month.
 - Daily bars are not enough to model fills. Option spreads are wide, so a backtest
   needs quotes, or at least settlement prices with a spread assumption.
 
+**Pricing.** `research.options` prices options on futures with Black-76 in JAX: prices,
+Greeks by automatic differentiation and implied volatility for a whole chain at once
+(`uv sync --extra options`). That is enough to build implied-volatility surfaces and
+to run research-grade tests of option strategies on daily bars.
+
 **Engine.** NautilusTrader has option instruments, option chains and Greeks (added
-in v1.225, April 2026), with a local Black-Scholes calculator for backtests. This
-project's own layers do not: strategies return one target per symbol in units of
-equity, the vector engine and `SignalStrategy` fill at bar closes, and nothing
-selects strikes or expiries. An options strategy needs a contract-selection layer,
-an implied-volatility surface, and a quote-based fill model.
+in v1.225, April 2026). This project's backtest layers do not: strategies return one
+target per symbol in units of equity, the engines fill at bar closes, and nothing
+selects strikes or expiries. Trading options through the engines needs a
+contract-selection layer and a quote-based fill model.
 
 **What to test if built.** The best-documented options return is the volatility
 risk premium: implied volatility exceeds realised volatility on average, so sellers

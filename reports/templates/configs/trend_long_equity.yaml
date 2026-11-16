@@ -1,0 +1,84 @@
+# Does trading equity indices long-or-flat improve tranched trend with a 10% portfolio
+# volatility target on 34 CME futures? long_only "" is the baseline, in the grid.
+#   algo report new trend-long-equity --from reports/templates/configs/trend_long_equity.yaml
+#   algo report build trend-long-equity
+name: trend-long-equity
+title: Long-or-flat equity trend, 34 CME futures
+strategy: trend-carry
+question: >-
+  Does holding no position, instead of a short one, in equity-index futures with a
+  negative trend raise the out-of-sample Sharpe ratio of tranched trend with a 10%
+  portfolio volatility target on 34 CME futures?
+data:
+  symbols:
+    # Equity indices
+    - ES.ROLL
+    - NQ.ROLL
+    - YM.ROLL
+    - RTY.ROLL
+    - NKD.ROLL
+    - EMD.ROLL
+    # Government bonds
+    - ZT.ROLL
+    - ZF.ROLL
+    - ZN.ROLL
+    - ZB.ROLL
+    - UB.ROLL
+    # Currencies
+    - 6A.ROLL
+    - 6B.ROLL
+    - 6C.ROLL
+    - 6E.ROLL
+    - 6J.ROLL
+    - 6S.ROLL
+    - 6N.ROLL
+    # Energy
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    # Metals
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    # Agriculture and livestock
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+  venue: GLBX
+  schema: ohlcv-1d
+  benchmark: ES.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15                # 5 x 15% of ~4,270 weekday closes: OOS from ~2014
+  min_train: 252
+  # Large capital so whole-contract rounding is negligible at 1/34 weight per root.
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0   # ~exchange + broker fees per contract per side
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0                 # bond legs run at 10-25x their 1/N capital
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    lookback: [189, 252]
+    long_only: ["", "equity"]           # both ways (baseline), long-or-flat equities
+    carry_weight: [0.0]
+    portfolio_vol_target: [0.10]
+    vol_target: [0.40]
+    vol_lookback: [63]
+    max_leverage: [50.0]
+    rebal_freq: [21]
+    cov_lookback: [126]
+    max_portfolio_scale: [2.0]
+validation:
+  top_k: 4

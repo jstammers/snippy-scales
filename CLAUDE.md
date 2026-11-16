@@ -230,7 +230,10 @@ CME FX future's rate (`futures.to_usd`, `6B.c.0` for GBP: sync it).
 A rolled symbol's signal frame also has a `carry` column: the curve's annualised roll
 yield, `(F1/F2 - 1) × 12/months` (`futures.roll_yield`; null where the second month did
 not trade). Per-bar features reach strategies only if listed in
-`execution/strategy.py:FEATURE_COLUMNS`. `TrendCarry` (`trend-carry`) uses it.
+`execution/strategy.py:FEATURE_COLUMNS`. `.ROLL` frames (not `.VROLL`) also carry
+`second_return`, the daily return of the second-nearby contract
+(`futures.second_nearby_return`), for basis-momentum. `TrendCarry` (`trend-carry`) uses
+both.
 
 Targets are in units of equity; `SignalStrategy` holds
 `target × weight × equity / (close × multiplier)` contracts, filled at the bar close.

@@ -25,6 +25,15 @@ The position is the average of the last *H* = ``rebal_freq`` daily targets. That
 the book of *H* tranches, each rebalanced every *H* bars on a different day, so
 the result does not depend on which day of the month the rebalance falls on.
 
+* **Basis-momentum** (Boons & Prado, 2019), for commodities: the past return of the
+  nearby contract minus that of the second-nearby one (the ``second_return`` column,
+  :func:`snippy_scales.data.futures.second_nearby_return`). The two contracts share
+  the spot price, so the difference isolates how the *slope* of the curve has been
+  moving: it is high when nearby supply has been getting scarcer relative to deferred
+  supply. Contracts in the top third of the commodity cross-section are bought and
+  the bottom third sold, added to the trend and carry signal with weight
+  ``basis_weight``.
+
 With ``portfolio_vol_target`` set, the whole book is then scaled each bar so that its
 **ex-ante** volatility (today's positions applied to the last ``cov_lookback`` bars
 of returns, so correlations between positions count) equals the target. Per-instrument
@@ -63,6 +72,7 @@ ASSET_CLASSES: dict[str, str] = {
 }
 
 _MIN_GROUP = 2  # a relative signal needs a peer
+_MIN_RANKED = 3  # a long, a short and something in between
 
 
 def asset_class(symbol: str) -> str:
@@ -111,6 +121,23 @@ class TrendCarry(MultiAssetStrategy):
             target.
         groups: ``symbol -> peer group`` for the relative carry signal. Defaults to
             the asset class of each futures root (:func:`asset_class`).
+        trend_weight: Weight of the blended trend and carry signal (default 1). ``0``
+            with a positive ``basis_weight`` trades basis-momentum alone.
+        basis_weight: Weight of the basis-momentum signal, added to the trend and
+            carry signal (default 0: off). ``1`` gives each ranked commodity a
+            position the size of a full trend position.
+        basis_lookback: Bars over which the nearby and second-nearby returns are
+            compared (default 252).
+        basis_groups: Peer groups whose members are ranked on basis-momentum,
+            comma-separated (default: the three commodity classes). The ranking is
+            pooled over all of them.
+        basis_quantile: Fraction of the ranked contracts bought, and sold (default a
+            third).
+        long_only: Peer groups (asset classes by default) whose trend signal is
+            long-or-flat, comma-separated (``"equity"``, ``"equity,bond"``): a negative
+            trend holds no position instead of a short one. Assets that pay a risk
+            premium tend to lose on the short side of a trend rule. Empty (default)
+            trades every group both ways. The carry signal is not affected.
         portfolio_vol_target: Annualised volatility the whole book is scaled to,
             assuming capital is split equally over the symbols (the engines'
             default). ``0`` (default) leaves the book unscaled.
@@ -119,7 +146,8 @@ class TrendCarry(MultiAssetStrategy):
             spell cannot lever the book without limit.
 
     Frames without a ``carry`` column (or with null carry) get a zero carry signal,
-    as does a symbol with no peer that has carry on that date.
+    as does a symbol with no peer that has carry on that date. Frames without a
+    ``second_return`` column are not ranked on basis-momentum.
 
     Raises:
         ValueError: On invalid parameter values.
@@ -136,6 +164,12 @@ class TrendCarry(MultiAssetStrategy):
         max_leverage: float = 50.0,
         rebal_freq: int = 21,
         groups: dict[str, str] | None = None,
+        trend_weight: float = 1.0,
+        basis_weight: float = 0.0,
+        basis_lookback: int = 252,
+        basis_groups: str = "energy,metal,agriculture",
+        basis_quantile: float = 1.0 / 3.0,
+        long_only: str = "",
         portfolio_vol_target: float = 0.0,
         cov_lookback: int = 126,
         max_portfolio_scale: float = 2.0,
@@ -156,6 +190,12 @@ class TrendCarry(MultiAssetStrategy):
             raise ValueError(f"max_leverage must be positive, got {max_leverage}")
         if rebal_freq < 1:
             raise ValueError(f"rebal_freq must be ≥ 1, got {rebal_freq}")
+        if trend_weight < 0 or basis_weight < 0:
+            raise ValueError("trend_weight and basis_weight must be ≥ 0")
+        if basis_lookback < 2:  # noqa: PLR2004 — a comparison of two returns needs a window
+            raise ValueError(f"basis_lookback must be ≥ 2, got {basis_lookback}")
+        if not 0.0 < basis_quantile <= 0.5:  # noqa: PLR2004 — the two legs must not overlap
+            raise ValueError(f"basis_quantile must be in (0, 0.5], got {basis_quantile}")
         if portfolio_vol_target < 0:
             raise ValueError(f"portfolio_vol_target must be ≥ 0, got {portfolio_vol_target}")
         if cov_lookback < 2:  # noqa: PLR2004 — a variance needs two returns
@@ -172,6 +212,12 @@ class TrendCarry(MultiAssetStrategy):
         self.max_leverage = max_leverage
         self.rebal_freq = rebal_freq
         self.groups = groups
+        self.trend_weight = trend_weight
+        self.basis_weight = basis_weight
+        self.basis_lookback = basis_lookback
+        self.basis_groups = basis_groups
+        self.basis_quantile = basis_quantile
+        self.long_only = long_only
         self.portfolio_vol_target = portfolio_vol_target
         self.cov_lookback = cov_lookback
         self.max_portfolio_scale = max_portfolio_scale
@@ -182,7 +228,8 @@ class TrendCarry(MultiAssetStrategy):
         Args:
             multi_bars: ``symbol -> bars``, time-aligned and of equal length, with a
                 ``close`` column (null where the symbol is not listed) and optionally
-                a ``carry`` column (annualised roll yield).
+                ``carry`` (annualised roll yield) and ``second_return`` (daily return
+                of the second-nearby contract) columns.
 
         Returns:
             ``symbol -> position`` Series of the same length; zero while a signal
@@ -198,10 +245,20 @@ class TrendCarry(MultiAssetStrategy):
 
         close = self._matrix(multi_bars, "close")
         listed = np.isfinite(close)
-        signal = (1.0 - self.carry_weight) * self._trend(close)
+        trend = self._trend(close)
+        flat_shorts = {g.strip() for g in self.long_only.split(",") if g.strip()}
+        if flat_shorts:
+            groups = self.groups or {}
+            held_long = np.array([groups.get(s, asset_class(s)) in flat_shorts for s in symbols])
+            trend = np.where(held_long[None, :], np.maximum(trend, 0.0), trend)
+        signal = (1.0 - self.carry_weight) * trend
         if self.carry_weight > 0.0:
             carry = self._matrix(multi_bars, "carry")
             signal = signal + self.carry_weight * self._relative_carry(carry, listed, symbols)
+        signal = self.trend_weight * signal
+        if self.basis_weight > 0.0:
+            second = self._matrix(multi_bars, "second_return")
+            signal = signal + self.basis_weight * self._basis_momentum(close, second, symbols)
 
         daily = np.where(listed, signal * self._leverage(close), 0.0)
         positions = _rolling_nanmean(daily, self.rebal_freq, 1)
@@ -253,6 +310,42 @@ class TrendCarry(MultiAssetStrategy):
                 mean = np.where(valid, block, 0.0).sum(axis=1, keepdims=True) / count
             relative = np.where(valid & (count >= _MIN_GROUP), block - mean, 0.0)
             out[:, cols] = np.sign(relative)
+        return out
+
+    def _basis_momentum(
+        self, close: np.ndarray, second: np.ndarray, symbols: list[str]
+    ) -> np.ndarray:
+        """+1 / −1 for the top / bottom ``basis_quantile`` of basis-momentum; else 0.
+
+        The score is the compounded *basis_lookback*-bar return of the held (nearby)
+        contract minus that of the second-nearby contract. A symbol is ranked on a
+        bar only if it belongs to ``basis_groups`` and both returns exist on at least
+        80% of the window; at least three ranked symbols are needed.
+        """
+        window = self.basis_lookback
+        need = max(2, int(0.8 * window))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            nearby = np.vstack([np.full((1, close.shape[1]), np.nan), close[1:] / close[:-1] - 1.0])
+            log_near = np.log1p(np.where(nearby > -1.0, nearby, np.nan))
+            log_far = np.log1p(np.where(second > -1.0, second, np.nan))
+        # Mean log return x window = log of the compounded return over a full window.
+        near = np.expm1(_rolling_nanmean(log_near, window, need) * window)
+        far = np.expm1(_rolling_nanmean(log_far, window, need) * window)
+        score = near - far
+
+        wanted = {g.strip() for g in self.basis_groups.split(",") if g.strip()}
+        groups = self.groups or {}
+        member = np.array([groups.get(s, asset_class(s)) in wanted for s in symbols])
+        score = np.where(member[None, :], score, np.nan)
+        out = np.zeros_like(score)
+        for t in range(len(score)):
+            valid = np.flatnonzero(np.isfinite(score[t]))
+            if valid.size < _MIN_RANKED:
+                continue
+            order = valid[np.argsort(score[t, valid], kind="stable")]
+            k = max(1, int(valid.size * self.basis_quantile))
+            out[t, order[:k]] = -1.0
+            out[t, order[-k:]] = 1.0
         return out
 
     def _portfolio_scale(self, positions: np.ndarray, close: np.ndarray) -> np.ndarray:

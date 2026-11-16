@@ -58,6 +58,51 @@ it falls on, and for slow signals on a few dozen instruments that choice alone c
 move a decade's Sharpe ratio by several tenths. Tranching earns the average over
 the possible rebalance days and removes the luck.
 
+## Basis-momentum (commodities)
+
+For a commodity, the nearby and the second-nearby contract are claims on the same
+physical good at two dates, so their returns differ only through the change in the
+slope of the curve between them. **Basis-momentum** (Boons & Prado, 2019) is the
+past return of the nearby contract minus that of the second-nearby one over
+`basis_lookback` bars:
+
+$$
+BM_{i,t} = \prod_{s=t-L+1}^{t}\bigl(1 + r^{(1)}_{i,s}\bigr)
+         - \prod_{s=t-L+1}^{t}\bigl(1 + r^{(2)}_{i,s}\bigr).
+$$
+
+* $r^{(1)}$ is the return of the contract held by the rolled series, and $r^{(2)}$
+  the `second_return` column: the daily return of the contract that was second
+  nearby at the previous close (`data.futures.second_nearby_return`). Each is the
+  return of one contract, never the jump between two.
+* It is high when the front of the curve has been steepening into backwardation,
+  which happens when nearby supply is scarce and when the dealers who intermediate
+  between producers hedging far out and speculators trading the front are short of
+  capacity. The premium is the price of that intermediation, and is distinct from
+  carry (the *level* of the slope) and from momentum (the return of the commodity
+  itself, which cancels in the difference).
+* Each bar, the commodities with a valid score are ranked together. The top
+  `basis_quantile` are bought and the bottom sold, each at a full volatility-targeted
+  position, and the result is added to the trend and carry signal with weight
+  `basis_weight`:
+  $s_{i,t} \leftarrow w_T\, s_{i,t} + w_B\, b_{i,t}$, with $b \in \{-1, 0, +1\}$.
+* Only `.ROLL` symbols have the feature. Volume-rolled symbols (`.VROLL`) do not:
+  their two series are the two most traded contracts, not the two nearest.
+
+The published result is for 21 commodities over 1959–2014. The paper finds
+basis-momentum prices the cross-section of commodity returns better than carry or
+momentum, and that it is nearly uncorrelated with both.
+
+## Long-or-flat groups
+
+`long_only` names asset classes whose trend signal is clipped at zero: a negative
+trend holds no position instead of a short one. Equity indices and bonds pay a risk
+premium for being held, so a short position gives that premium up, and equity
+sell-offs tend to reverse faster than a slow trend signal can follow. The carry signal
+is unchanged. With `long_only = "equity"` the strategy is long equities in an uptrend
+and out of them in a downtrend, while still trading currencies and commodities both
+ways.
+
 ## Portfolio volatility target
 
 Sizing each position to 40% volatility fixes every position's risk but not the
@@ -89,6 +134,12 @@ scale, so the mix of positions is unchanged.
 | `max_leverage` | 50 | Cap on `vol_target / volatility` |
 | `rebal_freq` | 21 | Holding period $H$ in bars (number of tranches) |
 | `groups` | asset class | Peer group of each symbol for the carry signal |
+| `trend_weight` | 1 | Weight $w_T$ of the trend and carry signal |
+| `basis_weight` | 0 (off) | Weight $w_B$ of the basis-momentum signal |
+| `basis_lookback` | 252 | Bars over which nearby and second-nearby returns are compared |
+| `basis_groups` | commodities | Asset classes ranked on basis-momentum |
+| `basis_quantile` | 1/3 | Fraction of ranked contracts bought, and sold |
+| `long_only` | "" | Asset classes traded long-or-flat, comma-separated |
 | `portfolio_vol_target` | 0 (off) | Annualised volatility the whole book is scaled to |
 | `cov_lookback` | 126 | Bars of returns behind the book's ex-ante volatility |
 | `max_portfolio_scale` | 2 | Cap on the book-level scale $k_{\max}$ |

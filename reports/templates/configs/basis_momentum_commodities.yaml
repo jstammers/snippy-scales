@@ -1,0 +1,61 @@
+# Basis-momentum (Boons & Prado 2019) on its own, on 21 commodity futures.
+#   algo report new basis-momentum-commodities --from reports/templates/configs/basis_momentum_commodities.yaml
+#   algo report build basis-momentum-commodities
+name: basis-momentum-commodities
+title: Basis-momentum on 21 commodity futures
+strategy: trend-carry
+question: >-
+  Does buying the commodities whose nearby contract has outrun the second-nearby one
+  over the past year, and selling those where it has lagged, earn a positive
+  risk-adjusted return out of sample and after costs?
+data:
+  symbols:
+    - CL.ROLL
+    - HO.ROLL
+    - RB.ROLL
+    - NG.ROLL
+    - GC.ROLL
+    - SI.ROLL
+    - HG.ROLL
+    - ZC.ROLL
+    - ZS.ROLL
+    - ZW.ROLL
+    - KE.ROLL
+    - ZL.ROLL
+    - ZM.ROLL
+    - LE.ROLL
+    - HE.ROLL
+    - GF.ROLL
+    - BRN.IFEU.ROLL
+    - G.IFEU.ROLL
+    - C.IFEU.ROLL
+    - RC.IFEU.ROLL
+    - W.IFEU.ROLL
+  venue: GLBX
+  schema: ohlcv-1d
+  benchmark: CL.ROLL
+  example_symbol: CL.ROLL
+evaluation:
+  n_splits: 5
+  test_size: 0.15
+  min_train: 252
+  initial_capital: 1000000000
+  commission_rate: 0.0
+  commission_per_contract: 2.0
+  slippage_prob: 0.0
+  rebalance_band: 0.0
+  leverage: 20.0
+screening:
+  engine: vector
+  sampler: grid
+  space:
+    trend_weight: [0.0]                 # basis-momentum alone
+    basis_weight: [1.0]
+    basis_lookback: [189, 252]
+    carry_weight: [0.0]
+    vol_target: [0.40]
+    vol_lookback: [63]
+    max_leverage: [50.0]
+    rebal_freq: [21]
+validation:
+  top_k: 2
